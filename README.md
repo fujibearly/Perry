@@ -40,6 +40,8 @@ Experience an interactive Chat-REPL with features like tab autocompletion, multi
 
 Editor commands from the `editor` configuration, `VISUAL`, or `EDITOR` may include arguments. They use POSIX shell-word quoting on every platform, so executable paths containing spaces must be quoted, for example `"C:\Program Files\Helix\hx.exe" --wait`.
 
+Use `--no-spinner` to suppress animated progress indicators, which is useful when piping output or running in non-interactive environments.
+
 ![aichat-repl](https://github.com/user-attachments/assets/218fab08-cdae-4c3b-bcf8-39b6651f1362)
 
 ### Shell Assistant
@@ -64,64 +66,7 @@ Accept diverse input forms such as stdin, local files and directories, and remot
 | External commands | ```aichat -f '`git diff`'```         | ```.file `git diff` ```          |
 | Combine Inputs    | `aichat -f dir/ -f data.txt explain` | `.file dir/ data.txt -- explain` |
 
-### Token Usage and Cost
-
-Use `--show-cost` to print provider-reported token usage and the estimated USD cost after a response:
-
-```sh
-aichat --show-cost "Explain this code"
-```
-
-Set `show_cost: true` in the config file to enable it by default, including in the REPL. The summary is written to stderr so response text on stdout remains safe to pipe. Cost requires both usage data from the provider and input/output prices in the model catalog.
-
-For OpenAI Responses multi-agent runs, the estimate is calculated separately for each continuation request. It accounts for cached input, cache writes, the actual service tier, GPT-5.6 long-context multipliers, and billable hosted web-search actions. Search actions are charged at the cataloged $0.01 per call; page opens and in-page finds are not counted as additional searches. If an exact calculation is not possible, the cost is reported as unavailable instead of assuming a pricing tier. Cost is also unavailable for custom or regional OpenAI `api_base` endpoints because their pricing may differ from the public API catalog.
-
-The API reports response-level usage for the entire agent tree, not per-agent usage, so AIChat does not invent per-agent token or cost totals. If a later continuation request fails or the run is aborted, completed and otherwise billable response payloads are printed as partial usage before the error.
-
-### OpenAI Responses Multi-agent
-
-GPT-5.6 models can use OpenAI's hosted multi-agent orchestration in one-shot command mode. For a research-oriented default, add this to `config.yaml`:
-
-```yaml
-multi_agent:
-  hosted_tools:
-    - type: web_search
-      search_context_size: high
-      external_web_access: true
-      return_token_budget: default
-  tool_choice: required
-  max_output_tokens: 16000
-  service_tier: default
-```
-
-Then the hosted web-search tool is available to the root agent and every subagent:
-
-```sh
-aichat --show-cost --multi-agent -m openai:gpt-5.6-sol:high \
-  "perform siem systems market analysis"
-```
-
-`--web-search` is a CLI shortcut that enables the default hosted web-search configuration for one run. `--max-output-tokens`, `--service-tier`, and `--max-concurrent-subagents` override their config values. OpenAI currently does not support `max_tool_calls` when multi-agent is enabled, so AIChat does not expose that control.
-
-`--show-agent-trace` writes a sanitized structural trace to stderr. It shows response turns, agent paths, collaboration actions, message direction, phases, and tool names without printing encrypted messages, prompts, tool arguments, tool results, search queries, or search results. Set `multi_agent.show_trace: true` to enable it in the config. Web citations and returned sources are rendered as a deduplicated Markdown `Sources:` list.
-
-Subagents receive both the local developer functions selected by `use_tools` and configured hosted tools. A local function named `web_search` remains distinct from the OpenAI-hosted `web_search` tool. First-class hosted tools require the canonical `https://api.openai.com/v1/responses` endpoint.
-
-Multi-agent HTTP runs use Responses server-sent events and take the complete response from the terminal `response.completed`, `response.failed`, or `response.incomplete` event. AIChat disables automatic EventSource reconnection so a dropped stream cannot silently replay a potentially billable POST. A transient HTTP error may be retried only before the stream opens; later transport failures include the response position when available and remain non-retryable. Responses patches must preserve `stream: true`.
-
-Advanced transports can patch Responses requests separately from Chat Completions:
-
-```yaml
-clients:
-  - type: openai
-    patch:
-      responses:
-        'gpt-5\.6-.*':
-          headers:
-            x-example: value
-```
-
-The equivalent environment override is `AICHAT_PATCH_OPENAI_RESPONSES`. Responses patches are applied after AIChat builds the first-class body; JSON Merge Patch replaces arrays, so a patched `tools` array replaces both hosted and developer tools. See the [OpenAI multi-agent guide](https://developers.openai.com/api/docs/guides/responses-multi-agent) and [web-search guide](https://developers.openai.com/api/docs/guides/tools-web-search) for the server-side contract.
+The `--files` flag accepts shell-expanded paths (your shell expands globs before AIChat sees them). Use `--` to separate file arguments from the prompt text. This is equivalent to multiple `-f` flags but more convenient for wildcard patterns.
 
 ### Role
 
@@ -240,6 +185,130 @@ A web platform to compare different LLMs side-by-side.
 
 ![aichat-llm-arena](https://github.com/user-attachments/assets/edabba53-a1ef-4817-9153-38542ffbfec6)
 
+## Advanced
+
+### Reasoning Effort
+
+Control how much reasoning a model applies by appending an effort level to the model name:
+
+```sh
+aichat -m openai:gpt-5.6-sol:high "Prove that sqrt(2) is irrational"
+aichat -m claude:claude-opus-4-7:medium "Summarize this paper"
+aichat -m bedrock:us.anthropic.claude-opus-4-7:low "Quick answer"
+```
+
+The syntax is `provider:model-name:effort`. When reasoning is active, `temperature` and `top_p` are automatically removed from the request since they conflict with structured reasoning.
+
+Supported providers and effort levels:
+
+| Provider | Effort Levels | Request Shape |
+| -------- | ------------- | ------------- |
+| OpenAI | none, low, medium, high, xhigh, max | `reasoning_effort` parameter |
+| Claude | low, medium, high, xhigh, max | `thinking.type: adaptive` + `output_config.effort` |
+| VertexAI (Claude) | low, medium, high, xhigh, max | Same as Claude |
+| Bedrock (Claude) | low, medium, high, xhigh, max | Nested in `additionalModelRequestFields` |
+| Gemini / VertexAI (Gemini) | low, medium, high | `generationConfig.thinkingConfig.thinkingLevel` |
+
+If a model does not support the requested effort, AIChat rejects the request locally before contacting the API. Models without cataloged `reasoning_efforts` cannot use effort suffixes unless configured explicitly.
+
+### Token Usage and Cost
+
+Use `--show-cost` to print provider-reported token usage and the estimated USD cost after a response:
+
+```sh
+aichat --show-cost "Explain this code"
+```
+
+Set `show_cost: true` in the config file to enable it by default, including in the REPL. The summary is written to stderr so response text on stdout remains safe to pipe. Cost requires both usage data from the provider and input/output prices in the model catalog.
+
+For OpenAI Responses multi-agent runs, the estimate is calculated separately for each continuation request. It accounts for cached input, cache writes, the actual service tier, GPT-5.6 long-context multipliers, and billable hosted web-search actions. Search actions are charged at the cataloged $0.01 per call; page opens and in-page finds are not counted as additional searches. If an exact calculation is not possible, the cost is reported as unavailable instead of assuming a pricing tier. Cost is also unavailable for custom or regional OpenAI `api_base` endpoints because their pricing may differ from the public API catalog.
+
+The API reports response-level usage for the entire agent tree, not per-agent usage, so AIChat does not invent per-agent token or cost totals. If a later continuation request fails or the run is aborted, completed and otherwise billable response payloads are printed as partial usage before the error.
+
+### OpenAI Responses Multi-agent
+
+GPT-5.6 models can use OpenAI's hosted multi-agent orchestration in one-shot command mode. For a research-oriented default, add this to `config.yaml`:
+
+```yaml
+multi_agent:
+  hosted_tools:
+    - type: web_search
+      search_context_size: high
+      external_web_access: true
+      return_token_budget: default
+  tool_choice: required
+  max_output_tokens: 16000
+  service_tier: default
+```
+
+Then the hosted web-search tool is available to the root agent and every subagent:
+
+```sh
+aichat --show-cost --multi-agent -m openai:gpt-5.6-sol:high \
+  "perform siem systems market analysis"
+```
+
+`--web-search` is a CLI shortcut that enables the default hosted web-search configuration for one run. `--max-output-tokens`, `--service-tier`, and `--max-concurrent-subagents` override their config values. OpenAI currently does not support `max_tool_calls` when multi-agent is enabled, so AIChat does not expose that control.
+
+`--show-agent-trace` writes a sanitized structural trace to stderr. It shows response turns, agent paths, collaboration actions, message direction, phases, and tool names without printing encrypted messages, prompts, tool arguments, tool results, search queries, or search results. Set `multi_agent.show_trace: true` to enable it in the config. Web citations and returned sources are rendered as a deduplicated Markdown `Sources:` list.
+
+Subagents receive both the local developer functions selected by `use_tools` and configured hosted tools. A local function named `web_search` remains distinct from the OpenAI-hosted `web_search` tool. First-class hosted tools require the canonical `https://api.openai.com/v1/responses` endpoint.
+
+Multi-agent HTTP runs use Responses server-sent events and take the complete response from the terminal `response.completed`, `response.failed`, or `response.incomplete` event. AIChat disables automatic EventSource reconnection so a dropped stream cannot silently replay a potentially billable POST. A transient HTTP error may be retried only before the stream opens; later transport failures include the response position when available and remain non-retryable. Responses patches must preserve `stream: true`.
+
+Advanced transports can patch Responses requests separately from Chat Completions:
+
+```yaml
+clients:
+  - type: openai
+    patch:
+      responses:
+        'gpt-5\.6-.*':
+          headers:
+            x-example: value
+```
+
+The equivalent environment override is `AICHAT_PATCH_OPENAI_RESPONSES`. Responses patches are applied after AIChat builds the first-class body; JSON Merge Patch replaces arrays, so a patched `tools` array replaces both hosted and developer tools. See the [OpenAI multi-agent guide](https://developers.openai.com/api/docs/guides/responses-multi-agent) and [web-search guide](https://developers.openai.com/api/docs/guides/tools-web-search) for the server-side contract.
+
+### Error Handling & Retries
+
+AIChat automatically retries requests that fail with transient errors:
+
+- **Rate limits** (HTTP 429) and **server errors** (HTTP 5xx) are retried up to 2 times.
+- If the provider includes a retry delay (e.g. `Retry-After`), AIChat honors it, capped at 30 seconds. Otherwise, exponential backoff is used (1s, 2s).
+- **Non-transient errors** (authentication failures, bad requests, context length exceeded) fail immediately without retry.
+- **Streaming:** only the initial connection is retried. Once the first event is delivered, mid-stream failures are not retried to avoid duplicating output.
+- **Truncated streams** are rejected as errors. If a provider drops the connection before sending a completion signal, AIChat reports it as a failure rather than silently returning partial data.
+
+No configuration is required. Retry behavior is automatic and logged at debug level (`AICHAT_LOG_LEVEL=debug`).
+
+### Configuration References
+
+Configuration values support environment variable references, so you can keep secrets out of config files:
+
+```yaml
+clients:
+  - type: openai
+    api_key: ${OPENAI_API_KEY}
+  - type: claude
+    api_key: $ANTHROPIC_API_KEY
+```
+
+Syntax:
+- `$VAR` or `${VAR}` — replaced with the environment variable value
+- `$$` — literal dollar sign (escape)
+- Missing or empty variables produce a clear error at startup
+
+Values are trimmed of surrounding whitespace after resolution. The Claude client also accepts `ANTHROPIC_API_KEY` as a fallback when the conventional `CLAUDE_API_KEY` is not set.
+
+### Security
+
+For self-hosted deployments using `--serve`:
+
+- **Markdown sanitization:** The Playground and Arena web pages sanitize all rendered Markdown with [DOMPurify](https://github.com/cure53/DOMPurify) (pinned version, subresource integrity). The sanitizer loads before the Markdown parser and the page fails closed if it is unavailable.
+- **Loader hardening:** Document loader placeholder expansion (`$1`, `$2`) is processed character-by-character to prevent shell injection. Paths beginning with `-` are prefixed with `./` to avoid being interpreted as flags.
+- **Tool error containment:** When a tool call fails (unknown tool, invalid arguments, non-zero exit), the failure is returned as a structured result to the model rather than crashing the process.
+
 ## Custom Themes
 
 AIChat supports custom dark and light themes, which highlight response text and code blocks.
@@ -258,6 +327,7 @@ AIChat supports custom dark and light themes, which highlight response text and 
 - [Custom Theme](https://github.com/sigoden/aichat/wiki/Custom-Theme)
 - [Custom REPL Prompt](https://github.com/sigoden/aichat/wiki/Custom-REPL-Prompt)
 - [FAQ](https://github.com/sigoden/aichat/wiki/FAQ)
+- [Changelog](CHANGELOG.md)
 
 ## License
 

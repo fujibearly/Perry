@@ -107,6 +107,13 @@ save_shell_history: true                    # Whether to save shell execution co
 sync_models_url: https://raw.githubusercontent.com/ei-grad/aichat/refs/heads/main/models.yaml
 
 # ---- clients ----
+# Client values support environment variable references so secrets stay out of this file:
+#   api_key: $MY_API_KEY          # Simple reference
+#   api_key: ${MY_API_KEY}        # Braced reference (equivalent)
+#   literal: $$NOT_A_VARIABLE     # Escaped dollar sign (literal $)
+# Missing or empty variables produce a startup error with the field name and variable.
+# The Claude client also accepts ANTHROPIC_API_KEY as a fallback for api_key.
+
 clients:
   # All clients have the following configuration:
   # - type: xxxx
