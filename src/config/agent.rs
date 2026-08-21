@@ -49,11 +49,43 @@ impl Agent {
             AgentConfig::new(&config.read())
         };
         let mut definition = AgentDefinition::load(&definition_file_path)?;
-        let functions = if functions_file_path.exists() {
+        #[allow(unused_mut)]
+        let mut functions = if functions_file_path.exists() {
             Functions::init(&functions_file_path)?
         } else {
             Functions::default()
         };
+
+        // Load agent-level MCP tools, merged with global MCP servers (agent wins on name collision)
+        #[cfg(feature = "mcp")]
+        {
+            let global_servers = &config.read().mcp_servers;
+            let agent_servers = &agent_config.mcp_servers;
+            if !global_servers.is_empty() || !agent_servers.is_empty() {
+                // Merge: start with global, override with agent-level on name collision
+                let mut merged: indexmap::IndexMap<String, crate::mcp::McpServerConfig> =
+                    global_servers
+                        .iter()
+                        .map(|s| (s.name.clone(), s.clone()))
+                        .collect();
+                for s in agent_servers {
+                    merged.insert(s.name.clone(), s.clone());
+                }
+                let servers: Vec<_> = merged.into_values().collect();
+                let cache_dir = Config::mcp_cache_dir();
+                match crate::mcp::load_mcp_tools(&servers, &cache_dir) {
+                    Ok(mcp_tools) => {
+                        let declarations: Vec<_> =
+                            mcp_tools.values().map(|e| e.declaration.clone()).collect();
+                        functions.extend(declarations);
+                    }
+                    Err(e) => {
+                        warn!("Failed to load MCP tools for agent '{}': {e}", name);
+                    }
+                }
+            }
+        }
+
         definition.replace_tools_placeholder(&functions);
 
         agent_config.load_envs(&definition.name);
@@ -383,6 +415,9 @@ pub struct AgentConfig {
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub variables: AgentVariables,
+    #[cfg(feature = "mcp")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
 }
 
 impl AgentConfig {

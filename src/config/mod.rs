@@ -414,6 +414,10 @@ pub struct Config {
     pub mapping_tools: IndexMap<String, String>,
     pub use_tools: Option<String>,
 
+    #[cfg(feature = "mcp")]
+    #[serde(default)]
+    pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
+
     pub multi_agent: MultiAgentConfig,
 
     pub repl_prelude: Option<String>,
@@ -463,6 +467,9 @@ pub struct Config {
     pub model: Model,
     #[serde(skip)]
     pub functions: Functions,
+    #[cfg(feature = "mcp")]
+    #[serde(skip)]
+    pub mcp_tools: indexmap::IndexMap<String, crate::mcp::McpToolEntry>,
     #[serde(skip)]
     pub working_mode: WorkingMode,
     #[serde(skip)]
@@ -497,6 +504,9 @@ impl Default for Config {
             function_calling: true,
             mapping_tools: Default::default(),
             use_tools: None,
+
+            #[cfg(feature = "mcp")]
+            mcp_servers: Default::default(),
 
             multi_agent: Default::default(),
 
@@ -539,6 +549,8 @@ impl Default for Config {
 
             model: Default::default(),
             functions: Default::default(),
+            #[cfg(feature = "mcp")]
+            mcp_tools: Default::default(),
             working_mode: WorkingMode::Cmd,
             last_message: None,
 
@@ -679,6 +691,11 @@ impl Config {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(FUNCTIONS_DIR_NAME),
         }
+    }
+
+    #[cfg(feature = "mcp")]
+    pub fn mcp_cache_dir() -> PathBuf {
+        Self::local_path("mcp-cache")
     }
 
     pub fn functions_file() -> PathBuf {
@@ -928,6 +945,27 @@ impl Config {
         ];
         if let Ok((_, Some(log_path))) = Self::log_config(self.working_mode.is_serve()) {
             items.push(("log_path", display_path(&log_path)));
+        }
+        #[cfg(feature = "mcp")]
+        {
+            if !self.mcp_servers.is_empty() {
+                let mcp_info: Vec<String> = self
+                    .mcp_servers
+                    .iter()
+                    .filter(|s| !s.disabled)
+                    .map(|s| {
+                        let tool_count = self
+                            .mcp_tools
+                            .values()
+                            .filter(|e| e.server_name == s.name)
+                            .count();
+                        format!("{} ({tool_count} tools)", s.name)
+                    })
+                    .collect();
+                if !mcp_info.is_empty() {
+                    items.push(("mcp_servers", mcp_info.join(", ")));
+                }
+            }
         }
         let output = items
             .iter()
@@ -2013,6 +2051,17 @@ impl Config {
                         } else if declaration_names.contains(item) {
                             tool_names.insert(item.to_string());
                         }
+                        // MCP: server name matches all tools from that server (server__*)
+                        #[cfg(feature = "mcp")]
+                        {
+                            let prefix = format!("{item}__");
+                            tool_names.extend(
+                                declaration_names
+                                    .iter()
+                                    .filter(|n| n.starts_with(&prefix))
+                                    .cloned(),
+                            );
+                        }
                     }
                 }
                 functions = self
@@ -2167,6 +2216,12 @@ impl Config {
                     }
                     values.extend(self.functions.declarations().iter().map(|v| v.name.clone()));
                     values.extend(self.mapping_tools.keys().map(|v| v.to_string()));
+                    #[cfg(feature = "mcp")]
+                    {
+                        values.extend(
+                            self.mcp_servers.iter().map(|s| s.name.clone()),
+                        );
+                    }
                     values
                         .into_iter()
                         .filter(|v| !ignores.contains(v.as_str()))
@@ -2722,6 +2777,23 @@ impl Config {
 
     fn load_functions(&mut self) -> Result<()> {
         self.functions = Functions::init(&Self::functions_file())?;
+
+        #[cfg(feature = "mcp")]
+        {
+            let cache_dir = Self::mcp_cache_dir();
+            match crate::mcp::load_mcp_tools(&self.mcp_servers, &cache_dir) {
+                Ok(mcp_tools) => {
+                    let declarations: Vec<_> =
+                        mcp_tools.values().map(|e| e.declaration.clone()).collect();
+                    self.functions.extend(declarations);
+                    self.mcp_tools = mcp_tools;
+                }
+                Err(e) => {
+                    warn!("Failed to load MCP tools: {e}");
+                }
+            }
+        }
+
         Ok(())
     }
 

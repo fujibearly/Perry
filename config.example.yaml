@@ -19,6 +19,20 @@ mapping_tools:                   # Alias for a tool or toolset
   fs: 'fs_cat,fs_ls,fs_mkdir,fs_rm,fs_write'
 use_tools: null                  # Which tools to use by default. (e.g. 'fs,web_search')
 
+# ---- MCP servers ----
+# Native MCP client — spawn MCP servers as subprocesses and use their tools directly.
+# mcp_servers:
+#   - name: filesystem
+#     command: mcp-server-filesystem
+#     args: ["/home/user/projects"]
+#     env:
+#       SOME_VAR: value
+#     disabled: false
+#     timeout: 60
+#   - name: git
+#     command: mcp-server-git
+#     args: [--repository, .]
+
 # ---- multi-agent ----
 # Hosted multi-agent orchestration is disabled by default.
 multi_agent:

@@ -111,6 +111,11 @@ impl Functions {
         Ok(Self { declarations })
     }
 
+    /// Append additional declarations (e.g., from MCP servers).
+    pub fn extend(&mut self, declarations: Vec<FunctionDeclaration>) {
+        self.declarations.extend(declarations);
+    }
+
     pub fn find(&self, name: &str) -> Option<&FunctionDeclaration> {
         self.declarations.iter().find(|v| v.name == name)
     }
@@ -204,6 +209,38 @@ impl ToolCall {
     }
 
     pub fn eval(&self, config: &GlobalConfig) -> Result<Value> {
+        // Check if this is an MCP-sourced tool — route to MCP bridge if so
+        #[cfg(feature = "mcp")]
+        {
+            let config_read = config.read();
+            if let Some(entry) = config_read.mcp_tools.get(&self.name) {
+                let server_name = entry.server_name.clone();
+                let original_name = entry.original_name.clone();
+                let server_config = config_read
+                    .mcp_servers
+                    .iter()
+                    .find(|s| s.name == server_name)
+                    .cloned();
+                drop(config_read); // Release lock before blocking call
+
+                let server_config = match server_config {
+                    Some(c) => c,
+                    None => bail!("MCP server config '{}' not found for tool '{}'", server_name, self.name),
+                };
+
+                let arguments = if self.arguments.is_object() {
+                    self.arguments.clone()
+                } else if let Some(args_str) = self.arguments.as_str() {
+                    serde_json::from_str(args_str).unwrap_or_else(|_| self.arguments.clone())
+                } else {
+                    self.arguments.clone()
+                };
+
+                let timeout = std::time::Duration::from_secs(server_config.timeout);
+                return crate::mcp::call_mcp_tool(&server_config, &original_name, arguments, timeout);
+            }
+        }
+
         let (call_name, cmd_name, mut cmd_args, envs) = match &config.read().agent {
             Some(agent) => self.extract_call_config_from_agent(config, agent)?,
             None => self.extract_call_config_from_config(config)?,

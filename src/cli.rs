@@ -99,6 +99,10 @@ pub struct Cli {
     /// Sync models updates
     #[clap(long)]
     pub sync_models: bool,
+    /// Sync MCP tool cache (re-discover all configured MCP servers)
+    #[cfg(feature = "mcp")]
+    #[clap(long)]
+    pub sync_mcp: bool,
     /// List all available chat models
     #[clap(long)]
     pub list_models: bool,

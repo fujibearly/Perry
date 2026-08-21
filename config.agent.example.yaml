@@ -9,3 +9,10 @@ agent_prelude: null              # Set a session to use when starting the agent.
 instructions: null               # Override the instructions for the agent, have no effect for dynamic instructions
 variables:                       # Custom default values for the agent variables
   <key>: <value>
+
+# ---- Agent-level MCP servers ----
+# Additional MCP servers for this agent (merged with global mcp_servers; agent wins on name collision).
+# mcp_servers:
+#   - name: project-tools
+#     command: mcp-server-project
+#     args: [--workspace, .]

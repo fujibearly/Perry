@@ -2,6 +2,8 @@ mod cli;
 mod client;
 mod config;
 mod function;
+#[cfg(feature = "mcp")]
+mod mcp;
 mod rag;
 mod render;
 mod repl;
@@ -59,6 +61,12 @@ async fn main() -> Result<()> {
     };
     let info_flag = cli.info
         || cli.sync_models
+        || {
+            #[cfg(feature = "mcp")]
+            { cli.sync_mcp }
+            #[cfg(not(feature = "mcp"))]
+            { false }
+        }
         || cli.list_models
         || cli.list_roles
         || cli.list_agents
@@ -69,8 +77,12 @@ async fn main() -> Result<()> {
     let config = Arc::new(RwLock::new(Config::init(working_mode, info_flag).await?));
     if let Err(err) = run(config, cli, text).await {
         render_error(err);
+        #[cfg(feature = "mcp")]
+        mcp::shutdown_all_mcp_servers();
         std::process::exit(1);
     }
+    #[cfg(feature = "mcp")]
+    mcp::shutdown_all_mcp_servers();
     Ok(())
 }
 
@@ -83,6 +95,34 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if cli.sync_models {
         let url = config.read().sync_models_url();
         return Config::sync_models(&url, abort_signal.clone()).await;
+    }
+
+    #[cfg(feature = "mcp")]
+    if cli.sync_mcp {
+        let servers = config.read().mcp_servers.clone();
+        let cache_dir = Config::mcp_cache_dir();
+        match mcp::sync_mcp_tools(&servers, &cache_dir).await {
+            Ok(registry) => {
+                if registry.is_empty() {
+                    println!("No MCP servers configured or all disabled.");
+                } else {
+                    let mut counts: std::collections::HashMap<&str, usize> =
+                        std::collections::HashMap::new();
+                    for entry in registry.values() {
+                        *counts.entry(&entry.server_name).or_default() += 1;
+                    }
+                    println!("MCP tools synced:");
+                    for (server, count) in &counts {
+                        println!("  {server} ({count} tools)");
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("MCP sync failed: {e}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
     }
 
     if cli.list_models {
