@@ -2,7 +2,7 @@ use super::*;
 
 use crate::{
     config::{Config, GlobalConfig, Input},
-    function::{eval_tool_calls, eval_tool_calls_async, FunctionDeclaration, ToolCall, ToolResult},
+    function::{eval_tool_calls_async, FunctionDeclaration, ToolCall, ToolResult},
     render::render_stream,
     utils::*,
 };
@@ -727,7 +727,7 @@ pub async fn call_chat_completions(
     let ret = abortable_run_with_spinner(
         client.chat_completions(input.clone()),
         "Generating",
-        abort_signal,
+        abort_signal.clone(),
     )
     .await;
 
@@ -745,7 +745,7 @@ pub async fn call_chat_completions(
                 }
             }
             output.text = text;
-            Ok((output, eval_tool_calls_async(client.global_config(), tool_calls).await?))
+            Ok((output, eval_tool_calls_async(client.global_config(), tool_calls, abort_signal).await?))
         }
         Err(err) => Err(err),
     }
@@ -784,7 +784,7 @@ pub async fn call_chat_completions_streaming(
                     output_tokens: usage.output_tokens,
                     ..Default::default()
                 },
-                eval_tool_calls_async(client.global_config(), tool_calls).await?,
+                eval_tool_calls_async(client.global_config(), tool_calls, abort_signal).await?,
             ))
         }
         Err(err) => {

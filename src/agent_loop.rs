@@ -6,10 +6,13 @@
 //! external observability signals (OSC titles, status files, notifications), and a
 //! built-in planning tool.
 
-use crate::client::TokenUsage;
+use crate::client::{
+    call_chat_completions_raw, call_chat_completions_streaming_raw, ChatCompletionsOutput,
+    TokenUsage,
+};
 use crate::config::{GlobalConfig, Input};
-use crate::function::{FunctionDeclaration, JsonSchema, ToolCall, ToolResult};
-use crate::utils::AbortSignal;
+use crate::function::{eval_tool_calls_async, FunctionDeclaration, JsonSchema, ToolCall};
+use crate::utils::*;
 
 use anyhow::Result;
 use indexmap::IndexMap;
@@ -197,18 +200,102 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
 }
 
 // ---------------------------------------------------------------------------
-// Core loop (placeholder — will be fully implemented in Phase B, Task 5)
+// Core loop
 // ---------------------------------------------------------------------------
 
 /// Run the agent loop: call LLM, execute tools, iterate — up to max_turns.
 ///
-/// This is a transitional placeholder that performs a single LLM call without
-/// looping. The full iterative implementation comes in Phase B (Task 5).
-pub async fn run(_input: Input, _params: AgentLoopParams<'_>) -> Result<AgentLoopOutput> {
-    // TODO(phase-b): Replace with iterative loop implementation.
-    // For now, return empty output — callers still use the old recursive path.
+/// This is the unified loop implementation used by both CLI (`run_directive`)
+/// and REPL (`ask_inner`) when tools are configured. It replaces the old
+/// `#[async_recursion]` pattern with an iterative loop that enforces a turn
+/// budget, emits progress events, and supports the full async tool dispatch.
+pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopOutput> {
+    let max_turns = params.config.read().agent_loop.max_turns;
+    let mut current_input = input;
+    let mut total_usage = TokenUsage::default();
+    let mut last_text = String::new();
+
+    for turn in 1..=max_turns {
+        params.progress.set_turn(turn, max_turns);
+        params.progress.emit(AgentLoopEvent::TurnStart { turn, max_turns });
+
+        // On the first turn, record the initial state (matches old before_chat_completion call)
+        if turn == 1 {
+            params.config.write().before_chat_completion(&current_input)?;
+        }
+
+        // 1. Call the LLM (returns raw tool_calls, does not eval them)
+        let (output, tool_calls) = call_llm_raw(&current_input, &params).await?;
+
+        total_usage.add(output.usage());
+        last_text = output.text.clone();
+
+        if tool_calls.is_empty() {
+            // No tools → final turn, save the message
+            params
+                .config
+                .write()
+                .after_chat_completion(&current_input, &output.text, &[])?;
+            params.progress.emit(AgentLoopEvent::LoopComplete);
+            return Ok(AgentLoopOutput {
+                usage: total_usage,
+                final_text: output.text,
+            });
+        }
+
+        // Intermediate turn with tool calls — after_chat_completion is a no-op
+        // when tool_results is non-empty, but we call it for consistency with
+        // the existing pattern (it records last_message).
+        let tool_results =
+            eval_tool_calls_async(params.config, tool_calls, params.abort_signal.clone()).await?;
+
+        params
+            .config
+            .write()
+            .after_chat_completion(&current_input, &output.text, &tool_results)?;
+
+        // Merge results into next input
+        current_input = current_input.merge_tool_results(output.text, tool_results);
+
+        // Budget warning
+        if max_turns > 2 && turn >= max_turns - 2 {
+            params.progress.emit(AgentLoopEvent::BudgetWarning { turn, max_turns });
+        }
+    }
+
+    // Budget exhausted — return partial output
+    params.progress.emit(AgentLoopEvent::BudgetExhausted { max_turns });
+    eprintln!(
+        "Warning: Agent loop reached the {}-turn limit without completing. \
+         Increase with `agent_loop.max_turns` in config.yaml or AICHAT_AGENT_LOOP_MAX_TURNS=N.",
+        max_turns
+    );
+
     Ok(AgentLoopOutput {
-        usage: TokenUsage::default(),
-        final_text: String::new(),
+        usage: total_usage,
+        final_text: last_text,
     })
+}
+
+/// Call the LLM and return raw tool_calls (streaming or non-streaming based on input).
+async fn call_llm_raw(
+    input: &Input,
+    params: &AgentLoopParams<'_>,
+) -> Result<(ChatCompletionsOutput, Vec<ToolCall>)> {
+    let client = input.create_client()?;
+    let extract_code = !*IS_STDOUT_TERMINAL && params.code_mode;
+
+    if !input.stream() || extract_code {
+        call_chat_completions_raw(
+            input,
+            true,
+            extract_code,
+            client.as_ref(),
+            params.abort_signal.clone(),
+        )
+        .await
+    } else {
+        call_chat_completions_streaming_raw(input, client.as_ref(), params.abort_signal.clone())
+            .await
+    }
 }

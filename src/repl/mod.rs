@@ -7,7 +7,7 @@ use self::highlighter::ReplHighlighter;
 use self::prompt::ReplPrompt;
 
 use crate::client::{
-    call_chat_completions, call_chat_completions_streaming, format_usage_cost, TokenUsage,
+    format_usage_cost, TokenUsage,
 };
 use crate::config::{
     macro_execute, AgentVariables, AssertState, Config, GlobalConfig, Input, LastMessage, RoleLike,
@@ -719,7 +719,6 @@ pub async fn run_repl_command(
     Ok(false)
 }
 
-#[async_recursion::async_recursion]
 async fn ask(
     config: &GlobalConfig,
     abort_signal: AbortSignal,
@@ -734,7 +733,6 @@ async fn ask(
     Ok(())
 }
 
-#[async_recursion::async_recursion]
 async fn ask_inner(
     config: &GlobalConfig,
     abort_signal: AbortSignal,
@@ -751,32 +749,18 @@ async fn ask_inner(
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    let client = input.create_client()?;
-    config.write().before_chat_completion(&input)?;
-    let (output, tool_results) = if input.stream() {
-        call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await?
-    } else {
-        call_chat_completions(&input, true, false, client.as_ref(), abort_signal.clone()).await?
+    let (progress, _event_rx) = crate::agent_loop::AgentLoopProgress::live();
+    let params = crate::agent_loop::AgentLoopParams {
+        config,
+        abort_signal,
+        code_mode: false,
+        progress,
     };
-    config
-        .write()
-        .after_chat_completion(&input, &output.text, &tool_results)?;
-    let mut usage = output.usage();
-    if !tool_results.is_empty() {
-        let next_usage = ask_inner(
-            config,
-            abort_signal,
-            input.merge_tool_results(output.text, tool_results),
-            false,
-        )
-        .await?;
-        usage.add(next_usage);
-        Ok(usage)
-    } else {
-        Config::maybe_autoname_session(config.clone());
-        Config::maybe_compress_session(config.clone());
-        Ok(usage)
-    }
+    let output = crate::agent_loop::run(input, params).await?;
+
+    Config::maybe_autoname_session(config.clone());
+    Config::maybe_compress_session(config.clone());
+    Ok(output.usage)
 }
 
 fn unknown_command() -> Result<()> {

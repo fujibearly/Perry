@@ -369,45 +369,21 @@ async fn start_directive(
     Ok(())
 }
 
-#[async_recursion::async_recursion]
 async fn run_directive(
     config: &GlobalConfig,
     input: Input,
     code_mode: bool,
     abort_signal: AbortSignal,
 ) -> Result<TokenUsage> {
-    let client = input.create_client()?;
-    let extract_code = !*IS_STDOUT_TERMINAL && code_mode;
-    config.write().before_chat_completion(&input)?;
-    let (output, tool_results) = if !input.stream() || extract_code {
-        call_chat_completions(
-            &input,
-            true,
-            extract_code,
-            client.as_ref(),
-            abort_signal.clone(),
-        )
-        .await?
-    } else {
-        call_chat_completions_streaming(&input, client.as_ref(), abort_signal.clone()).await?
+    let (progress, _event_rx) = crate::agent_loop::AgentLoopProgress::live();
+    let params = crate::agent_loop::AgentLoopParams {
+        config,
+        abort_signal,
+        code_mode,
+        progress,
     };
-    config
-        .write()
-        .after_chat_completion(&input, &output.text, &tool_results)?;
-
-    let mut usage = output.usage();
-
-    if !tool_results.is_empty() {
-        let next_usage = run_directive(
-            config,
-            input.merge_tool_results(output.text, tool_results),
-            code_mode,
-            abort_signal,
-        )
-        .await?;
-        usage.add(next_usage);
-    }
-    Ok(usage)
+    let output = crate::agent_loop::run(input, params).await?;
+    Ok(output.usage)
 }
 
 async fn run_multi_agent_directive(

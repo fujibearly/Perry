@@ -39,6 +39,7 @@ pub fn eval_tool_calls_preserving_results(
 pub async fn eval_tool_calls_async(
     config: &GlobalConfig,
     calls: Vec<ToolCall>,
+    _abort_signal: AbortSignal,
 ) -> Result<Vec<ToolResult>> {
     let mut output = vec![];
     if calls.is_empty() {
