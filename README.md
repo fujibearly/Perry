@@ -185,6 +185,60 @@ A web platform to compare different LLMs side-by-side.
 
 ![aichat-llm-arena](https://github.com/user-attachments/assets/edabba53-a1ef-4817-9153-38542ffbfec6)
 
+## Fork Enhancements
+
+This fork adds three major capabilities to the upstream aichat:
+
+### Native MCP Bridge
+
+Replaced the Node.js MCP bridge with an in-process Rust implementation. MCP servers are spawned as child processes, communicate via JSON-RPC 2.0 over stdio, and their tools appear identically to shell-exec tools — no new abstractions.
+
+```yaml
+mcp_servers:
+  - name: filesystem
+    command: mcp-server-filesystem
+    args: ["/home/user/projects"]
+  - name: git
+    command: mcp-server-git
+    args: [--repository, .]
+```
+
+- Cached manifests for fast startup (`--sync-mcp` to refresh)
+- Behind `mcp` cargo feature flag (default on)
+- Agent-level MCP servers supported
+
+### Provider-Agnostic Agent Loop
+
+An iterative agent loop that makes **every provider** capable of multi-step agentic work — not just OpenAI. Works with Claude, Gemini (via OpenRouter), Cohere, DeepSeek, local models via Ollama, or any provider that returns `tool_calls`.
+
+- **Parallel tool execution** — multiple tool calls run concurrently (semaphore-bounded, default 8)
+- **Turn budget** — configurable `max_turns` (default 20) prevents runaway recursion
+- **Sub-agent delegation** — tools marked `agent: true` spawn aichat as a subprocess (own PID, session, observability)
+- **Progress events** — structured events for trace rendering, spinners, external tools
+- **Planning tool** — built-in `_plan` pseudo-tool for LLM reasoning without polluting output
+- **Workflow orchestration** — `_workflow` tool for multi-phase parallel fan-out with result chaining
+
+```yaml
+agent_loop:
+  max_turns: 20
+  max_concurrency: 8
+  max_agent_depth: 3
+  show_trace: false
+  planning_tool: true
+```
+
+Environment overrides: `AICHAT_AGENT_LOOP_MAX_TURNS`, `AICHAT_AGENT_LOOP_SHOW_TRACE`
+
+### External Observability (designed for tmux)
+
+The agent loop emits signals for external management tools (tmux, Herdr, Agent Deck) to observe aichat without parsing stdout:
+
+- **OSC terminal title** — live state in tmux pane title (`aichat: turn 3/20 | fs_write`)
+- **JSON status file** — `$XDG_RUNTIME_DIR/aichat-<pid>.json` for dashboards/pollers
+- **BEL + OSC 777** — desktop notifications on task completion (tmux `monitor-bell`, Ghostty/iTerm2 native notifications)
+
+Each sub-agent process writes its own independent status file and manages its own observability signals.
+
 ## Advanced
 
 ### Reasoning Effort
