@@ -1,3 +1,4 @@
+mod agent_loop;
 mod cli;
 mod client;
 mod config;

@@ -33,6 +33,18 @@ use_tools: null                  # Which tools to use by default. (e.g. 'fs,web_
 #     command: mcp-server-git
 #     args: [--repository, .]
 
+# ---- agent loop ----
+# Client-side agent loop configuration (applies to all providers).
+# agent_loop:
+#   max_turns: 20              # Maximum tool-call turns before stopping
+#   max_concurrency: 8         # Maximum parallel tool executions
+#   max_agent_depth: 3         # Maximum sub-agent nesting depth
+#   show_trace: false          # Print live trace events to stderr
+#   planning_tool: true        # Inject the _plan pseudo-tool for LLM reasoning
+#   osc_title: true            # Emit terminal title updates (for tmux/Herdr)
+#   status_file: true          # Write JSON status file for external tools
+#   notify: true               # Emit bell + desktop notification on completion
+
 # ---- multi-agent ----
 # Hosted multi-agent orchestration is disabled by default.
 multi_agent:

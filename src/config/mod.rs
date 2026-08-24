@@ -272,6 +272,42 @@ impl OpenAIServiceTier {
     }
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentLoopConfig {
+    /// Maximum turns before stopping. Default: 20.
+    pub max_turns: usize,
+    /// Maximum concurrent tool executions. Default: 8.
+    pub max_concurrency: usize,
+    /// Maximum sub-agent nesting depth. Default: 3.
+    pub max_agent_depth: usize,
+    /// Print live trace events to stderr. Default: false.
+    pub show_trace: bool,
+    /// Inject the _plan pseudo-tool. Default: true.
+    pub planning_tool: bool,
+    /// Emit OSC 0/2 terminal title updates. Default: true.
+    pub osc_title: bool,
+    /// Maintain a JSON status file for external tools. Default: true.
+    pub status_file: bool,
+    /// Emit BEL + OSC 777 notifications on completion/blocked. Default: true.
+    pub notify: bool,
+}
+
+impl Default for AgentLoopConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: 20,
+            max_concurrency: 8,
+            max_agent_depth: 3,
+            show_trace: false,
+            planning_tool: true,
+            osc_title: true,
+            status_file: true,
+            notify: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MultiAgentConfig {
@@ -418,6 +454,8 @@ pub struct Config {
     #[serde(default)]
     pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
 
+    pub agent_loop: AgentLoopConfig,
+
     pub multi_agent: MultiAgentConfig,
 
     pub repl_prelude: Option<String>,
@@ -507,6 +545,8 @@ impl Default for Config {
 
             #[cfg(feature = "mcp")]
             mcp_servers: Default::default(),
+
+            agent_loop: Default::default(),
 
             multi_agent: Default::default(),
 
@@ -2772,6 +2812,14 @@ impl Config {
         }
         if let Some(v) = read_env_value::<String>(&get_env_name("sync_models_url")) {
             self.sync_models_url = v;
+        }
+
+        // Agent loop overrides
+        if let Some(Some(v)) = read_env_value::<usize>(&get_env_name("agent_loop_max_turns")) {
+            self.agent_loop.max_turns = v;
+        }
+        if let Some(Some(v)) = read_env_bool(&get_env_name("agent_loop_show_trace")) {
+            self.agent_loop.show_trace = v;
         }
     }
 

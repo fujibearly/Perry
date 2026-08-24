@@ -638,8 +638,9 @@ async fn get_or_connect(config: &McpServerConfig) -> Result<()> {
     Ok(())
 }
 
-/// Internal async implementation of tool call.
-async fn call_mcp_tool_async(
+/// Async implementation of MCP tool call. Used directly by the agent loop's parallel
+/// dispatch (avoids the `block_in_place` overhead of the sync wrapper).
+pub async fn call_mcp_tool_async(
     config: &McpServerConfig,
     tool_name: &str,
     arguments: Value,

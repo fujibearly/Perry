@@ -2,7 +2,7 @@ use super::*;
 
 use crate::{
     config::{Config, GlobalConfig, Input},
-    function::{eval_tool_calls, FunctionDeclaration, ToolCall, ToolResult},
+    function::{eval_tool_calls, eval_tool_calls_async, FunctionDeclaration, ToolCall, ToolResult},
     render::render_stream,
     utils::*,
 };
@@ -745,7 +745,7 @@ pub async fn call_chat_completions(
                 }
             }
             output.text = text;
-            Ok((output, eval_tool_calls(client.global_config(), tool_calls)?))
+            Ok((output, eval_tool_calls_async(client.global_config(), tool_calls).await?))
         }
         Err(err) => Err(err),
     }
@@ -784,7 +784,94 @@ pub async fn call_chat_completions_streaming(
                     output_tokens: usage.output_tokens,
                     ..Default::default()
                 },
-                eval_tool_calls(client.global_config(), tool_calls)?,
+                eval_tool_calls_async(client.global_config(), tool_calls).await?,
+            ))
+        }
+        Err(err) => {
+            if !text.is_empty() {
+                println!();
+            }
+            Err(err)
+        }
+    }
+}
+
+/// Like `call_chat_completions`, but returns raw `Vec<ToolCall>` without evaluating them.
+///
+/// This is used by the agent loop, which handles tool execution itself (in parallel,
+/// with sub-agent routing, progress reporting, etc.).
+pub async fn call_chat_completions_raw(
+    input: &Input,
+    print: bool,
+    extract_code: bool,
+    client: &dyn Client,
+    abort_signal: AbortSignal,
+) -> Result<(ChatCompletionsOutput, Vec<ToolCall>)> {
+    let ret = abortable_run_with_spinner(
+        client.chat_completions(input.clone()),
+        "Generating",
+        abort_signal,
+    )
+    .await;
+
+    match ret {
+        Ok(ret) => {
+            let mut output = ret;
+            let mut text = std::mem::take(&mut output.text);
+            let tool_calls = std::mem::take(&mut output.tool_calls);
+            if !text.is_empty() {
+                if extract_code {
+                    text = extract_code_block(&strip_think_tag(&text)).to_string();
+                }
+                if print {
+                    client.global_config().read().print_markdown(&text)?;
+                }
+            }
+            output.text = text;
+            Ok((output, tool_calls))
+        }
+        Err(err) => Err(err),
+    }
+}
+
+/// Like `call_chat_completions_streaming`, but returns raw `Vec<ToolCall>` without evaluating them.
+///
+/// This is used by the agent loop, which handles tool execution itself (in parallel,
+/// with sub-agent routing, progress reporting, etc.).
+pub async fn call_chat_completions_streaming_raw(
+    input: &Input,
+    client: &dyn Client,
+    abort_signal: AbortSignal,
+) -> Result<(ChatCompletionsOutput, Vec<ToolCall>)> {
+    let (tx, rx) = unbounded_channel();
+    let mut handler = SseHandler::new(tx, abort_signal.clone());
+
+    let (send_ret, render_ret) = tokio::join!(
+        client.chat_completions_streaming(input, &mut handler),
+        render_stream(rx, client.global_config(), abort_signal.clone()),
+    );
+
+    if handler.abort().aborted() {
+        bail!("Aborted.");
+    }
+
+    render_ret?;
+
+    let (text, tool_calls, usage) = handler.take();
+    match send_ret {
+        Ok(_) => {
+            if !text.is_empty() && !text.ends_with('\n') {
+                println!();
+            }
+            Ok((
+                ChatCompletionsOutput {
+                    text,
+                    tool_calls: Vec::new(),
+                    input_tokens: usage.input_tokens,
+                    output_tokens: usage.output_tokens,
+                    ..Default::default()
+                },
+                tool_calls,
             ))
         }
         Err(err) => {

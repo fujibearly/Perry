@@ -29,6 +29,99 @@ pub fn eval_tool_calls_preserving_results(
     eval_tool_calls_with_options(calls, |call| call.eval(config), false)
 }
 
+/// Async version of `eval_tool_calls`. Executes tools sequentially but without
+/// blocking the async runtime:
+/// - MCP tools are called via async `.await` (no `block_in_place`)
+/// - Shell-exec tools are wrapped in `tokio::task::spawn_blocking`
+///
+/// This is the foundation for parallel execution (Phase C) — the dispatch per
+/// tool is async, even though this function currently processes them sequentially.
+pub async fn eval_tool_calls_async(
+    config: &GlobalConfig,
+    calls: Vec<ToolCall>,
+) -> Result<Vec<ToolResult>> {
+    let mut output = vec![];
+    if calls.is_empty() {
+        return Ok(output);
+    }
+    let calls = ToolCall::dedup(calls);
+    if calls.is_empty() {
+        bail!("The request was aborted because an infinite loop of function calls was detected.")
+    }
+    let mut is_all_null = true;
+    for call in calls {
+        let mut result = match eval_single_tool_async(config, &call).await {
+            Ok(result) => result,
+            Err(_) => json!({
+                "error": {
+                    "type": "tool_execution_error",
+                    "message": "The tool call failed. Fix its arguments or choose another tool."
+                }
+            }),
+        };
+        if result.is_null() {
+            result = json!("DONE");
+        } else {
+            is_all_null = false;
+        }
+        output.push(ToolResult::new(call, result));
+    }
+    if is_all_null {
+        output = vec![];
+    }
+    Ok(output)
+}
+
+/// Dispatch a single tool call asynchronously.
+async fn eval_single_tool_async(config: &GlobalConfig, call: &ToolCall) -> Result<Value> {
+    // Route 1: MCP tools (async native)
+    #[cfg(feature = "mcp")]
+    {
+        let mcp_call_info = {
+            let config_read = config.read();
+            config_read.mcp_tools.get(&call.name).map(|entry| {
+                let server_name = entry.server_name.clone();
+                let original_name = entry.original_name.clone();
+                let server_config = config_read
+                    .mcp_servers
+                    .iter()
+                    .find(|s| s.name == server_name)
+                    .cloned();
+                (server_name, original_name, server_config)
+            })
+        }; // config_read dropped here, before any await
+
+        if let Some((server_name, original_name, server_config)) = mcp_call_info {
+            let server_config = match server_config {
+                Some(c) => c,
+                None => bail!(
+                    "MCP server config '{}' not found for tool '{}'",
+                    server_name,
+                    call.name
+                ),
+            };
+
+            let arguments = if call.arguments.is_object() {
+                call.arguments.clone()
+            } else if let Some(args_str) = call.arguments.as_str() {
+                serde_json::from_str(args_str).unwrap_or_else(|_| call.arguments.clone())
+            } else {
+                call.arguments.clone()
+            };
+
+            let timeout = std::time::Duration::from_secs(server_config.timeout);
+            return crate::mcp::call_mcp_tool_async(&server_config, &original_name, arguments, timeout).await;
+        }
+    }
+
+    // Route 2: Shell-exec tools (wrapped in spawn_blocking)
+    let config = config.clone();
+    let call = call.clone();
+    tokio::task::spawn_blocking(move || call.eval_shell(&config))
+        .await
+        .map_err(|e| anyhow!("Tool task panicked: {e}"))?
+}
+
 fn eval_tool_calls_with<F>(calls: Vec<ToolCall>, eval: F) -> Result<Vec<ToolResult>>
 where
     F: FnMut(&ToolCall) -> Result<Value>,
@@ -142,7 +235,7 @@ pub struct FunctionDeclaration {
     pub agent: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct JsonSchema {
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub type_value: Option<String>,
@@ -241,6 +334,42 @@ impl ToolCall {
             }
         }
 
+        let (call_name, cmd_name, mut cmd_args, envs) = match &config.read().agent {
+            Some(agent) => self.extract_call_config_from_agent(config, agent)?,
+            None => self.extract_call_config_from_config(config)?,
+        };
+
+        let json_data = if self.arguments.is_object() {
+            self.arguments.clone()
+        } else if let Some(arguments) = self.arguments.as_str() {
+            let arguments: Value = serde_json::from_str(arguments).map_err(|_| {
+                anyhow!("The call '{call_name}' has invalid arguments: {arguments}")
+            })?;
+            arguments
+        } else {
+            bail!(
+                "The call '{call_name}' has invalid arguments: {}",
+                self.arguments
+            );
+        };
+
+        cmd_args.push(json_data.to_string());
+
+        let output = match run_llm_function(cmd_name, cmd_args, envs)? {
+            Some(contents) => serde_json::from_str(&contents)
+                .ok()
+                .unwrap_or_else(|| json!({"output": contents})),
+            None => Value::Null,
+        };
+
+        Ok(output)
+    }
+
+    /// Execute this tool call via shell-exec only (no MCP routing).
+    ///
+    /// Used by the async parallel dispatch path where MCP and agent routing are
+    /// handled separately before falling through to this method.
+    pub fn eval_shell(&self, config: &GlobalConfig) -> Result<Value> {
         let (call_name, cmd_name, mut cmd_args, envs) = match &config.read().agent {
             Some(agent) => self.extract_call_config_from_agent(config, agent)?,
             None => self.extract_call_config_from_config(config)?,
