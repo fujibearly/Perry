@@ -653,14 +653,39 @@ pub async fn call_mcp_tool_async(
         "arguments": arguments
     });
 
-    let result = {
+    // Take the connection out of the pool so we can use it across await points.
+    // If another parallel call already took it, spawn a fresh one.
+    let conn = {
         let mut pool = connections().lock();
-        // Take the connection out so we can use it across await points.
-        // parking_lot::Mutex can't be held across await.
         pool.remove(&config.name)
     };
 
-    let mut conn = result.context("MCP connection disappeared")?;
+    let mut conn = match conn {
+        Some(c) => c,
+        None => {
+            // Another concurrent call has the connection — spawn a new one for this call.
+            let mut new_conn = McpConnection::spawn(config)?;
+            let init_timeout = Duration::from_secs(10);
+            match tokio::time::timeout(init_timeout, new_conn.initialize()).await {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
+                    new_conn.shutdown().await;
+                    return Err(e.context(format!(
+                        "MCP server '{}' initialization failed (parallel spawn)",
+                        config.name
+                    )));
+                }
+                Err(_) => {
+                    new_conn.shutdown().await;
+                    bail!(
+                        "MCP server '{}' initialization timed out (parallel spawn)",
+                        config.name
+                    );
+                }
+            }
+            new_conn
+        }
+    };
 
     let call_result = tokio::time::timeout(
         timeout,

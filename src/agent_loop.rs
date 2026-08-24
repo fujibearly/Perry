@@ -11,12 +11,14 @@ use crate::client::{
     TokenUsage,
 };
 use crate::config::{GlobalConfig, Input};
-use crate::function::{eval_tool_calls_async, FunctionDeclaration, JsonSchema, ToolCall};
+use crate::function::{FunctionDeclaration, JsonSchema, ToolCall, ToolResult};
 use crate::utils::*;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
+use futures_util::future::join_all;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
+use serde_json::json;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -161,6 +163,148 @@ impl AgentLoopProgress {
 }
 
 // ---------------------------------------------------------------------------
+// Parallel tool execution
+// ---------------------------------------------------------------------------
+
+/// Execute tool calls concurrently with a bounded semaphore.
+///
+/// Each tool is dispatched asynchronously (MCP via await, shell via spawn_blocking).
+/// Results are returned in the same order as the input calls. Individual tool failures
+/// do not cancel siblings — they produce error JSON results.
+pub async fn eval_tool_calls_parallel(
+    config: &GlobalConfig,
+    calls: Vec<ToolCall>,
+    abort_signal: AbortSignal,
+    progress: &AgentLoopProgress,
+) -> Result<Vec<ToolResult>> {
+    if calls.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let calls = ToolCall::dedup(calls);
+    if calls.is_empty() {
+        bail!("The request was aborted because an infinite loop of function calls was detected.");
+    }
+
+    let max_concurrency = config.read().agent_loop.max_concurrency;
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrency));
+
+    let futures: Vec<_> = calls
+        .into_iter()
+        .map(|call| {
+            let config = config.clone();
+            let semaphore = semaphore.clone();
+            let _abort_signal = abort_signal.clone();
+            let progress = progress.clone();
+            async move {
+                let _permit = semaphore.acquire().await.unwrap();
+                let start = Instant::now();
+                progress.emit(AgentLoopEvent::ToolStart {
+                    name: call.name.clone(),
+                    id: call.id.clone(),
+                });
+                progress.add_active_tool(&call.name);
+
+                let result = eval_single_tool(&config, &call).await;
+                let duration = start.elapsed();
+
+                let output = match result {
+                    Ok(value) => {
+                        progress.emit(AgentLoopEvent::ToolComplete {
+                            name: call.name.clone(),
+                            duration,
+                            success: true,
+                        });
+                        if value.is_null() { json!("DONE") } else { value }
+                    }
+                    Err(_) => {
+                        progress.emit(AgentLoopEvent::ToolComplete {
+                            name: call.name.clone(),
+                            duration,
+                            success: false,
+                        });
+                        json!({
+                            "error": {
+                                "type": "tool_execution_error",
+                                "message": "The tool call failed. Fix its arguments or choose another tool."
+                            }
+                        })
+                    }
+                };
+                progress.remove_active_tool(&call.name);
+                ToolResult::new(call, output)
+            }
+        })
+        .collect();
+
+    let results = join_all(futures).await;
+
+    // Preserve existing behavior: if all results are "DONE" (null tools), return empty
+    let is_all_done = results.iter().all(|r| r.output == json!("DONE"));
+    if is_all_done {
+        return Ok(vec![]);
+    }
+
+    Ok(results)
+}
+
+/// Dispatch a single tool call asynchronously.
+async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serde_json::Value> {
+    // Route 1: MCP tools (async native)
+    #[cfg(feature = "mcp")]
+    {
+        let mcp_call_info = {
+            let config_read = config.read();
+            config_read.mcp_tools.get(&call.name).map(|entry| {
+                let server_name = entry.server_name.clone();
+                let original_name = entry.original_name.clone();
+                let server_config = config_read
+                    .mcp_servers
+                    .iter()
+                    .find(|s| s.name == server_name)
+                    .cloned();
+                (server_name, original_name, server_config)
+            })
+        }; // config_read dropped here, before any await
+
+        if let Some((server_name, original_name, server_config)) = mcp_call_info {
+            let server_config = match server_config {
+                Some(c) => c,
+                None => bail!(
+                    "MCP server config '{}' not found for tool '{}'",
+                    server_name,
+                    call.name
+                ),
+            };
+
+            let arguments = if call.arguments.is_object() {
+                call.arguments.clone()
+            } else if let Some(args_str) = call.arguments.as_str() {
+                serde_json::from_str(args_str).unwrap_or_else(|_| call.arguments.clone())
+            } else {
+                call.arguments.clone()
+            };
+
+            let timeout = std::time::Duration::from_secs(server_config.timeout);
+            return crate::mcp::call_mcp_tool_async(
+                &server_config,
+                &original_name,
+                arguments,
+                timeout,
+            )
+            .await;
+        }
+    }
+
+    // Route 2: Shell-exec tools (wrapped in spawn_blocking)
+    let config = config.clone();
+    let call = call.clone();
+    tokio::task::spawn_blocking(move || call.eval_shell(&config))
+        .await
+        .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
+}
+
+// ---------------------------------------------------------------------------
 // Planning tool declaration
 // ---------------------------------------------------------------------------
 
@@ -246,8 +390,13 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
         // Intermediate turn with tool calls — after_chat_completion is a no-op
         // when tool_results is non-empty, but we call it for consistency with
         // the existing pattern (it records last_message).
-        let tool_results =
-            eval_tool_calls_async(params.config, tool_calls, params.abort_signal.clone()).await?;
+        let tool_results = eval_tool_calls_parallel(
+            params.config,
+            tool_calls,
+            params.abort_signal.clone(),
+            &params.progress,
+        )
+        .await?;
 
         params
             .config
