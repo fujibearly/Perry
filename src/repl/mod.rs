@@ -15,8 +15,8 @@ use crate::config::{
 };
 use crate::render::render_error;
 use crate::utils::{
-    abortable_run_with_spinner, create_abort_signal, dimmed_text, editor_command, set_text,
-    temp_file, AbortSignal,
+    abortable_run_with_spinner, abortable_run_with_spinner_rx, create_abort_signal, dimmed_text,
+    editor_command, set_text, temp_file, AbortSignal, Spinner, IS_STDOUT_TERMINAL,
 };
 
 use anyhow::{bail, Context, Result};
@@ -749,14 +749,75 @@ async fn ask_inner(
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 
-    let (progress, _event_rx) = crate::agent_loop::AgentLoopProgress::live();
+    let (progress, event_rx) = crate::agent_loop::AgentLoopProgress::live();
     let params = crate::agent_loop::AgentLoopParams {
         config,
-        abort_signal,
+        abort_signal: abort_signal.clone(),
         code_mode: false,
-        progress,
+        progress: progress.clone(),
     };
-    let output = crate::agent_loop::run(input, params).await?;
+
+    let agent_loop_config = config.read().agent_loop.clone();
+
+    // Run with observability rendering
+    let (spinner, spinner_rx) = Spinner::create("");
+    let loop_future = crate::agent_loop::run(input, params);
+    let live_run = async {
+        tokio::pin!(loop_future);
+        let mut event_rx = event_rx;
+        let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(2));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut trace_header_printed = false;
+
+        loop {
+            tokio::select! {
+                result = &mut loop_future => {
+                    while let Ok(event) = event_rx.try_recv() {
+                        let snapshot = progress.snapshot();
+                        let _ = crate::agent_loop::render_event(
+                            &event, &snapshot, &agent_loop_config,
+                            &spinner, &mut trace_header_printed,
+                        );
+                    }
+                    break result;
+                }
+                Some(event) = event_rx.recv() => {
+                    let snapshot = progress.snapshot();
+                    let _ = crate::agent_loop::render_event(
+                        &event, &snapshot, &agent_loop_config,
+                        &spinner, &mut trace_header_printed,
+                    );
+                    if *IS_STDOUT_TERMINAL {
+                        let msg = crate::agent_loop::format_spinner_message(&snapshot);
+                        let _ = spinner.set_message(msg);
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    if *IS_STDOUT_TERMINAL {
+                        let snapshot = progress.snapshot();
+                        let msg = crate::agent_loop::format_spinner_message(&snapshot);
+                        let _ = spinner.set_message(msg);
+                    }
+                }
+            }
+        }
+    };
+    let result =
+        abortable_run_with_spinner_rx(live_run, spinner_rx, abort_signal.clone()).await;
+
+    // Cleanup
+    if agent_loop_config.status_file {
+        crate::agent_loop::cleanup_status_file();
+    }
+    if agent_loop_config.osc_title {
+        crate::agent_loop::update_terminal_title("aichat: idle");
+    }
+    // REPL notification: waiting for input
+    if agent_loop_config.notify {
+        crate::agent_loop::notify_terminal("aichat", "Waiting for input");
+    }
+
+    let output = result?;
 
     Config::maybe_autoname_session(config.clone());
     Config::maybe_compress_session(config.clone());

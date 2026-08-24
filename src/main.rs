@@ -375,14 +375,88 @@ async fn run_directive(
     code_mode: bool,
     abort_signal: AbortSignal,
 ) -> Result<TokenUsage> {
-    let (progress, _event_rx) = crate::agent_loop::AgentLoopProgress::live();
+    let (progress, event_rx) = crate::agent_loop::AgentLoopProgress::live();
     let params = crate::agent_loop::AgentLoopParams {
         config,
-        abort_signal,
+        abort_signal: abort_signal.clone(),
         code_mode,
-        progress,
+        progress: progress.clone(),
     };
-    let output = crate::agent_loop::run(input, params).await?;
+
+    let agent_loop_config = config.read().agent_loop.clone();
+
+    // If no trace/observability needed and stdout is not a terminal, run without rendering overhead
+    if !agent_loop_config.show_trace
+        && !agent_loop_config.osc_title
+        && !agent_loop_config.status_file
+        && !agent_loop_config.notify
+        && !*IS_STDOUT_TERMINAL
+    {
+        drop(event_rx);
+        let output = crate::agent_loop::run(input, params).await?;
+        return Ok(output.usage);
+    }
+
+    // Run with observability rendering
+    let (spinner, spinner_rx) = Spinner::create("");
+    let loop_future = crate::agent_loop::run(input, params);
+    let live_run = async {
+        tokio::pin!(loop_future);
+        let mut event_rx = event_rx;
+        // Conservative heartbeat — 2s for spinner message updates (avoids CPU churn)
+        let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut trace_header_printed = false;
+
+        loop {
+            tokio::select! {
+                result = &mut loop_future => {
+                    // Drain remaining events
+                    while let Ok(event) = event_rx.try_recv() {
+                        let snapshot = progress.snapshot();
+                        let _ = crate::agent_loop::render_event(
+                            &event, &snapshot, &agent_loop_config,
+                            &spinner, &mut trace_header_printed,
+                        );
+                    }
+                    break result;
+                }
+                Some(event) = event_rx.recv() => {
+                    let snapshot = progress.snapshot();
+                    let _ = crate::agent_loop::render_event(
+                        &event, &snapshot, &agent_loop_config,
+                        &spinner, &mut trace_header_printed,
+                    );
+                    // Update spinner message on events (lightweight, no animation tick)
+                    if *IS_STDOUT_TERMINAL {
+                        let msg = crate::agent_loop::format_spinner_message(&snapshot);
+                        let _ = spinner.set_message(msg);
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    // Periodic spinner update for long-running tools
+                    if *IS_STDOUT_TERMINAL {
+                        let snapshot = progress.snapshot();
+                        let msg = crate::agent_loop::format_spinner_message(&snapshot);
+                        let _ = spinner.set_message(msg);
+                    }
+                }
+            }
+        }
+    };
+    let result =
+        abortable_run_with_spinner_rx(live_run, spinner_rx, abort_signal.clone()).await;
+
+    // Cleanup status file on exit
+    if agent_loop_config.status_file {
+        crate::agent_loop::cleanup_status_file();
+    }
+    // Reset terminal title
+    if agent_loop_config.osc_title {
+        crate::agent_loop::update_terminal_title("aichat: idle");
+    }
+
+    let output = result?;
     Ok(output.usage)
 }
 

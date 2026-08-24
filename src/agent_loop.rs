@@ -448,3 +448,249 @@ async fn call_llm_raw(
             .await
     }
 }
+
+
+// ---------------------------------------------------------------------------
+// Observability: rendering, OSC titles, status file, notifications
+// ---------------------------------------------------------------------------
+
+use crate::config::AgentLoopConfig;
+use serde::Serialize;
+use std::io::Write;
+
+/// Format an event as a trace line for stderr output.
+pub fn format_trace_event(event: &AgentLoopEvent) -> Option<String> {
+    match event {
+        AgentLoopEvent::TurnStart { turn, max_turns } => {
+            Some(format!("[turn {turn}/{max_turns}] starting"))
+        }
+        AgentLoopEvent::ToolStart { name, .. } => Some(format!("calling: {name}")),
+        AgentLoopEvent::ToolComplete {
+            name,
+            duration,
+            success,
+        } => {
+            let status = if *success { "completed" } else { "FAILED" };
+            Some(format!("{name} {status} ({:.1}s)", duration.as_secs_f64()))
+        }
+        AgentLoopEvent::SubAgentStart { agent_name, pid } => {
+            Some(format!("sub-agent {agent_name} started (PID {pid})"))
+        }
+        AgentLoopEvent::SubAgentComplete {
+            agent_name,
+            pid,
+            duration,
+            success,
+        } => {
+            let status = if *success { "completed" } else { "FAILED" };
+            Some(format!(
+                "sub-agent {agent_name} {status} ({:.1}s, PID {pid})",
+                duration.as_secs_f64()
+            ))
+        }
+        AgentLoopEvent::PlanReceived { content } => {
+            let preview = if content.len() > 60 {
+                format!("{}...", &content[..57])
+            } else {
+                content.clone()
+            };
+            Some(format!("plan: \"{preview}\""))
+        }
+        AgentLoopEvent::BudgetWarning { turn, max_turns } => {
+            Some(format!("budget warning: turn {turn}/{max_turns}"))
+        }
+        AgentLoopEvent::BudgetExhausted { max_turns } => {
+            Some(format!("budget exhausted at {max_turns} turns"))
+        }
+        AgentLoopEvent::LoopComplete => Some("done".to_string()),
+    }
+}
+
+/// Format a spinner message from a progress snapshot.
+pub fn format_spinner_message(snapshot: &AgentLoopSnapshot) -> String {
+    if snapshot.active_tools.is_empty() {
+        format!(
+            "Turn {}/{} ({:.0}s)",
+            snapshot.current_turn,
+            snapshot.max_turns,
+            snapshot.elapsed.as_secs_f64()
+        )
+    } else {
+        let tools = snapshot.active_tools.join(", ");
+        format!(
+            "Turn {}/{} | {} ({:.1}s)",
+            snapshot.current_turn,
+            snapshot.max_turns,
+            tools,
+            snapshot.elapsed.as_secs_f64()
+        )
+    }
+}
+
+/// Build the OSC 0 terminal title string for the current state.
+fn format_osc_title(event: &AgentLoopEvent, snapshot: &AgentLoopSnapshot) -> String {
+    match event {
+        AgentLoopEvent::LoopComplete => "aichat: done".to_string(),
+        AgentLoopEvent::BudgetExhausted { .. } => "aichat: turn limit reached".to_string(),
+        _ => {
+            if snapshot.active_tools.is_empty() {
+                format!("aichat: turn {}/{}", snapshot.current_turn, snapshot.max_turns)
+            } else {
+                let tools = snapshot.active_tools.join(", ");
+                format!(
+                    "aichat: turn {}/{} | {}",
+                    snapshot.current_turn, snapshot.max_turns, tools
+                )
+            }
+        }
+    }
+}
+
+/// Emit an OSC 0/2 escape sequence to set the terminal title.
+pub fn update_terminal_title(title: &str) {
+    if *IS_STDOUT_TERMINAL {
+        eprint!("\x1b]0;{title}\x07");
+    }
+}
+
+/// Emit BEL + OSC 777 notification to the terminal.
+pub fn notify_terminal(title: &str, message: &str) {
+    if *IS_STDOUT_TERMINAL {
+        // BEL — tmux monitor-bell picks this up
+        eprint!("\x07");
+        // OSC 777 — desktop notification on Ghostty, iTerm2, VS Code, rxvt-unicode
+        eprint!("\x1b]777;notify;{title};{message}\x07");
+    }
+}
+
+/// JSON status file contents.
+#[derive(Serialize)]
+struct AgentLoopStatus {
+    pid: u32,
+    state: String,
+    turn: usize,
+    max_turns: usize,
+    active_tools: Vec<String>,
+    elapsed_s: f64,
+    updated_at: String,
+}
+
+/// Get the status file path for this process.
+fn status_file_path() -> std::path::PathBuf {
+    let pid = std::process::id();
+    if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        std::path::PathBuf::from(runtime_dir).join(format!("aichat-{pid}.json"))
+    } else {
+        std::path::PathBuf::from(format!("/tmp/aichat-{pid}.json"))
+    }
+}
+
+/// Write the status file atomically.
+fn write_status_file(snapshot: &AgentLoopSnapshot, state: &str) {
+    let status = AgentLoopStatus {
+        pid: std::process::id(),
+        state: state.to_string(),
+        turn: snapshot.current_turn,
+        max_turns: snapshot.max_turns,
+        active_tools: snapshot.active_tools.clone(),
+        elapsed_s: snapshot.elapsed.as_secs_f64(),
+        updated_at: chrono_now_iso(),
+    };
+    let path = status_file_path();
+    let tmp = path.with_extension("tmp");
+    if let Ok(json) = serde_json::to_string(&status) {
+        if let Ok(mut f) = std::fs::File::create(&tmp) {
+            let _ = f.write_all(json.as_bytes());
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
+/// Delete the status file (called on exit).
+pub fn cleanup_status_file() {
+    let _ = std::fs::remove_file(status_file_path());
+}
+
+/// Simple ISO 8601 timestamp without pulling in chrono crate.
+fn chrono_now_iso() -> String {
+    use std::time::SystemTime;
+    let duration = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    // Basic UTC timestamp — good enough for status file
+    format!("{secs}")
+}
+
+/// Determine the state string from an event.
+fn state_from_event(event: &AgentLoopEvent) -> &'static str {
+    match event {
+        AgentLoopEvent::LoopComplete => "done",
+        AgentLoopEvent::BudgetExhausted { .. } => "budget_exhausted",
+        AgentLoopEvent::ToolStart { .. } => "working",
+        AgentLoopEvent::ToolComplete { .. } => "working",
+        AgentLoopEvent::TurnStart { .. } => "working",
+        AgentLoopEvent::SubAgentStart { .. } => "working",
+        AgentLoopEvent::SubAgentComplete { .. } => "working",
+        AgentLoopEvent::PlanReceived { .. } => "working",
+        AgentLoopEvent::BudgetWarning { .. } => "working",
+    }
+}
+
+/// Determine if an event should trigger a notification.
+fn notification_for_event(event: &AgentLoopEvent) -> Option<(&'static str, &'static str)> {
+    match event {
+        AgentLoopEvent::LoopComplete => Some(("aichat", "Task complete")),
+        AgentLoopEvent::BudgetExhausted { .. } => Some(("aichat", "Turn limit reached")),
+        _ => None,
+    }
+}
+
+/// Process a single agent loop event through all observability channels.
+///
+/// Called by the rendering loop in the caller (run_directive / ask_inner).
+pub fn render_event(
+    event: &AgentLoopEvent,
+    snapshot: &AgentLoopSnapshot,
+    config: &AgentLoopConfig,
+    spinner: &crate::utils::Spinner,
+    trace_header_printed: &mut bool,
+) -> Result<()> {
+    // 1. Trace output (stderr)
+    if config.show_trace {
+        if let Some(line) = format_trace_event(event) {
+            let output = if *trace_header_printed {
+                format!("  [{line}]")
+            } else {
+                *trace_header_printed = true;
+                format!("Agent loop trace:\n  [{line}]")
+            };
+            if *IS_STDOUT_TERMINAL {
+                spinner.print_line(output)?;
+            } else {
+                eprintln!("{output}");
+            }
+        }
+    }
+
+    // 2. OSC terminal title
+    if config.osc_title {
+        let title = format_osc_title(event, snapshot);
+        update_terminal_title(&title);
+    }
+
+    // 3. Status file
+    if config.status_file {
+        let state = state_from_event(event);
+        write_status_file(snapshot, state);
+    }
+
+    // 4. Notifications (only on terminal events)
+    if config.notify {
+        if let Some((title, msg)) = notification_for_event(event) {
+            notify_terminal(title, msg);
+        }
+    }
+
+    Ok(())
+}
