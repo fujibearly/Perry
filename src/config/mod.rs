@@ -2141,6 +2141,10 @@ impl Config {
         if functions.is_empty() {
             None
         } else {
+            // Inject _plan pseudo-tool when planning_tool is enabled
+            if self.agent_loop.planning_tool {
+                functions.push(crate::agent_loop::plan_tool_declaration());
+            }
             Some(functions)
         }
     }

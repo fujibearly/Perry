@@ -296,12 +296,122 @@ async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serd
         }
     }
 
-    // Route 2: Shell-exec tools (wrapped in spawn_blocking)
+    // Route 2: Agent tools (subprocess delegation)
+    {
+        let is_agent = {
+            let config_read = config.read();
+            if let Some(agent) = &config_read.agent {
+                agent
+                    .functions()
+                    .find(&call.name)
+                    .map_or(false, |f| f.agent)
+            } else {
+                config_read
+                    .functions
+                    .find(&call.name)
+                    .map_or(false, |f| f.agent)
+            }
+        };
+        if is_agent {
+            return eval_agent_tool_subprocess(config, call).await;
+        }
+    }
+
+    // Route 3: Shell-exec tools (wrapped in spawn_blocking)
     let config = config.clone();
     let call = call.clone();
     tokio::task::spawn_blocking(move || call.eval_shell(&config))
         .await
         .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
+}
+
+/// Spawn a sub-agent as a separate aichat process.
+///
+/// The sub-agent runs with its own PID, session, turn budget, and observability.
+/// Depth is tracked via AICHAT_AGENT_DEPTH env var to prevent infinite nesting.
+async fn eval_agent_tool_subprocess(
+    config: &GlobalConfig,
+    call: &ToolCall,
+) -> Result<serde_json::Value> {
+    // 1. Check depth limit
+    let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let max_depth = config.read().agent_loop.max_agent_depth;
+    if current_depth >= max_depth {
+        bail!(
+            "Sub-agent nesting depth {} would exceed maximum {}. \
+             Increase with `agent_loop.max_agent_depth` in config.",
+            current_depth + 1,
+            max_depth
+        );
+    }
+
+    // 2. Resolve agent name — the tool name IS the agent name for agent-flagged tools
+    let agent_name = call.name.clone();
+
+    // 3. Build the task message from arguments
+    let task_message = if let Some(s) = call.arguments.as_str() {
+        s.to_string()
+    } else if let Some(obj) = call.arguments.as_object() {
+        // Try common argument patterns: "prompt", "task", "message", "input"
+        obj.get("prompt")
+            .or_else(|| obj.get("task"))
+            .or_else(|| obj.get("message"))
+            .or_else(|| obj.get("input"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| call.arguments.to_string())
+    } else {
+        call.arguments.to_string()
+    };
+
+    // 4. Spawn the subprocess
+    let aichat_bin = std::env::current_exe()?;
+    let mut cmd = tokio::process::Command::new(&aichat_bin);
+    cmd.arg("--agent").arg(&agent_name);
+    cmd.arg(&task_message);
+
+    // Pass depth to child
+    cmd.env("AICHAT_AGENT_DEPTH", (current_depth + 1).to_string());
+
+    // Inherit config dir so sub-agent sees same agents/tools/MCP
+    if let Ok(config_dir) = std::env::var("AICHAT_CONFIG_DIR") {
+        cmd.env("AICHAT_CONFIG_DIR", config_dir);
+    }
+
+    // Capture stdout/stderr
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    // 5. Run and wait
+    let child = cmd.spawn()?;
+    let _pid = child.id().unwrap_or(0);
+    let output = child.wait_with_output().await?;
+
+    // 6. Return result
+    if output.status.success() {
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(json!({"output": text}))
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if stderr.is_empty() {
+            format!(
+                "Sub-agent '{}' exited with code {:?}",
+                agent_name,
+                output.status.code()
+            )
+        } else {
+            stderr
+        };
+        Ok(json!({
+            "error": {
+                "type": "agent_error",
+                "message": message
+            }
+        }))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,16 +497,45 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             });
         }
 
-        // Intermediate turn with tool calls — after_chat_completion is a no-op
-        // when tool_results is non-empty, but we call it for consistency with
-        // the existing pattern (it records last_message).
-        let tool_results = eval_tool_calls_parallel(
-            params.config,
-            tool_calls,
-            params.abort_signal.clone(),
-            &params.progress,
-        )
-        .await?;
+        // Separate _plan calls from real tool calls
+        let (plan_calls, real_calls): (Vec<ToolCall>, Vec<ToolCall>) =
+            tool_calls.into_iter().partition(|c| c.name == "_plan");
+
+        // Handle plan calls: emit events, log, produce "acknowledged" results
+        let mut tool_results: Vec<ToolResult> = Vec::new();
+        for plan_call in &plan_calls {
+            let content = plan_call
+                .arguments
+                .get("thought")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !content.is_empty() {
+                params.progress.emit(AgentLoopEvent::PlanReceived {
+                    content: content.clone(),
+                });
+                debug!("Agent plan: {content}");
+            }
+            tool_results.push(ToolResult::new(
+                plan_call.clone(),
+                json!("acknowledged"),
+            ));
+        }
+
+        // Execute real tool calls in parallel
+        if !real_calls.is_empty() {
+            let real_results = eval_tool_calls_parallel(
+                params.config,
+                real_calls,
+                params.abort_signal.clone(),
+                &params.progress,
+            )
+            .await?;
+            tool_results.extend(real_results);
+        }
+
+        // If only plan calls and all produced empty results, still continue the loop
+        // (the model gets "acknowledged" back and can proceed)
 
         params
             .config
