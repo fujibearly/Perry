@@ -242,6 +242,27 @@ ToolCall arrives from LLM
 
 Tool calls are deduplicated and infinite loops are detected (before dispatch).
 
+### Output routing (post-execution)
+
+After a tool executes successfully, its result is routed before being placed in the conversation:
+
+```
+Tool result arrives
+  │
+  ├─ Declared "file"? → write to path (template expanded), return confirmation
+  │
+  ├─ Declared "pipe"? → pass result to target tool as input
+  │     └─ cycle detection first (HashSet walk)
+  │     └─ recursive: target's result also routed
+  │     └─ model sees only the final output
+  │
+  └─ Context (default) → auto-cap if > tool_output_limit
+        ├─ Under limit → return as-is
+        └─ Over limit → write to temp file, return preview + path + hint
+```
+
+Routing is declared per-tool in `functions.json` via an optional `output` field (`skip_serializing` — the LLM never sees it). Error results and `_plan` results are never routed or capped.
+
 ---
 
 ## Config System (`src/config/`)
@@ -350,3 +371,4 @@ Translates natural language to shell commands, then offers interactive options: 
 6. **Static lazy initialization** — `LazyLock` and `OnceLock` for expensive one-time computations
 7. **Transparent MCP integration** — MCP tools are indistinguishable from shell-exec tools to the rest of the codebase
 8. **Definitions unchanged, runtime enhanced** — the same `index.yaml` + `functions.json` + RAG definitions run through a fundamentally better engine without any format changes
+9. **Declarative output routing** — tools declare where their results go (context, file, pipe) without the LLM needing to know. Prevents context pollution and enables tool pipelines.

@@ -259,6 +259,50 @@ Each sub-agent process writes its own independent status file. External tools en
 cat /run/user/1000/aichat-*.json | jq '{pid, state, turn, max_turns, active_tools}'
 ```
 
+### Tool Output Routing
+
+Control where tool results go instead of always stuffing them into the LLM's conversation context. Declared per-tool in `functions.json`:
+
+- **context** (default) — result goes into the next LLM turn. Auto-capped at `tool_output_limit` (default 16 KB): large results are written to a temp file and the model receives a preview + path.
+- **file** — result written to a path (with template expansion), model gets a confirmation (`{"written_to": "/tmp/report.md", "size_bytes": 24576}`).
+- **pipe** — result passed directly to another tool without an LLM round-trip. The model sees only the final output.
+
+```json
+[
+  {
+    "name": "generate_report",
+    "description": "Generate a markdown report",
+    "parameters": {"type": "object", "properties": {"topic": {"type": "string"}}},
+    "output": {"destination": "file", "path": "/tmp/{{name}}-{{timestamp}}.md"}
+  },
+  {
+    "name": "fetch_raw_data",
+    "description": "Fetch raw dataset",
+    "parameters": {"type": "object", "properties": {"url": {"type": "string"}}},
+    "output": {"destination": "pipe", "target": "summarize_data"}
+  }
+]
+```
+
+Benefits:
+- Prevents context window pollution from large tool outputs
+- Enables tool pipelines (fetch → transform → summarize) without LLM round-trips per step
+- Reduces token cost for workflows that produce artifacts
+- Pipe chains are acyclic (cycle detection prevents infinite loops)
+
+### Structured PDF Loading
+
+Default document loader upgraded from `pdftotext` (plain text, no structure) to `pdf2md` ([firecrawl/pdf-inspector](https://github.com/firecrawl/pdf-inspector)) — structured Markdown with headings, tables, lists, code blocks, and formatting preserved.
+
+```yaml
+document_loaders:
+  pdf: 'pdf2md --compact --raw $1'
+```
+
+Benefits for RAG: the chunker gets Markdown with structure, so chunks respect heading boundaries. Tables don't get split mid-row. 30-40% fewer tokens for the same information content compared to flat text extraction.
+
+Install: `cargo install pdf-inspector`
+
 ## Advanced
 
 ### Reasoning Effort
