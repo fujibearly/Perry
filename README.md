@@ -187,7 +187,7 @@ A web platform to compare different LLMs side-by-side.
 
 ## Fork Enhancements
 
-This fork adds three major capabilities to the upstream aichat:
+This fork preserves upstream's philosophy — tools are shell scripts, roles are markdown prompts, agents compose both — but adds **runtime intelligence to the dispatch layer**. The same definitions run through a fundamentally better engine without any format changes.
 
 ### Native MCP Bridge
 
@@ -211,12 +211,11 @@ mcp_servers:
 
 An iterative agent loop that makes **every provider** capable of multi-step agentic work — not just OpenAI. Works with Claude, Gemini (via OpenRouter), Cohere, DeepSeek, local models via Ollama, or any provider that returns `tool_calls`.
 
-- **Parallel tool execution** — multiple tool calls run concurrently (semaphore-bounded, default 8)
-- **Turn budget** — configurable `max_turns` (default 20) prevents runaway recursion
-- **Sub-agent delegation** — tools marked `agent: true` spawn aichat as a subprocess (own PID, session, observability)
-- **Progress events** — structured events for trace rendering, spinners, external tools
-- **Planning tool** — built-in `_plan` pseudo-tool for LLM reasoning without polluting output
-- **Workflow orchestration** — `_workflow` tool for multi-phase parallel fan-out with result chaining
+- **Parallel tool execution** — multiple tool calls run concurrently (semaphore-bounded, default 8). A turn with 5 web fetches takes 1x latency, not 5x.
+- **Turn budget** — configurable `max_turns` (default 20) prevents runaway. The model can't loop forever.
+- **Planning tool** — built-in `_plan` pseudo-tool auto-injected when tools are configured. The model can reason and decompose tasks without polluting user-visible output.
+- **Sub-agent delegation** — tools marked `agent: true` spawn a new aichat process as a subprocess. Each sub-agent has its own PID, turn budget, session, and observability. Sub-agents can themselves delegate to further sub-agents (bounded by `max_agent_depth`).
+- **Recursive orchestration** — an orchestrator agent can delegate to a researcher agent, which can delegate to a deep-researcher agent. Each is a full aichat instance. Depth tracked via `AICHAT_AGENT_DEPTH` env var.
 
 ```yaml
 agent_loop:
@@ -229,6 +228,22 @@ agent_loop:
 
 Environment overrides: `AICHAT_AGENT_LOOP_MAX_TURNS`, `AICHAT_AGENT_LOOP_SHOW_TRACE`
 
+#### Example: multi-agent orchestration
+
+```yaml
+# agents/project-manager/functions.json
+[
+  {"name": "researcher", "description": "Research a topic", "parameters": {"type": "object", "properties": {"task": {"type": "string"}}}, "agent": true},
+  {"name": "implementer", "description": "Implement a solution", "parameters": {"type": "object", "properties": {"task": {"type": "string"}}}, "agent": true}
+]
+```
+
+```bash
+AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --agent project-manager "build a report on Rust async patterns"
+```
+
+The project-manager's prompt tells it to delegate. Each sub-agent runs independently with its own tools and budget.
+
 ### External Observability (designed for tmux)
 
 The agent loop emits signals for external management tools (tmux, Herdr, Agent Deck) to observe aichat without parsing stdout:
@@ -237,7 +252,12 @@ The agent loop emits signals for external management tools (tmux, Herdr, Agent D
 - **JSON status file** — `$XDG_RUNTIME_DIR/aichat-<pid>.json` for dashboards/pollers
 - **BEL + OSC 777** — desktop notifications on task completion (tmux `monitor-bell`, Ghostty/iTerm2 native notifications)
 
-Each sub-agent process writes its own independent status file and manages its own observability signals.
+Each sub-agent process writes its own independent status file. External tools enumerate `aichat-*.json` files for a fleet view — no coordination needed between processes.
+
+```bash
+# See all running aichat agents
+cat /run/user/1000/aichat-*.json | jq '{pid, state, turn, max_turns, active_tools}'
+```
 
 ## Advanced
 

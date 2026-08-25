@@ -2,6 +2,72 @@
 
 A Rust CLI tool (v0.31.0-fork.9) that provides a unified interface to multiple LLM providers. Authored by sigoden, forked with enhancements for native MCP, a provider-agnostic agent loop, and external observability. Operates in three modes: **command-line** (one-shot queries), **REPL** (interactive chat), and **HTTP server** (exposes OpenAI-compatible APIs).
 
+This is not a coding agent. It's a general-purpose LLM CLI — a Swiss army knife for interacting with any provider, with tools, sessions, RAG, roles, and an API server. The agent loop makes tool-calling reliable and efficient for *any* use case: research, data processing, automation, analysis, whatever the user configures.
+
+---
+
+## Design Philosophy
+
+### Upstream (sigoden)
+
+sigoden's design treats aichat as a **thin orchestration layer**: the LLM decides, aichat dispatches, external scripts execute. The intelligence lives in the LLM and the tools — aichat is the pipe between them.
+
+Key principles:
+- Tools are tools. A function is a shell script with a JSON schema. Nothing more.
+- Roles are behavioral presets. A prompt in a markdown file that changes how the LLM responds.
+- Agents compose these. Agent = Instructions (Prompt) + Tools (Function Calling) + Documents (RAG).
+
+### Fork additions
+
+The fork preserves this philosophy but adds **runtime intelligence to the dispatch layer**:
+- **Parallelism** — the harness knows tool calls are independent and executes them concurrently
+- **Budgets** — the harness knows to stop after N turns, preventing runaway
+- **Planning** — the harness gives the model a reasoning channel (`_plan`) without polluting output
+- **Observability** — the harness reports what's happening (OSC titles, status files, notifications)
+- **Delegation** — the harness can spawn other agents as subprocesses with independent lifecycles
+
+The LLM and the scripts are unchanged. The pipe between them got smarter.
+
+### What changed vs. what didn't
+
+| Aspect | Unchanged | Enhanced |
+|--------|-----------|----------|
+| Agent definition format | `index.yaml` + `functions.json` + RAG | — |
+| Role format | Markdown with optional front-matter | — |
+| Function format | Shell script + JSON schema | — |
+| Tool invocation | `run_command()` with arguments | Parallel, bounded, observable |
+| Agent composition | `agent: true` flag on tools | Now spawns full aichat subprocess (not just shell-exec) |
+| Orchestration logic | Lives in the LLM's prompt | Same — prompt IS the orchestration strategy |
+| Provider support | 7 native + 18 compatible | Same |
+
+---
+
+## The Role / Function / Agent Hierarchy
+
+```
+Role       = prompt + model config + use_tools selector
+Session    = role + conversation history + compression
+Agent      = role + own tools + own MCP servers + own RAG + variables + dynamic instructions
+```
+
+The unifying trait is `RoleLike` — everything resolves to: what model, what temperature, what tools.
+
+**Functions** (tools) are a global pool defined in `functions.json`. A role or agent *selects from* that pool via `use_tools: "fs,web_search"`. Functions themselves are dumb shell scripts — they have no awareness of who called them.
+
+**Agents** are the composition layer. An agent with `agent: true` tools can delegate to other agents, forming a tree:
+
+```
+User
+ └─ aichat --agent orchestrator "do X"     (depth 0)
+      ├─ _plan: "I'll research first, then implement"
+      ├─ aichat --agent researcher "find Y"   (depth 1)
+      │    └─ web_search, fetch_url (parallel)
+      └─ aichat --agent implementer "build Z" (depth 1)
+           └─ fs_write, execute_command
+```
+
+Each agent in the tree is a full aichat instance: own PID, own turn budget, own tools, own session, own status file. The depth is bounded by `max_agent_depth` (default 3) via `AICHAT_AGENT_DEPTH` env var.
+
 ---
 
 ## Entry Point (`main.rs`)
@@ -30,11 +96,13 @@ agent_loop::run(input, params)
   for turn in 1..=max_turns:
   │   ├─ call_llm_raw (streaming or non-streaming)
   │   ├─ if no tool_calls → LoopComplete, return
-  │   ├─ eval_tool_calls_parallel
+  │   ├─ partition: _plan calls vs real tool calls
+  │   │     └─ _plan: emit PlanReceived, return "acknowledged"
+  │   ├─ eval_tool_calls_parallel (real calls only)
   │   │     ├─ semaphore (max_concurrency)
   │   │     ├─ join_all (parallel dispatch)
   │   │     │    ├─ MCP tools → call_mcp_tool_async
-  │   │     │    ├─ Agent tools → subprocess (future)
+  │   │     │    ├─ Agent tools → eval_agent_tool_subprocess
   │   │     │    └─ Shell tools → spawn_blocking + eval_shell
   │   │     └─ results in original order
   │   ├─ merge_tool_results into next input
@@ -45,11 +113,20 @@ agent_loop::run(input, params)
 
 ### Key properties
 
-- **Provider-agnostic**: Works with any client returning `tool_calls`
-- **Parallel by default**: Multiple tool calls execute concurrently (semaphore-bounded)
-- **Bounded**: Configurable `max_turns` (default 20) prevents runaway
-- **Observable**: Emits `AgentLoopEvent` for progress rendering, OSC titles, status files
-- **Composable**: Sub-agents spawn as separate aichat processes (future Phase E)
+- **Provider-agnostic**: Works with any client returning `tool_calls` — OpenRouter, Claude, Cohere, DeepSeek, Ollama, any OpenAI-compatible endpoint
+- **Parallel by default**: Multiple tool calls execute concurrently (semaphore-bounded at `max_concurrency`)
+- **Bounded**: Configurable `max_turns` (default 20) prevents runaway — the model can't loop forever
+- **Observable**: Emits structured `AgentLoopEvent` for progress rendering, OSC titles, status files, notifications
+- **Composable**: Sub-agents spawn as separate aichat processes with independent lifecycles, recursively orchestrable
+- **Planning-aware**: Built-in `_plan` pseudo-tool lets the model reason before acting without polluting output
+
+### Two loop paths (peers, not competitors)
+
+The server-side loop (OpenAI Responses multi-agent) and the client-side loop (agent_loop) coexist:
+- **Server-side**: Lower latency when the provider supports it (provider-managed state). OpenAI-only.
+- **Client-side**: Universal fallback that makes *every* provider agentic. Provider-agnostic.
+
+They share the tool execution layer but have different delegation models (who decides what to call next).
 
 ### Configuration (`agent_loop` in config.yaml)
 
@@ -66,6 +143,16 @@ agent_loop:
   tool_output_limit: 16384  # Large result capping threshold (bytes)
   workflow_tool: true     # Multi-phase fan-out tool
 ```
+
+### External observability (designed for tmux)
+
+The agent loop emits signals for external management tools (tmux, Herdr, Agent Deck) without parsing stdout:
+
+- **OSC 0/2 terminal title** — live state: `aichat: turn 3/20 | fs_write, execute_command`
+- **JSON status file** — `$XDG_RUNTIME_DIR/aichat-<pid>.json`, one per process (including sub-agents)
+- **BEL + OSC 777** — desktop notifications on completion (tmux `monitor-bell`, Ghostty/iTerm2 native)
+
+Each sub-agent process writes its own independent status file. External tools enumerate `aichat-*.json` for a fleet view. No coordination between processes needed — each owns its own signals.
 
 ---
 
@@ -134,23 +221,26 @@ Tools are external scripts/binaries:
 - Binaries live in `functions/bin/`
 - Agents can have their own function directories
 - MCP tools are merged into the same declaration list
+- `_plan` pseudo-tool is auto-injected when `planning_tool: true`
 
-### Tool dispatch
+### Tool dispatch (three routes)
 
 ```
 ToolCall arrives from LLM
   │
-  ├─ [agent_loop path] eval_tool_calls_parallel → eval_single_tool
-  │     ├─ MCP match?  → call_mcp_tool_async (await)
-  │     ├─ Agent tool?  → subprocess spawn (future)
-  │     └─ Shell tool   → spawn_blocking + eval_shell
+  ├─ _plan?  → return "acknowledged" (handled in loop, not dispatched)
   │
-  └─ [legacy path] eval_tool_calls_async → eval_single_tool_async
-        ├─ MCP match?  → call_mcp_tool_async (await)
-        └─ Shell tool   → spawn_blocking + eval_shell
+  ├─ MCP match?  → call_mcp_tool_async (await, no blocking)
+  │
+  ├─ agent: true? → eval_agent_tool_subprocess
+  │     └─ spawn: aichat --agent <name> "<task>"
+  │        (AICHAT_AGENT_DEPTH incremented, own PID/budget/status)
+  │
+  └─ Shell tool → spawn_blocking + eval_shell
+       └─ run_command(bin_name, args, envs)
 ```
 
-Tool calls are deduplicated and infinite loops are detected.
+Tool calls are deduplicated and infinite loops are detected (before dispatch).
 
 ---
 
@@ -160,9 +250,9 @@ Tool calls are deduplicated and infinite loops are detected.
 
 ### Key concepts
 
-- **Roles** — System prompts stored as markdown files. Built-in roles: `%shell%`, `%code%`, `%explain-shell%`, `%create-title%`, `%functions%`. Users can create custom roles.
+- **Roles** — System prompts stored as markdown files. Built-in roles: `%shell%`, `%code%`, `%explain-shell%`, `%create-title%`, `%functions%`. Users can create custom roles. A role is purely behavioral — it changes *how* the LLM responds, not *what tools* it has access to (that's `use_tools`).
 - **Sessions** — Persistent conversation history with token tracking, auto-compression (summarization when exceeding `compress_threshold`), and auto-naming.
-- **Agents** — Full-featured autonomous entities with: their own functions/tools, MCP servers, RAG integration, variables (user-configurable), dynamic instructions (generated at runtime), conversation starters, and per-session state.
+- **Agents** — Full-featured autonomous entities with: their own functions/tools, MCP servers, RAG integration, variables (user-configurable), dynamic instructions (generated at runtime), conversation starters, and per-session state. An agent spawned as a sub-agent gets its own process, turn budget, and observability.
 - **Macros** — YAML-defined multi-step command sequences with interpolated variables.
 
 The `RoleLike` trait unifies Role, Session, and Agent so the system can extract model/temperature/top_p/tools uniformly.
@@ -202,7 +292,7 @@ Built on `reedline` with:
 - Multi-line input (`::: ... :::`)
 - Buffer editing with external editor (Ctrl+O)
 
-The REPL's `ask_inner` delegates to `agent_loop::run()` for tool-calling interactions.
+The REPL's `ask_inner` delegates to `agent_loop::run()` for all interactions. When tools are configured, the loop handles parallel execution, budgets, and observability. When no tools are configured, the loop runs a single turn and returns — functionally identical to a plain LLM call.
 
 ---
 
@@ -238,7 +328,7 @@ Markdown rendering with `syntect` for syntax highlighting. Handles:
 - **crypto** — SHA-256 hashing
 - **html_to_md** — HTML scraping and conversion
 - **loader** — document loading (files, URLs, recursive crawling, protocol loaders)
-- **spinner** — progress indicators
+- **spinner** — progress indicators (2-second heartbeat for agent loop, avoids CPU churn)
 - **variables** — environment variable interpolation in prompts
 - **render_prompt** — REPL prompt template rendering with colors
 
@@ -255,7 +345,8 @@ Translates natural language to shell commands, then offers interactive options: 
 1. **Macro-heavy client registration** — avoids boilerplate for each provider
 2. **`GlobalConfig` (Arc<RwLock<Config>>)** — shared mutable state across async tasks
 3. **Iterative agent loop with parallel dispatch** — bounded turns, semaphore-controlled concurrency, provider-agnostic
-4. **Sub-agents as subprocesses** — process boundary gives identity, observability, crash isolation
+4. **Sub-agents as subprocesses** — process boundary gives identity, observability, crash isolation, and recursive orchestration (orchestrator → sub-orchestrator → workers)
 5. **Trait-based polymorphism** — `Client` trait for providers, `RoleLike` trait for prompt sources
 6. **Static lazy initialization** — `LazyLock` and `OnceLock` for expensive one-time computations
 7. **Transparent MCP integration** — MCP tools are indistinguishable from shell-exec tools to the rest of the codebase
+8. **Definitions unchanged, runtime enhanced** — the same `index.yaml` + `functions.json` + RAG definitions run through a fundamentally better engine without any format changes
