@@ -2899,7 +2899,7 @@ impl Config {
     }
 
     fn setup_document_loaders(&mut self) {
-        [("pdf", "pdftotext $1 -"), ("docx", "pandoc --to plain $1")]
+        [("pdf", "pdf2md --compact --raw $1"), ("docx", "pandoc --to plain $1")]
             .into_iter()
             .for_each(|(k, v)| {
                 let (k, v) = (k.to_string(), v.to_string());

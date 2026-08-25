@@ -115,7 +115,8 @@ document_loaders:
   # You can add custom loaders using the following syntax:
   #   <file-extension>: <command-to-load-the-file>
   # Note: Use `$1` for input file and `$2` for output file. If `$2` is omitted, use stdout as output.
-  pdf: 'pdftotext $1 -'                         # Load .pdf file, see https://poppler.freedesktop.org to set up pdftotext
+  pdf: 'pdf2md --compact --raw $1'              # Load .pdf as structured Markdown, see https://github.com/firecrawl/pdf-inspector (cargo install pdf-inspector)
+  # pdf: 'pdftotext $1 -'                       # Alternative: plain text extraction via poppler (https://poppler.freedesktop.org)
   docx: 'pandoc --to plain $1'                  # Load .docx file, see https://pandoc.org to set up pandoc
 
 # ---- apperence ----
