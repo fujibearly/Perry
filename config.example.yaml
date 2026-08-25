@@ -44,6 +44,8 @@ use_tools: null                  # Which tools to use by default. (e.g. 'fs,web_
 #   osc_title: true            # Emit terminal title updates (for tmux/Herdr)
 #   status_file: true          # Write JSON status file for external tools
 #   notify: true               # Emit bell + desktop notification on completion
+#   tool_output_limit: 16384   # Cap large tool results (bytes); write full to file
+#   workflow_tool: true         # Enable _workflow multi-phase fan-out tool
 
 # ---- multi-agent ----
 # Hosted multi-agent orchestration is disabled by default.

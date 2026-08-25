@@ -210,6 +210,11 @@ impl Functions {
         self.declarations.extend(declarations);
     }
 
+    /// Create from an explicit list of declarations (for tests and programmatic use).
+    pub fn init_from_declarations(declarations: Vec<FunctionDeclaration>) -> Self {
+        Self { declarations }
+    }
+
     pub fn find(&self, name: &str) -> Option<&FunctionDeclaration> {
         self.declarations.iter().find(|v| v.name == name)
     }

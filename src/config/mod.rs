@@ -1007,6 +1007,41 @@ impl Config {
                 }
             }
         }
+        // Agent loop config (show non-default values)
+        {
+            let al = &self.agent_loop;
+            let defaults = AgentLoopConfig::default();
+            let mut al_parts = vec![];
+            if al.max_turns != defaults.max_turns {
+                al_parts.push(format!("max_turns={}", al.max_turns));
+            }
+            if al.max_concurrency != defaults.max_concurrency {
+                al_parts.push(format!("max_concurrency={}", al.max_concurrency));
+            }
+            if al.max_agent_depth != defaults.max_agent_depth {
+                al_parts.push(format!("max_agent_depth={}", al.max_agent_depth));
+            }
+            if al.show_trace {
+                al_parts.push("show_trace".to_string());
+            }
+            if !al.planning_tool {
+                al_parts.push("planning_tool=off".to_string());
+            }
+            if !al.osc_title {
+                al_parts.push("osc_title=off".to_string());
+            }
+            if !al.status_file {
+                al_parts.push("status_file=off".to_string());
+            }
+            if !al.notify {
+                al_parts.push("notify=off".to_string());
+            }
+            if al_parts.is_empty() {
+                items.push(("agent_loop", "defaults".to_string()));
+            } else {
+                items.push(("agent_loop", al_parts.join(", ")));
+            }
+        }
         let output = items
             .iter()
             .map(|(name, value)| format!("{name:<24}{value}\n"))

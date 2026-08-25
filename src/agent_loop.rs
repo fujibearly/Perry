@@ -833,3 +833,259 @@ pub fn render_event(
 
     Ok(())
 }
+
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Config, RoleLike};
+    use parking_lot::RwLock;
+
+    fn default_config() -> GlobalConfig {
+        Arc::new(RwLock::new(Config::default()))
+    }
+
+    fn config_with_agent_loop(yaml: &str) -> GlobalConfig {
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        Arc::new(RwLock::new(config))
+    }
+
+    // --- Config parsing tests ---
+
+    #[test]
+    fn agent_loop_config_defaults_when_absent() {
+        let config: Config = serde_yaml::from_str("{}").unwrap();
+        let al = &config.agent_loop;
+        assert_eq!(al.max_turns, 20);
+        assert_eq!(al.max_concurrency, 8);
+        assert_eq!(al.max_agent_depth, 3);
+        assert!(!al.show_trace);
+        assert!(al.planning_tool);
+        assert!(al.osc_title);
+        assert!(al.status_file);
+        assert!(al.notify);
+    }
+
+    #[test]
+    fn agent_loop_config_partial_override() {
+        let config: Config =
+            serde_yaml::from_str("agent_loop:\n  max_turns: 50\n  show_trace: true\n").unwrap();
+        let al = &config.agent_loop;
+        assert_eq!(al.max_turns, 50);
+        assert!(al.show_trace);
+        // Others stay default
+        assert_eq!(al.max_concurrency, 8);
+        assert!(al.planning_tool);
+    }
+
+    #[test]
+    fn agent_loop_config_full_override() {
+        let yaml = r#"
+agent_loop:
+  max_turns: 10
+  max_concurrency: 4
+  max_agent_depth: 2
+  show_trace: true
+  planning_tool: false
+  osc_title: false
+  status_file: false
+  notify: false
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let al = &config.agent_loop;
+        assert_eq!(al.max_turns, 10);
+        assert_eq!(al.max_concurrency, 4);
+        assert_eq!(al.max_agent_depth, 2);
+        assert!(al.show_trace);
+        assert!(!al.planning_tool);
+        assert!(!al.osc_title);
+        assert!(!al.status_file);
+        assert!(!al.notify);
+    }
+
+    // --- Planning tool tests ---
+
+    #[test]
+    fn plan_tool_declaration_has_correct_shape() {
+        let decl = plan_tool_declaration();
+        assert_eq!(decl.name, "_plan");
+        assert!(!decl.agent);
+        assert!(decl.description.contains("scratchpad"));
+        let props = decl.parameters.properties.as_ref().unwrap();
+        assert!(props.contains_key("thought"));
+        let required = decl.parameters.required.as_ref().unwrap();
+        assert!(required.contains(&"thought".to_string()));
+    }
+
+    #[test]
+    fn plan_tool_injected_when_enabled_and_tools_exist() {
+        let yaml = r#"
+function_calling: true
+agent_loop:
+  planning_tool: true
+"#;
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "test_tool",
+                "description": "a test",
+                "parameters": {"type": "object"}
+            }))
+            .unwrap(),
+        ]);
+        // Set use_tools on the role so select_functions returns tools
+        let mut role = config.extract_role();
+        role.set_use_tools(Some("all".to_string()));
+        let functions = config.select_functions(&role);
+        let names: Vec<&str> = functions
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(names.contains(&"_plan"));
+        assert!(names.contains(&"test_tool"));
+    }
+
+    #[test]
+    fn plan_tool_not_injected_when_disabled() {
+        let yaml = r#"
+function_calling: true
+agent_loop:
+  planning_tool: false
+"#;
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        config.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "test_tool",
+                "description": "a test",
+                "parameters": {"type": "object"}
+            }))
+            .unwrap(),
+        ]);
+        let mut role = config.extract_role();
+        role.set_use_tools(Some("all".to_string()));
+        let functions = config.select_functions(&role);
+        let names: Vec<&str> = functions
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(!names.contains(&"_plan"));
+        assert!(names.contains(&"test_tool"));
+    }
+
+    #[test]
+    fn plan_tool_not_injected_when_no_tools() {
+        let config: Config = serde_yaml::from_str("agent_loop:\n  planning_tool: true\n").unwrap();
+        let role = config.extract_role();
+        let functions = config.select_functions(&role);
+        assert!(functions.is_none());
+    }
+
+    // --- Progress tracking tests ---
+
+    #[test]
+    fn progress_live_emits_and_receives_events() {
+        let (progress, mut rx) = AgentLoopProgress::live();
+        progress.emit(AgentLoopEvent::TurnStart {
+            turn: 1,
+            max_turns: 20,
+        });
+        progress.emit(AgentLoopEvent::LoopComplete);
+
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, AgentLoopEvent::TurnStart { turn: 1, .. }));
+        let event = rx.try_recv().unwrap();
+        assert!(matches!(event, AgentLoopEvent::LoopComplete));
+    }
+
+    #[test]
+    fn progress_snapshot_tracks_turn_and_active_tools() {
+        let (progress, _rx) = AgentLoopProgress::live();
+        progress.set_turn(3, 20);
+        progress.add_active_tool("fs_write");
+        progress.add_active_tool("execute_command");
+
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.current_turn, 3);
+        assert_eq!(snapshot.max_turns, 20);
+        assert_eq!(snapshot.active_tools, vec!["fs_write", "execute_command"]);
+
+        progress.remove_active_tool("fs_write");
+        let snapshot = progress.snapshot();
+        assert_eq!(snapshot.active_tools, vec!["execute_command"]);
+    }
+
+    // --- Trace formatting tests ---
+
+    #[test]
+    fn format_trace_event_produces_expected_output() {
+        let event = AgentLoopEvent::ToolComplete {
+            name: "fs_write".to_string(),
+            duration: Duration::from_millis(1234),
+            success: true,
+        };
+        let line = format_trace_event(&event).unwrap();
+        assert!(line.contains("fs_write"));
+        assert!(line.contains("completed"));
+        assert!(line.contains("1.2s"));
+
+        let event = AgentLoopEvent::ToolComplete {
+            name: "bad_tool".to_string(),
+            duration: Duration::from_millis(500),
+            success: false,
+        };
+        let line = format_trace_event(&event).unwrap();
+        assert!(line.contains("FAILED"));
+    }
+
+    #[test]
+    fn format_spinner_message_shows_tools_when_active() {
+        let snapshot = AgentLoopSnapshot {
+            current_turn: 2,
+            max_turns: 20,
+            active_tools: vec!["fs_write".to_string(), "web_search".to_string()],
+            elapsed: Duration::from_secs(5),
+        };
+        let msg = format_spinner_message(&snapshot);
+        assert!(msg.contains("Turn 2/20"));
+        assert!(msg.contains("fs_write"));
+        assert!(msg.contains("web_search"));
+    }
+
+    #[test]
+    fn format_spinner_message_no_tools() {
+        let snapshot = AgentLoopSnapshot {
+            current_turn: 1,
+            max_turns: 10,
+            active_tools: vec![],
+            elapsed: Duration::from_secs(3),
+        };
+        let msg = format_spinner_message(&snapshot);
+        assert!(msg.contains("Turn 1/10"));
+        assert!(!msg.contains("|"));
+    }
+
+    // --- Depth enforcement test ---
+
+    #[test]
+    fn agent_depth_check_respects_env_var() {
+        // Simulate being at max depth
+        std::env::set_var("AICHAT_AGENT_DEPTH", "3");
+        let config = config_with_agent_loop("agent_loop:\n  max_agent_depth: 3\n");
+        let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let max_depth = config.read().agent_loop.max_agent_depth;
+        assert!(current_depth >= max_depth);
+        // Clean up
+        std::env::remove_var("AICHAT_AGENT_DEPTH");
+    }
+}
