@@ -187,6 +187,7 @@ pub async fn eval_tool_calls_parallel(
     }
 
     let max_concurrency = config.read().agent_loop.max_concurrency;
+    let tool_output_limit = config.read().agent_loop.tool_output_limit;
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrency));
 
     let futures: Vec<_> = calls
@@ -215,7 +216,18 @@ pub async fn eval_tool_calls_parallel(
                             duration,
                             success: true,
                         });
-                        if value.is_null() { json!("DONE") } else { value }
+                        if value.is_null() {
+                            json!("DONE")
+                        } else {
+                            // Apply output routing (capping, file, pipe)
+                            apply_output_routing(
+                                &config,
+                                &call.name,
+                                value,
+                                tool_output_limit,
+                            )
+                            .await
+                        }
                     }
                     Err(_) => {
                         progress.emit(AgentLoopEvent::ToolComplete {
@@ -415,6 +427,225 @@ async fn eval_agent_tool_subprocess(
 }
 
 // ---------------------------------------------------------------------------
+// Output routing: capping, file destination, pipe destination
+// ---------------------------------------------------------------------------
+
+use crate::function::{OutputDestination, OutputRouting};
+use std::collections::HashSet;
+
+/// Apply output routing to a tool's result based on its declaration.
+///
+/// Routes: Context (with auto-capping), File (write + confirmation), Pipe (chain to target).
+/// Returns the value that should be placed in the ToolResult for the conversation.
+#[async_recursion::async_recursion]
+async fn apply_output_routing(
+    config: &GlobalConfig,
+    tool_name: &str,
+    output: serde_json::Value,
+    tool_output_limit: usize,
+) -> serde_json::Value {
+    let routing = get_tool_routing(config, tool_name);
+
+    match routing.as_ref().map(|r| &r.destination) {
+        Some(OutputDestination::File) => {
+            route_to_file(&output, tool_name, routing.as_ref().unwrap())
+        }
+        Some(OutputDestination::Pipe) => {
+            let target = routing
+                .as_ref()
+                .and_then(|r| r.target.as_deref())
+                .unwrap_or("");
+            if target.is_empty() {
+                apply_capping(output, tool_name, tool_output_limit)
+            } else if detect_pipe_cycle(config, tool_name).is_err() {
+                json!({
+                    "error": {
+                        "type": "pipe_cycle_error",
+                        "message": format!("Pipe cycle detected starting from tool '{tool_name}'")
+                    }
+                })
+            } else {
+                match route_to_pipe(config, output, target, tool_output_limit).await {
+                    Ok(result) => result,
+                    Err(e) => json!({
+                        "error": {
+                            "type": "pipe_error",
+                            "message": format!("Pipe to '{target}' failed: {e}")
+                        }
+                    }),
+                }
+            }
+        }
+        _ => {
+            apply_capping(output, tool_name, tool_output_limit)
+        }
+    }
+}
+
+/// Look up the output routing declaration for a tool.
+fn get_tool_routing(config: &GlobalConfig, tool_name: &str) -> Option<OutputRouting> {
+    let config_read = config.read();
+    if let Some(agent) = &config_read.agent {
+        if let Some(decl) = agent.functions().find(tool_name) {
+            return decl.output.clone();
+        }
+    }
+    if let Some(decl) = config_read.functions.find(tool_name) {
+        return decl.output.clone();
+    }
+    None
+}
+
+/// Apply large-result capping: if output exceeds the limit, write to temp file and return preview.
+fn apply_capping(
+    output: serde_json::Value,
+    tool_name: &str,
+    limit: usize,
+) -> serde_json::Value {
+    if limit == 0 {
+        return output;
+    }
+    let content = value_to_string(&output);
+    if content.len() <= limit {
+        return output;
+    }
+
+    // Write full output to temp file
+    let pid = std::process::id();
+    let path = format!("/tmp/aichat-tool-{tool_name}-{pid}.out");
+    if std::fs::write(&path, &content).is_err() {
+        // Can't write temp file — return original (don't lose data)
+        return output;
+    }
+
+    // Build preview
+    let preview: String = content.chars().take(limit).collect();
+    let total_bytes = content.len();
+    let hint = if output.is_object() {
+        if let Some(obj) = output.as_object() {
+            let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+            format!("JSON object with keys: {}", keys.join(", "))
+        } else {
+            format!("{} lines", content.lines().count())
+        }
+    } else {
+        format!("{} lines", content.lines().count())
+    };
+
+    json!({
+        "preview": preview,
+        "full_output_path": path,
+        "total_bytes": total_bytes,
+        "hint": hint
+    })
+}
+
+/// Write tool output to a file and return a confirmation.
+fn route_to_file(
+    output: &serde_json::Value,
+    tool_name: &str,
+    routing: &OutputRouting,
+) -> serde_json::Value {
+    let content = value_to_string(output);
+    let path = match &routing.path {
+        Some(template) => expand_path_template(template, tool_name, None),
+        None => format!("/tmp/{tool_name}-output.txt"),
+    };
+
+    // Create parent directories
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Write
+    match std::fs::write(&path, &content) {
+        Ok(()) => {
+            let lines = content.lines().count();
+            json!({
+                "written_to": path,
+                "size_bytes": content.len(),
+                "hint": format!("{lines} lines")
+            })
+        }
+        Err(e) => {
+            // Fall back to returning the original output
+            warn!("File routing failed for '{}': {e}. Falling back to context.", path);
+            output.clone()
+        }
+    }
+}
+
+/// Pipe tool output to another tool, return the final result.
+async fn route_to_pipe(
+    config: &GlobalConfig,
+    output: serde_json::Value,
+    target_tool: &str,
+    tool_output_limit: usize,
+) -> Result<serde_json::Value> {
+    // Build a synthetic ToolCall for the target with the source output as input
+    let input_content = value_to_string(&output);
+    let pipe_call = ToolCall::new(
+        target_tool.to_string(),
+        json!({"input": input_content}),
+        None,
+    );
+
+    // Execute the target tool
+    let result = eval_single_tool(config, &pipe_call).await?;
+
+    // Recursively apply routing to the target's result (handles chained pipes)
+    Ok(apply_output_routing(config, target_tool, result, tool_output_limit).await)
+}
+
+/// Detect cycles in a pipe chain.
+fn detect_pipe_cycle(config: &GlobalConfig, start_tool: &str) -> Result<()> {
+    let mut visited = HashSet::new();
+    visited.insert(start_tool.to_string());
+
+    let mut current = start_tool.to_string();
+    loop {
+        let routing = get_tool_routing(config, &current);
+        match routing {
+            Some(ref r) if r.destination == OutputDestination::Pipe => {
+                let target = match &r.target {
+                    Some(t) => t.clone(),
+                    None => break,
+                };
+                if !visited.insert(target.clone()) {
+                    bail!("Pipe cycle: {} → ... → {}", start_tool, target);
+                }
+                current = target;
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+/// Expand path template variables.
+fn expand_path_template(template: &str, tool_name: &str, call_id: Option<&str>) -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    template
+        .replace("{{name}}", tool_name)
+        .replace("{{id}}", call_id.unwrap_or("none"))
+        .replace("{{timestamp}}", &timestamp.to_string())
+        .replace("{{ext}}", "txt")
+}
+
+/// Convert a serde_json::Value to a string for file writing / size checking.
+fn value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        _ => serde_json::to_string_pretty(value).unwrap_or_default(),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Planning tool declaration
 // ---------------------------------------------------------------------------
 
@@ -450,6 +681,7 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
             ..Default::default()
         },
         agent: false,
+        output: None,
     }
 }
 
@@ -1087,5 +1319,222 @@ agent_loop:
         assert!(current_depth >= max_depth);
         // Clean up
         std::env::remove_var("AICHAT_AGENT_DEPTH");
+    }
+
+    // --- Output routing tests ---
+
+    #[test]
+    fn capping_passes_small_results_unchanged() {
+        let small = json!({"data": "hello world"});
+        let result = apply_capping(small.clone(), "test_tool", 16384);
+        assert_eq!(result, small);
+    }
+
+    #[test]
+    fn capping_caps_large_results() {
+        let large_content = "x".repeat(20000);
+        let large = json!(large_content);
+        let result = apply_capping(large, "cap_test", 16384);
+
+        assert!(result.get("preview").is_some());
+        assert!(result.get("full_output_path").is_some());
+        assert!(result.get("total_bytes").is_some());
+        assert_eq!(result["total_bytes"], 20000);
+
+        let preview = result["preview"].as_str().unwrap();
+        assert_eq!(preview.len(), 16384);
+
+        // Clean up temp file
+        if let Some(path) = result["full_output_path"].as_str() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn capping_disabled_when_limit_is_zero() {
+        let large = json!("x".repeat(20000));
+        let result = apply_capping(large.clone(), "test_tool", 0);
+        assert_eq!(result, large);
+    }
+
+    #[test]
+    fn capping_hint_shows_lines_for_strings() {
+        let multiline = "line1\nline2\nline3\n".repeat(2000);
+        let value = json!(multiline);
+        let result = apply_capping(value, "lines_test", 100);
+
+        let hint = result["hint"].as_str().unwrap();
+        assert!(hint.contains("lines"));
+
+        if let Some(path) = result["full_output_path"].as_str() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn capping_hint_shows_keys_for_json_objects() {
+        // Build a JSON object that exceeds the limit
+        let mut obj = serde_json::Map::new();
+        obj.insert("alpha".to_string(), json!("x".repeat(10000)));
+        obj.insert("beta".to_string(), json!("y".repeat(10000)));
+        let value = serde_json::Value::Object(obj);
+
+        let result = apply_capping(value, "json_test", 100);
+        let hint = result["hint"].as_str().unwrap();
+        assert!(hint.contains("alpha"));
+        assert!(hint.contains("beta"));
+
+        if let Some(path) = result["full_output_path"].as_str() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn file_routing_writes_and_returns_confirmation() {
+        let output = json!("file content here");
+        let routing = OutputRouting {
+            destination: OutputDestination::File,
+            path: Some("/tmp/aichat-test-{{name}}.txt".to_string()),
+            target: None,
+        };
+
+        let result = route_to_file(&output, "route_test", &routing);
+
+        assert!(result.get("written_to").is_some());
+        assert!(result.get("size_bytes").is_some());
+        let path = result["written_to"].as_str().unwrap();
+        assert!(path.contains("route_test"));
+
+        // Verify file was written
+        let content = std::fs::read_to_string(path).unwrap();
+        assert_eq!(content, "file content here");
+
+        // Clean up
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_routing_falls_back_on_invalid_path() {
+        let output = json!("test data");
+        let routing = OutputRouting {
+            destination: OutputDestination::File,
+            path: Some("/nonexistent/deeply/nested/impossible/path/file.txt".to_string()),
+            target: None,
+        };
+
+        let result = route_to_file(&output, "fallback_test", &routing);
+        // Should fall back to returning the original output
+        assert_eq!(result, json!("test data"));
+    }
+
+    #[test]
+    fn template_expansion_replaces_variables() {
+        let expanded = expand_path_template(
+            "/tmp/{{name}}-{{id}}-{{ext}}",
+            "my_tool",
+            Some("call-123"),
+        );
+        assert!(expanded.contains("my_tool"));
+        assert!(expanded.contains("call-123"));
+        assert!(expanded.contains("txt"));
+        assert!(!expanded.contains("{{"));
+    }
+
+    #[test]
+    fn template_expansion_handles_missing_id() {
+        let expanded = expand_path_template("/tmp/{{name}}-{{id}}.out", "tool", None);
+        assert!(expanded.contains("tool"));
+        assert!(expanded.contains("none"));
+    }
+
+    #[test]
+    fn pipe_cycle_detection_catches_self_reference() {
+        let mut config_inner = Config::default();
+        config_inner.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "loop_tool",
+                "description": "loops to itself",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": "loop_tool"}
+            }))
+            .unwrap(),
+        ]);
+        let config: GlobalConfig = Arc::new(RwLock::new(config_inner));
+
+        let result = detect_pipe_cycle(&config, "loop_tool");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pipe_cycle_detection_allows_linear_chain() {
+        let mut config_inner = Config::default();
+        config_inner.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "tool_a",
+                "description": "pipes to b",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": "tool_b"}
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "name": "tool_b",
+                "description": "no pipe",
+                "parameters": {"type": "object"}
+            }))
+            .unwrap(),
+        ]);
+        let config: GlobalConfig = Arc::new(RwLock::new(config_inner));
+
+        let result = detect_pipe_cycle(&config, "tool_a");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn value_to_string_handles_all_types() {
+        assert_eq!(value_to_string(&json!("hello")), "hello");
+        assert_eq!(value_to_string(&json!(null)), "");
+        let obj_str = value_to_string(&json!({"a": 1}));
+        assert!(obj_str.contains("\"a\""));
+        assert!(obj_str.contains("1"));
+    }
+
+    #[test]
+    fn output_routing_deserializes_from_json() {
+        let decl: crate::function::FunctionDeclaration = serde_json::from_value(json!({
+            "name": "test",
+            "description": "test tool",
+            "parameters": {"type": "object"},
+            "output": {"destination": "file", "path": "/tmp/{{name}}.md"}
+        }))
+        .unwrap();
+
+        let routing = decl.output.unwrap();
+        assert_eq!(routing.destination, OutputDestination::File);
+        assert_eq!(routing.path.unwrap(), "/tmp/{{name}}.md");
+    }
+
+    #[test]
+    fn output_routing_absent_means_context() {
+        let decl: crate::function::FunctionDeclaration = serde_json::from_value(json!({
+            "name": "test",
+            "description": "test tool",
+            "parameters": {"type": "object"}
+        }))
+        .unwrap();
+
+        assert!(decl.output.is_none());
+    }
+
+    #[test]
+    fn tool_output_limit_config_defaults_to_16kb() {
+        let config: Config = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.agent_loop.tool_output_limit, 16384);
+    }
+
+    #[test]
+    fn tool_output_limit_config_overridable() {
+        let config: Config =
+            serde_yaml::from_str("agent_loop:\n  tool_output_limit: 32768\n").unwrap();
+        assert_eq!(config.agent_loop.tool_output_limit, 32768);
     }
 }

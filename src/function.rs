@@ -239,6 +239,34 @@ pub struct FunctionDeclaration {
     pub parameters: JsonSchema,
     #[serde(skip_serializing, default)]
     pub agent: bool,
+    /// Output routing: where this tool's result goes after execution.
+    /// Absent or null = context (default behavior).
+    #[serde(skip_serializing, default)]
+    pub output: Option<OutputRouting>,
+}
+
+/// Routing declaration for a tool's output.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct OutputRouting {
+    /// Destination: "context" (default), "file", or "pipe".
+    pub destination: OutputDestination,
+    /// File path template (for "file" destination). Supports {{name}}, {{id}}, {{timestamp}}, {{ext}}.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Target tool name (for "pipe" destination).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+/// Output destination for a tool result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputDestination {
+    #[default]
+    Context,
+    File,
+    Pipe,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

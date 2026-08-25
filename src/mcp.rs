@@ -482,6 +482,7 @@ fn cached_tool_to_entry(server_name: &str, tool: &CachedTool) -> McpToolEntry {
             description: tool.description.clone(),
             parameters,
             agent: false,
+            output: None,
         },
     }
 }

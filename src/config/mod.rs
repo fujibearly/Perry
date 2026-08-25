@@ -291,6 +291,8 @@ pub struct AgentLoopConfig {
     pub status_file: bool,
     /// Emit BEL + OSC 777 notifications on completion/blocked. Default: true.
     pub notify: bool,
+    /// Cap large tool results at this byte threshold. 0 = no capping. Default: 16384 (16 KB).
+    pub tool_output_limit: usize,
 }
 
 impl Default for AgentLoopConfig {
@@ -304,6 +306,7 @@ impl Default for AgentLoopConfig {
             osc_title: true,
             status_file: true,
             notify: true,
+            tool_output_limit: 16384,
         }
     }
 }
