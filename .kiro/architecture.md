@@ -139,20 +139,44 @@ agent_loop:
   planning_tool: true     # Inject _plan pseudo-tool
   osc_title: true         # Terminal title updates
   status_file: true       # JSON status file for external tools
-  notify: true            # BEL + OSC 777 on completion
+  notify: true            # BEL + OSC 777/9/99 on completion (multi-protocol)
   tool_output_limit: 16384  # Large result capping threshold (bytes)
+  max_cost: 0.0           # Cost budget in USD (0 = unlimited)
   workflow_tool: true     # Multi-phase fan-out tool
 ```
 
 ### External observability (designed for tmux)
 
-The agent loop emits signals for external management tools (tmux, Herdr, Agent Deck) without parsing stdout:
+The agent loop emits signals for external management tools (tmux, Herdr, Agent Deck) without parsing stdout. All signals go to `/dev/tty` directly — pipe-proof, works regardless of stdout/stderr state.
 
-- **OSC 0/2 terminal title** — live state: `aichat: turn 3/20 | fs_write, execute_command`
+- **OSC 0/2 terminal title** — live state: `turn 3/20 | fs_write, execute_command | orchestrator:12345 (8s)`
+  - Written directly to `/dev/tty` — works regardless of stdout/stderr pipe state
+  - Updates every 2s (heartbeat) with elapsed timer, not just on events
+  - Agent/role label + PID rightmost for easy scanning when PID changes
+  - Sub-agents (depth > 0) do NOT write to the title — only root owns the pane
+  - On completion: `done | orchestrator:12345`
 - **JSON status file** — `$XDG_RUNTIME_DIR/aichat-<pid>.json`, one per process (including sub-agents)
-- **BEL + OSC 777** — desktop notifications on completion (tmux `monitor-bell`, Ghostty/iTerm2 native)
+  - Stale files from crashed processes are cleaned up at startup (checks `/proc/<pid>`)
+- **BEL + OSC 777/9/99** — desktop notifications on completion (via `/dev/tty`)
+  - BEL: universal (tmux `monitor-bell`)
+  - OSC 777: Ghostty, iTerm2, VS Code, rxvt-unicode
+  - OSC 9: Windows Terminal, ConEmu
+  - OSC 99: Kitty
+- **Trace output** — controlled by `show_trace` / `AICHAT_AGENT_LOOP_SHOW_TRACE`
+  - Written to `/dev/tty` (live on terminal, not captured by pipes)
+  - Falls back to stderr when no `/dev/tty` (CI, containers)
+  - Format: `Agent orchestrator (12345) loop trace:` / `[12345 calling: researcher]`
+  - Each line prefixed with PID — interleaved sub-agent traces are distinguishable
 
 Each sub-agent process writes its own independent status file. External tools enumerate `aichat-*.json` for a fleet view. No coordination between processes needed — each owns its own signals.
+
+### Circuit breaker
+
+After 3 consecutive failures of the same tool within a single loop run, the tool is "tripped":
+- Further calls return an immediate `circuit_breaker` error without execution
+- The model receives the error and can pivot to alternative tools
+- A successful call resets the counter (transient failures don't trip it)
+- Prevents runaway loops where a broken tool is retried for 20 turns
 
 ---
 

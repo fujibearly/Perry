@@ -758,6 +758,10 @@ async fn ask_inner(
     };
 
     let agent_loop_config = config.read().agent_loop.clone();
+    let agent_label = config.read().agent.as_ref()
+        .map(|a| a.name().to_string())
+        .or_else(|| config.read().role.as_ref().map(|r| r.name().to_string()))
+        .unwrap_or_else(|| "aichat".to_string());
 
     // Run with observability rendering
     let (spinner, spinner_rx) = Spinner::create("");
@@ -775,7 +779,7 @@ async fn ask_inner(
                     while let Ok(event) = event_rx.try_recv() {
                         let snapshot = progress.snapshot();
                         let _ = crate::agent_loop::render_event(
-                            &event, &snapshot, &agent_loop_config,
+                            &event, &snapshot, &agent_loop_config, &agent_label,
                             &spinner, &mut trace_header_printed,
                         );
                     }
@@ -784,7 +788,7 @@ async fn ask_inner(
                 Some(event) = event_rx.recv() => {
                     let snapshot = progress.snapshot();
                     let _ = crate::agent_loop::render_event(
-                        &event, &snapshot, &agent_loop_config,
+                        &event, &snapshot, &agent_loop_config, &agent_label,
                         &spinner, &mut trace_header_printed,
                     );
                     if *IS_STDOUT_TERMINAL {
@@ -810,7 +814,7 @@ async fn ask_inner(
         crate::agent_loop::cleanup_status_file();
     }
     if agent_loop_config.osc_title {
-        crate::agent_loop::update_terminal_title("aichat: idle");
+        crate::agent_loop::update_terminal_title(&format!("idle | {}:{}", agent_label, std::process::id()));
     }
     // REPL notification: waiting for input
     if agent_loop_config.notify {

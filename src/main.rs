@@ -76,6 +76,8 @@ async fn main() -> Result<()> {
         || cli.list_sessions;
     setup_logger(working_mode.is_serve())?;
     let config = Arc::new(RwLock::new(Config::init(working_mode, info_flag).await?));
+    // Remove leftover status files from crashed/killed aichat processes
+    crate::agent_loop::cleanup_stale_status_files();
     if let Err(err) = run(config, cli, text).await {
         render_error(err);
         #[cfg(feature = "mcp")]
@@ -384,6 +386,21 @@ async fn run_directive(
     };
 
     let agent_loop_config = config.read().agent_loop.clone();
+    let agent_label = config.read().agent.as_ref()
+        .map(|a| a.name().to_string())
+        .or_else(|| config.read().role.as_ref().map(|r| r.name().to_string()))
+        .unwrap_or_else(|| "aichat".to_string());
+
+    // Sub-agents (depth > 0) should not overwrite the pane title — only the root owns it.
+    let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let mut agent_loop_config = agent_loop_config;
+    if current_depth > 0 {
+        agent_loop_config.osc_title = false;
+        agent_loop_config.notify = false;
+    }
 
     // If no trace/observability needed and stdout is not a terminal, run without rendering overhead
     if !agent_loop_config.show_trace
@@ -415,7 +432,7 @@ async fn run_directive(
                     while let Ok(event) = event_rx.try_recv() {
                         let snapshot = progress.snapshot();
                         let _ = crate::agent_loop::render_event(
-                            &event, &snapshot, &agent_loop_config,
+                            &event, &snapshot, &agent_loop_config, &agent_label,
                             &spinner, &mut trace_header_printed,
                         );
                     }
@@ -424,7 +441,7 @@ async fn run_directive(
                 Some(event) = event_rx.recv() => {
                     let snapshot = progress.snapshot();
                     let _ = crate::agent_loop::render_event(
-                        &event, &snapshot, &agent_loop_config,
+                        &event, &snapshot, &agent_loop_config, &agent_label,
                         &spinner, &mut trace_header_printed,
                     );
                     // Update spinner message on events (lightweight, no animation tick)
@@ -434,11 +451,15 @@ async fn run_directive(
                     }
                 }
                 _ = heartbeat.tick() => {
-                    // Periodic spinner update for long-running tools
+                    // Periodic spinner + title update for long-running tools
+                    let snapshot = progress.snapshot();
                     if *IS_STDOUT_TERMINAL {
-                        let snapshot = progress.snapshot();
                         let msg = crate::agent_loop::format_spinner_message(&snapshot);
                         let _ = spinner.set_message(msg);
+                    }
+                    if agent_loop_config.osc_title {
+                        let title = crate::agent_loop::format_heartbeat_title(&snapshot, &agent_label);
+                        crate::agent_loop::update_terminal_title(&title);
                     }
                 }
             }
@@ -451,9 +472,11 @@ async fn run_directive(
     if agent_loop_config.status_file {
         crate::agent_loop::cleanup_status_file();
     }
-    // Reset terminal title
+    // Reset terminal title — keep "done" visible, don't overwrite with "idle"
+    // The title stays until the next command runs in the pane.
     if agent_loop_config.osc_title {
-        crate::agent_loop::update_terminal_title("aichat: idle");
+        let pid = std::process::id();
+        crate::agent_loop::update_terminal_title(&format!("done | {agent_label}:{pid}"));
     }
 
     let output = result?;

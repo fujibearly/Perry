@@ -272,7 +272,7 @@ impl OpenAIServiceTier {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentLoopConfig {
     /// Maximum turns before stopping. Default: 20.
@@ -293,6 +293,8 @@ pub struct AgentLoopConfig {
     pub notify: bool,
     /// Cap large tool results at this byte threshold. 0 = no capping. Default: 16384 (16 KB).
     pub tool_output_limit: usize,
+    /// Maximum estimated cost (USD) before stopping. 0.0 = no limit. Default: 0.0.
+    pub max_cost: f64,
 }
 
 impl Default for AgentLoopConfig {
@@ -307,6 +309,7 @@ impl Default for AgentLoopConfig {
             status_file: true,
             notify: true,
             tool_output_limit: 16384,
+            max_cost: 0.0,
         }
     }
 }
@@ -2862,6 +2865,9 @@ impl Config {
         }
         if let Some(Some(v)) = read_env_bool(&get_env_name("agent_loop_show_trace")) {
             self.agent_loop.show_trace = v;
+        }
+        if let Some(Some(v)) = read_env_value::<f64>(&get_env_name("agent_loop_max_cost")) {
+            self.agent_loop.max_cost = v;
         }
     }
 

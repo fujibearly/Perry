@@ -10,7 +10,7 @@ use crate::client::{
     call_chat_completions_raw, call_chat_completions_streaming_raw, ChatCompletionsOutput,
     TokenUsage,
 };
-use crate::config::{GlobalConfig, Input};
+use crate::config::{GlobalConfig, Input, RoleLike};
 use crate::function::{FunctionDeclaration, JsonSchema, ToolCall, ToolResult};
 use crate::utils::*;
 
@@ -78,6 +78,10 @@ pub enum AgentLoopEvent {
     BudgetExhausted {
         max_turns: usize,
     },
+    CostExhausted {
+        cost: f64,
+        max_cost: f64,
+    },
     LoopComplete,
 }
 
@@ -96,6 +100,7 @@ struct AgentLoopProgressState {
     current_turn: usize,
     max_turns: usize,
     active_tools: Vec<String>,
+    accumulated_cost: f64,
     event_sender: Option<UnboundedSender<AgentLoopEvent>>,
 }
 
@@ -106,6 +111,7 @@ pub struct AgentLoopSnapshot {
     pub max_turns: usize,
     pub active_tools: Vec<String>,
     pub elapsed: Duration,
+    pub accumulated_cost: f64,
 }
 
 impl AgentLoopProgress {
@@ -141,7 +147,18 @@ impl AgentLoopProgress {
             max_turns: state.max_turns,
             active_tools: state.active_tools.clone(),
             elapsed,
+            accumulated_cost: state.accumulated_cost,
         }
+    }
+
+    /// Add cost to the running total.
+    pub fn add_cost(&self, cost: f64) {
+        self.state.lock().accumulated_cost += cost;
+    }
+
+    /// Get the current accumulated cost.
+    pub fn cost(&self) -> f64 {
+        self.state.lock().accumulated_cost
     }
 
     /// Update the current turn counter (called by the loop on each iteration).
@@ -210,7 +227,16 @@ pub async fn eval_tool_calls_parallel(
                 let duration = start.elapsed();
 
                 let output = match result {
-                    Ok(value) => {
+                    Ok(mut value) => {
+                        // Extract sub-agent cost if present
+                        if let Some(obj) = value.as_object_mut() {
+                            if let Some(cost_val) = obj.remove("__sub_agent_cost") {
+                                if let Some(cost) = cost_val.as_f64() {
+                                    progress.add_cost(cost);
+                                }
+                            }
+                        }
+
                         progress.emit(AgentLoopEvent::ToolComplete {
                             name: call.name.clone(),
                             duration,
@@ -325,7 +351,17 @@ async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serd
             }
         };
         if is_agent {
-            return eval_agent_tool_subprocess(config, call).await;
+            let (result, sub_cost) = eval_agent_tool_subprocess(config, call).await?;
+            // Sub-agent cost will be aggregated by the caller via progress.add_cost()
+            // We encode it in the result metadata for the parallel dispatcher to pick up.
+            if sub_cost > 0.0 {
+                if let serde_json::Value::Object(ref map) = result {
+                    let mut enriched = map.clone();
+                    enriched.insert("__sub_agent_cost".to_string(), json!(sub_cost));
+                    return Ok(serde_json::Value::Object(enriched));
+                }
+            }
+            return Ok(result);
         }
     }
 
@@ -344,7 +380,7 @@ async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serd
 async fn eval_agent_tool_subprocess(
     config: &GlobalConfig,
     call: &ToolCall,
-) -> Result<serde_json::Value> {
+) -> Result<(serde_json::Value, f64)> {
     // 1. Check depth limit
     let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
         .ok()
@@ -383,6 +419,7 @@ async fn eval_agent_tool_subprocess(
     let aichat_bin = std::env::current_exe()?;
     let mut cmd = tokio::process::Command::new(&aichat_bin);
     cmd.arg("--agent").arg(&agent_name);
+    cmd.arg("--show-cost");
     cmd.arg(&task_message);
 
     // Pass depth to child
@@ -402,27 +439,29 @@ async fn eval_agent_tool_subprocess(
     let _pid = child.id().unwrap_or(0);
     let output = child.wait_with_output().await?;
 
-    // 6. Return result
+    // 6. Return result + parse sub-agent cost from stderr
+    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
+    let sub_cost = parse_cost_from_stderr(&stderr_text);
+
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        Ok(json!({"output": text}))
+        Ok((json!({"output": text}), sub_cost))
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let message = if stderr.is_empty() {
+        let message = if stderr_text.trim().is_empty() {
             format!(
                 "Sub-agent '{}' exited with code {:?}",
                 agent_name,
                 output.status.code()
             )
         } else {
-            stderr
+            stderr_text.trim().to_string()
         };
-        Ok(json!({
+        Ok((json!({
             "error": {
                 "type": "agent_error",
                 "message": message
             }
-        }))
+        }), sub_cost))
     }
 }
 
@@ -546,7 +585,11 @@ fn route_to_file(
     tool_name: &str,
     routing: &OutputRouting,
 ) -> serde_json::Value {
-    let content = value_to_string(output);
+    // Unwrap the {"output": "..."} wrapper that run_llm_function adds for non-JSON tool output
+    let content = match output.get("output").and_then(|v| v.as_str()) {
+        Some(raw) if output.as_object().map_or(false, |o| o.len() == 1) => raw.to_string(),
+        _ => value_to_string(output),
+    };
     let path = match &routing.path {
         Some(template) => expand_path_template(template, tool_name, None),
         None => format!("/tmp/{tool_name}-output.txt"),
@@ -697,9 +740,18 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
 /// budget, emits progress events, and supports the full async tool dispatch.
 pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopOutput> {
     let max_turns = params.config.read().agent_loop.max_turns;
+    let max_cost = params.config.read().agent_loop.max_cost;
+    let model = input.role().model().clone();
     let mut current_input = input;
     let mut total_usage = TokenUsage::default();
     let mut last_text = String::new();
+
+    // Circuit breaker: track consecutive failures per tool name.
+    // After 3 consecutive failures, the tool is "tripped" and further calls
+    // return an error immediately without execution.
+    const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
+    let mut tool_failure_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut tripped_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for turn in 1..=max_turns {
         params.progress.set_turn(turn, max_turns);
@@ -715,6 +767,28 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
 
         total_usage.add(output.usage());
         last_text = output.text.clone();
+
+        // Track cost
+        if let Some(turn_cost) = model.usage_cost(output.usage()) {
+            params.progress.add_cost(turn_cost);
+        }
+
+        // Cost budget check
+        if max_cost > 0.0 && params.progress.cost() > max_cost {
+            params.progress.emit(AgentLoopEvent::CostExhausted {
+                cost: params.progress.cost(),
+                max_cost,
+            });
+            eprintln!(
+                "Warning: Agent loop exceeded the ${:.4} cost limit (spent ${:.4}). \
+                 Increase with `agent_loop.max_cost` in config.yaml or AICHAT_AGENT_LOOP_MAX_COST=N.",
+                max_cost, params.progress.cost()
+            );
+            return Ok(AgentLoopOutput {
+                usage: total_usage,
+                final_text: last_text,
+            });
+        }
 
         if tool_calls.is_empty() {
             // No tools → final turn, save the message
@@ -754,20 +828,63 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             ));
         }
 
-        // Execute real tool calls in parallel
-        if !real_calls.is_empty() {
+        // Circuit breaker: separate tripped calls from executable calls
+        let (tripped_calls, executable_calls): (Vec<ToolCall>, Vec<ToolCall>) =
+            real_calls.into_iter().partition(|c| tripped_tools.contains(&c.name));
+
+        // Return immediate errors for tripped tools
+        for call in &tripped_calls {
+            tool_results.push(ToolResult::new(
+                call.clone(),
+                json!({
+                    "error": {
+                        "type": "circuit_breaker",
+                        "message": format!(
+                            "Tool '{}' has been disabled after {} consecutive failures. \
+                             Use a different tool or approach.",
+                            call.name, CIRCUIT_BREAKER_THRESHOLD
+                        )
+                    }
+                }),
+            ));
+        }
+
+        // Execute remaining tool calls in parallel
+        if !executable_calls.is_empty() {
             let real_results = eval_tool_calls_parallel(
                 params.config,
-                real_calls,
+                executable_calls,
                 params.abort_signal.clone(),
                 &params.progress,
             )
             .await?;
+
+            // Update circuit breaker state based on results
+            for result in &real_results {
+                let name = &result.call.name;
+                let is_error = result.output.get("error").is_some();
+                if is_error {
+                    let count = tool_failure_counts.entry(name.clone()).or_insert(0);
+                    *count += 1;
+                    if *count >= CIRCUIT_BREAKER_THRESHOLD {
+                        tripped_tools.insert(name.clone());
+                        warn!(
+                            "Circuit breaker tripped for tool '{}' after {} consecutive failures",
+                            name, count
+                        );
+                    }
+                } else {
+                    // Success resets the counter
+                    tool_failure_counts.remove(name);
+                }
+            }
+
             tool_results.extend(real_results);
         }
 
-        // If only plan calls and all produced empty results, still continue the loop
-        // (the model gets "acknowledged" back and can proceed)
+        // If all real calls were tripped and no executable calls ran, give the model
+        // a chance to try something else. But if it keeps asking for tripped tools
+        // with nothing else, the budget will eventually stop it.
 
         params
             .config
@@ -830,32 +947,32 @@ use serde::Serialize;
 use std::io::Write;
 
 /// Format an event as a trace line for stderr output.
-pub fn format_trace_event(event: &AgentLoopEvent) -> Option<String> {
+pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
     match event {
         AgentLoopEvent::TurnStart { turn, max_turns } => {
-            Some(format!("[turn {turn}/{max_turns}] starting"))
+            Some(format!("{pid} [turn {turn}/{max_turns}] starting"))
         }
-        AgentLoopEvent::ToolStart { name, .. } => Some(format!("calling: {name}")),
+        AgentLoopEvent::ToolStart { name, .. } => Some(format!("{pid} calling: {name}")),
         AgentLoopEvent::ToolComplete {
             name,
             duration,
             success,
         } => {
             let status = if *success { "completed" } else { "FAILED" };
-            Some(format!("{name} {status} ({:.1}s)", duration.as_secs_f64()))
+            Some(format!("{pid} {name} {status} ({:.1}s)", duration.as_secs_f64()))
         }
-        AgentLoopEvent::SubAgentStart { agent_name, pid } => {
-            Some(format!("sub-agent {agent_name} started (PID {pid})"))
+        AgentLoopEvent::SubAgentStart { agent_name, pid: sub_pid } => {
+            Some(format!("{pid} sub-agent {agent_name} started (PID {sub_pid})"))
         }
         AgentLoopEvent::SubAgentComplete {
             agent_name,
-            pid,
+            pid: sub_pid,
             duration,
             success,
         } => {
             let status = if *success { "completed" } else { "FAILED" };
             Some(format!(
-                "sub-agent {agent_name} {status} ({:.1}s, PID {pid})",
+                "{pid} sub-agent {agent_name} {status} ({:.1}s, PID {sub_pid})",
                 duration.as_secs_f64()
             ))
         }
@@ -865,15 +982,18 @@ pub fn format_trace_event(event: &AgentLoopEvent) -> Option<String> {
             } else {
                 content.clone()
             };
-            Some(format!("plan: \"{preview}\""))
+            Some(format!("{pid} plan: \"{preview}\""))
         }
         AgentLoopEvent::BudgetWarning { turn, max_turns } => {
-            Some(format!("budget warning: turn {turn}/{max_turns}"))
+            Some(format!("{pid} budget warning: turn {turn}/{max_turns}"))
         }
         AgentLoopEvent::BudgetExhausted { max_turns } => {
-            Some(format!("budget exhausted at {max_turns} turns"))
+            Some(format!("{pid} budget exhausted at {max_turns} turns"))
         }
-        AgentLoopEvent::LoopComplete => Some("done".to_string()),
+        AgentLoopEvent::CostExhausted { cost, max_cost } => {
+            Some(format!("{pid} cost exhausted: ${cost:.4} exceeded ${max_cost:.4} limit"))
+        }
+        AgentLoopEvent::LoopComplete => Some(format!("{pid} done")),
     }
 }
 
@@ -899,38 +1019,71 @@ pub fn format_spinner_message(snapshot: &AgentLoopSnapshot) -> String {
 }
 
 /// Build the OSC 0 terminal title string for the current state.
-fn format_osc_title(event: &AgentLoopEvent, snapshot: &AgentLoopSnapshot) -> String {
+fn format_osc_title(event: &AgentLoopEvent, snapshot: &AgentLoopSnapshot, agent_label: &str) -> String {
+    let pid = std::process::id();
     match event {
-        AgentLoopEvent::LoopComplete => "aichat: done".to_string(),
-        AgentLoopEvent::BudgetExhausted { .. } => "aichat: turn limit reached".to_string(),
-        _ => {
-            if snapshot.active_tools.is_empty() {
-                format!("aichat: turn {}/{}", snapshot.current_turn, snapshot.max_turns)
-            } else {
-                let tools = snapshot.active_tools.join(", ");
-                format!(
-                    "aichat: turn {}/{} | {}",
-                    snapshot.current_turn, snapshot.max_turns, tools
-                )
-            }
-        }
+        AgentLoopEvent::LoopComplete => format!("done | {agent_label}:{pid}"),
+        AgentLoopEvent::BudgetExhausted { .. } => format!("turn limit reached | {agent_label}:{pid}"),
+        AgentLoopEvent::CostExhausted { cost, .. } => format!("cost limit ${cost:.2} | {agent_label}:{pid}"),
+        _ => format_heartbeat_title_with(snapshot, agent_label),
     }
+}
+
+/// Build a title from the current snapshot (used by both event-driven and heartbeat updates).
+/// Uses the provided agent label.
+pub fn format_heartbeat_title_with(snapshot: &AgentLoopSnapshot, agent_label: &str) -> String {
+    let pid = std::process::id();
+    let elapsed = snapshot.elapsed.as_secs();
+    let cost_str = if snapshot.accumulated_cost > 0.0 {
+        format!(" ${:.4}", snapshot.accumulated_cost)
+    } else {
+        String::new()
+    };
+    if snapshot.active_tools.is_empty() {
+        format!("turn {}/{} | {agent_label}:{pid} ({}s{cost_str})", snapshot.current_turn, snapshot.max_turns, elapsed)
+    } else {
+        let tools = snapshot.active_tools.join(", ");
+        format!(
+            "turn {}/{} | {} | {agent_label}:{pid} ({}s{cost_str})",
+            snapshot.current_turn, snapshot.max_turns, tools, elapsed
+        )
+    }
+}
+
+/// Build a title from the current snapshot using the default label.
+/// Called from main.rs heartbeat where only the snapshot is available.
+pub fn format_heartbeat_title(snapshot: &AgentLoopSnapshot, agent_label: &str) -> String {
+    format_heartbeat_title_with(snapshot, agent_label)
 }
 
 /// Emit an OSC 0/2 escape sequence to set the terminal title.
+/// Writes directly to /dev/tty to bypass stdout/stderr pipes — works in tmux
+/// even when both stdout and stderr are captured (e.g., from nushell `| complete`).
 pub fn update_terminal_title(title: &str) {
-    if *IS_STDOUT_TERMINAL {
-        eprint!("\x1b]0;{title}\x07");
+    use std::io::Write;
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = write!(tty, "\x1b]0;{title}\x07");
     }
 }
 
-/// Emit BEL + OSC 777 notification to the terminal.
+/// Emit BEL + desktop notification escape sequences to the terminal.
+/// Writes directly to /dev/tty so it reaches tmux regardless of pipe state.
+/// Emits multiple notification protocols for broad terminal compatibility:
+///   - BEL (\x07): universal, tmux monitor-bell
+///   - OSC 777: Ghostty, iTerm2, rxvt-unicode, VS Code terminal
+///   - OSC 9: Windows Terminal, ConEmu
+///   - OSC 99: kitty
 pub fn notify_terminal(title: &str, message: &str) {
-    if *IS_STDOUT_TERMINAL {
+    use std::io::Write;
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
         // BEL — tmux monitor-bell picks this up
-        eprint!("\x07");
-        // OSC 777 — desktop notification on Ghostty, iTerm2, VS Code, rxvt-unicode
-        eprint!("\x1b]777;notify;{title};{message}\x07");
+        let _ = write!(tty, "\x07");
+        // OSC 777 — Ghostty, iTerm2, VS Code, rxvt-unicode
+        let _ = write!(tty, "\x1b]777;notify;{title};{message}\x07");
+        // OSC 9 — Windows Terminal, ConEmu
+        let _ = write!(tty, "\x1b]9;{message}\x07");
+        // OSC 99 — kitty notification protocol
+        let _ = write!(tty, "\x1b]99;i=aichat;{message}\x1b\\");
     }
 }
 
@@ -943,6 +1096,7 @@ struct AgentLoopStatus {
     max_turns: usize,
     active_tools: Vec<String>,
     elapsed_s: f64,
+    cost_usd: f64,
     updated_at: String,
 }
 
@@ -965,6 +1119,7 @@ fn write_status_file(snapshot: &AgentLoopSnapshot, state: &str) {
         max_turns: snapshot.max_turns,
         active_tools: snapshot.active_tools.clone(),
         elapsed_s: snapshot.elapsed.as_secs_f64(),
+        cost_usd: snapshot.accumulated_cost,
         updated_at: chrono_now_iso(),
     };
     let path = status_file_path();
@@ -980,6 +1135,60 @@ fn write_status_file(snapshot: &AgentLoopSnapshot, state: &str) {
 /// Delete the status file (called on exit).
 pub fn cleanup_status_file() {
     let _ = std::fs::remove_file(status_file_path());
+}
+
+/// Remove stale status files from previous aichat processes that are no longer running.
+/// Called at startup to prevent leftover files from crashes/kills.
+pub fn cleanup_stale_status_files() {
+    let dir = if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+        std::path::PathBuf::from(runtime_dir)
+    } else {
+        std::path::PathBuf::from("/tmp")
+    };
+
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let my_pid = std::process::id();
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Match aichat-<pid>.json
+        if let Some(rest) = name_str.strip_prefix("aichat-") {
+            if let Some(pid_str) = rest.strip_suffix(".json") {
+                if let Ok(pid) = pid_str.parse::<u32>() {
+                    // Skip our own file
+                    if pid == my_pid {
+                        continue;
+                    }
+                    // Check if process is still alive
+                    let proc_path = format!("/proc/{pid}");
+                    if !std::path::Path::new(&proc_path).exists() {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Parse estimated cost from a sub-agent's stderr output.
+/// Looks for the pattern: "Estimated cost: $0.004000"
+fn parse_cost_from_stderr(stderr: &str) -> f64 {
+    for line in stderr.lines() {
+        if let Some(pos) = line.find("Estimated cost: $") {
+            let start = pos + "Estimated cost: $".len();
+            if let Some(cost_str) = line[start..].split_whitespace().next() {
+                if let Ok(cost) = cost_str.parse::<f64>() {
+                    return cost;
+                }
+            }
+        }
+    }
+    0.0
 }
 
 /// Simple ISO 8601 timestamp without pulling in chrono crate.
@@ -998,6 +1207,7 @@ fn state_from_event(event: &AgentLoopEvent) -> &'static str {
     match event {
         AgentLoopEvent::LoopComplete => "done",
         AgentLoopEvent::BudgetExhausted { .. } => "budget_exhausted",
+        AgentLoopEvent::CostExhausted { .. } => "cost_exhausted",
         AgentLoopEvent::ToolStart { .. } => "working",
         AgentLoopEvent::ToolComplete { .. } => "working",
         AgentLoopEvent::TurnStart { .. } => "working",
@@ -1013,6 +1223,7 @@ fn notification_for_event(event: &AgentLoopEvent) -> Option<(&'static str, &'sta
     match event {
         AgentLoopEvent::LoopComplete => Some(("aichat", "Task complete")),
         AgentLoopEvent::BudgetExhausted { .. } => Some(("aichat", "Turn limit reached")),
+        AgentLoopEvent::CostExhausted { .. } => Some(("aichat", "Cost limit reached")),
         _ => None,
     }
 }
@@ -1024,29 +1235,40 @@ pub fn render_event(
     event: &AgentLoopEvent,
     snapshot: &AgentLoopSnapshot,
     config: &AgentLoopConfig,
+    agent_label: &str,
     spinner: &crate::utils::Spinner,
     trace_header_printed: &mut bool,
 ) -> Result<()> {
-    // 1. Trace output (stderr)
+    let pid = std::process::id();
+
+    // 1. Trace output — written to /dev/tty (live, visible regardless of pipe state).
+    //    Falls back to stderr if /dev/tty is unavailable (CI, cron).
+    //    When stdout IS a terminal, uses spinner.print_line for clean rendering.
     if config.show_trace {
-        if let Some(line) = format_trace_event(event) {
+        if let Some(line) = format_trace_event(event, pid) {
             let output = if *trace_header_printed {
                 format!("  [{line}]")
             } else {
                 *trace_header_printed = true;
-                format!("Agent loop trace:\n  [{line}]")
+                format!("Agent {agent_label} ({pid}) loop trace:\n  [{line}]")
             };
             if *IS_STDOUT_TERMINAL {
                 spinner.print_line(output)?;
             } else {
-                eprintln!("{output}");
+                use std::io::Write;
+                if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                    let _ = writeln!(tty, "{output}");
+                } else {
+                    // No /dev/tty available (CI, cron, containers) — fall back to stderr
+                    eprintln!("{output}");
+                }
             }
         }
     }
 
     // 2. OSC terminal title
     if config.osc_title {
-        let title = format_osc_title(event, snapshot);
+        let title = format_osc_title(event, snapshot, agent_label);
         update_terminal_title(&title);
     }
 
@@ -1258,12 +1480,14 @@ agent_loop:
 
     #[test]
     fn format_trace_event_produces_expected_output() {
+        let pid = 12345u32;
         let event = AgentLoopEvent::ToolComplete {
             name: "fs_write".to_string(),
             duration: Duration::from_millis(1234),
             success: true,
         };
-        let line = format_trace_event(&event).unwrap();
+        let line = format_trace_event(&event, pid).unwrap();
+        assert!(line.contains("12345"));
         assert!(line.contains("fs_write"));
         assert!(line.contains("completed"));
         assert!(line.contains("1.2s"));
@@ -1273,8 +1497,9 @@ agent_loop:
             duration: Duration::from_millis(500),
             success: false,
         };
-        let line = format_trace_event(&event).unwrap();
+        let line = format_trace_event(&event, pid).unwrap();
         assert!(line.contains("FAILED"));
+        assert!(line.contains("12345"));
     }
 
     #[test]

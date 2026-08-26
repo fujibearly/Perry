@@ -8,12 +8,36 @@ Copy-paste examples demonstrating all new capabilities. Each command is self-con
 # Point aichat at the dev functions directory
 export AICHAT_FUNCTIONS_DIR=~/projects/llm-functions
 
-# Verify tools are visible
+# Enable web search (used by the researcher agent)
+export WEB_SEARCH_MODEL="gemini:gemini-2.5-pro"
+
+# Use the release binary (< /dev/null prevents stdin hang in non-interactive contexts)
+alias aichat='~/projects/aichat/target/release/aichat'
+```
+
+### Fix bin/ symlinks (if not already done)
+
+The `bin/` directory must have symlinks to `scripts/run-tool.sh` (which converts JSON to CLI args), not directly to tool scripts:
+
+```bash
+cd ~/projects/llm-functions
+ls -la bin/fs_cat  # Should point to ../scripts/run-tool.sh
+
+# If it points directly to tools/*.sh, fix all symlinks:
+for tool in bin/*; do
+    rm "$tool"
+    ln -s ../scripts/run-tool.sh "$tool"
+done
+```
+
+### Verify
+
+```bash
 aichat --list-agents
 # Should show: coder, demo, json-viewer, orchestrator, researcher, sql, todo
 ```
 
-All examples below assume `AICHAT_FUNCTIONS_DIR` is set.
+All examples below assume the setup above is done.
 
 ---
 
@@ -22,26 +46,29 @@ All examples below assume `AICHAT_FUNCTIONS_DIR` is set.
 The model calls multiple tools in one turn — they execute concurrently instead of sequentially. A turn with 3 slow tasks takes ~2 seconds, not ~6.
 
 ```bash
-aichat -r %functions% "Run slow_task three times in parallel with labels 'alpha', 'beta', and 'gamma'. Each should take 2 seconds. Report all results."
+aichat -r %functions% "You MUST call the slow_task tool exactly 3 times in parallel with labels 'alpha', 'beta', and 'gamma', each with delay 2. Report all results."
 ```
 
 With trace enabled, you can see them start and finish together:
 
 ```bash
-AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat -r %functions% "Call slow_task three times with labels 'first', 'second', 'third' — all with 2 second delays"
+AICHAT_AGENT_LOOP_SHOW_TRACE=true \
+aichat -r %functions% \
+  "You MUST call slow_task exactly 3 times in parallel: label='first' delay=2, label='second' delay=2, label='third' delay=2. Do NOT answer without calling the tools."
 ```
 
 Expected trace output:
 ```
-Agent loop trace:
-  [turn 1/20] starting
-  [calling: slow_task]
-  [calling: slow_task]
-  [calling: slow_task]
-  [slow_task completed (2.0s)]
-  [slow_task completed (2.0s)]
-  [slow_task completed (2.0s)]
-  [done]
+Agent %functions% (12345) loop trace:
+  [12345 [turn 1/20] starting]
+  [12345 calling: slow_task]
+  [12345 calling: slow_task]
+  [12345 calling: slow_task]
+  [12345 slow_task completed (2.0s)]
+  [12345 slow_task completed (2.0s)]
+  [12345 slow_task completed (2.0s)]
+  [12345 [turn 2/20] starting]
+  [12345 done]
 ```
 
 ---
@@ -51,13 +78,15 @@ Agent loop trace:
 The loop stops after `max_turns` and returns partial results instead of spinning forever.
 
 ```bash
-# Set a very low budget to see it in action
-AICHAT_AGENT_LOOP_MAX_TURNS=3 aichat -r %functions% "List files in the current directory, then read each .rs file one by one and summarize them"
+# Budget of 1 turn: the model can call tools but never gets to respond
+AICHAT_AGENT_LOOP_MAX_TURNS=1 \
+aichat -r %functions% \
+  "Read each of the files /etc/hostname, /etc/os-release, /etc/shells, /etc/fstab one by one and summarize each"
 ```
 
 You'll see the stderr warning:
 ```
-Warning: Agent loop reached the 3-turn limit without completing.
+Warning: Agent loop reached the 1-turn limit without completing.
 Increase with `agent_loop.max_turns` in config.yaml or AICHAT_AGENT_LOOP_MAX_TURNS=N.
 ```
 
@@ -68,12 +97,14 @@ Increase with `agent_loop.max_turns` in config.yaml or AICHAT_AGENT_LOOP_MAX_TUR
 The model uses `_plan` to reason before acting. Plan content appears in the trace but never in the output.
 
 ```bash
-AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat -r %functions% "I have a file at /etc/os-release. Read it, then create a summary at /tmp/os-summary.md with the key facts formatted as a markdown table."
+AICHAT_AGENT_LOOP_SHOW_TRACE=true \
+aichat -r %functions% \
+  "This is a multi-step task. You MUST use the _plan tool first to plan your approach before taking any action. Then: read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
 ```
 
 Look for the trace line:
 ```
-  [plan: "First I'll read /etc/os-release to see its contents, then..."]
+  [12345 plan: "First I'll read /etc/os-release to see its contents, then..."]
 ```
 
 The plan is invisible in the final response — only in the trace.
@@ -85,20 +116,29 @@ The plan is invisible in the final response — only in the trace.
 An orchestrator agent delegates tasks to specialist agents. Each runs as its own aichat process.
 
 ```bash
-AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --agent orchestrator "What are the top 3 programming languages for embedded systems in 2026? Research this and give me a brief comparison."
+AICHAT_AGENT_LOOP_SHOW_TRACE=true \
+aichat --agent orchestrator \
+  "You MUST delegate this to the researcher agent (do NOT answer yourself): Search the web for 'what is Model Context Protocol MCP by Anthropic' and return a summary with sources."
 ```
 
 The trace shows delegation:
 ```
-Agent loop trace:
-  [turn 1/20] starting
-  [plan: "I'll delegate research to the researcher agent..."]
-  [calling: researcher]
-  [researcher completed (8.3s)]
-  [done]
+Agent orchestrator (12345) loop trace:
+  [12345 [turn 1/20] starting]
+  [12345 plan: "The user explicitly wants me to delegate the research tas..."]
+  [12345 [turn 2/20] starting]
+  [12345 calling: researcher]
+Agent researcher (67890) loop trace:
+  [67890 [turn 1/20] starting]
+  [67890 calling: web_search_aichat]
+  ...
+  [67890 done]
+  [12345 researcher completed (46.1s)]
+  [12345 [turn 3/20] starting]
+  [12345 done]
 ```
 
-The researcher agent runs as a separate process with its own tools (`web_search_tavily`, `fetch_url_via_jina`).
+The researcher agent runs as a separate process with its own tools (`web_search_aichat`, `fetch_url_via_curl`).
 
 ---
 
@@ -107,10 +147,12 @@ The researcher agent runs as a separate process with its own tools (`web_search_
 Sub-agents can delegate to further sub-agents. Depth is bounded by `max_agent_depth` (default 3).
 
 ```bash
-AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --agent orchestrator "Research Rust async patterns AND research Python async patterns. Compare the two approaches in a summary."
+AICHAT_AGENT_LOOP_SHOW_TRACE=true \
+aichat --agent orchestrator \
+  "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
 ```
 
-The orchestrator may spawn multiple researcher instances in parallel — each is an independent process with its own PID.
+The orchestrator spawns multiple researcher instances in parallel — each is an independent process with its own PID.
 
 ---
 
@@ -122,10 +164,10 @@ In a tmux session, the pane title updates live:
 
 ```bash
 # In tmux — watch the pane title change
-aichat -r %functions% "List all files in /usr, then count how many there are"
+aichat -r %functions% "Use fs_ls to list /usr/bin then report how many entries there are"
 ```
 
-The title shows: `aichat: turn 1/20 | fs_ls` → `aichat: done`
+The title shows: `turn 1/20 | fs_ls | %functions%:12345 (2s)` → `done | %functions%:12345`
 
 ### Status file
 
@@ -133,7 +175,7 @@ While aichat is running, check its status from another terminal:
 
 ```bash
 # In terminal 1:
-aichat -r %functions% "Run slow_task with label 'long-running' and delay 10"
+aichat -r %functions% "Call slow_task with label 'long-running' and delay 10"
 
 # In terminal 2 (while it's running):
 cat /run/user/$(id -u)/aichat-$(pgrep -n aichat).json | jq .
@@ -173,12 +215,12 @@ When it completes, tmux highlights the aichat window in the status bar.
 Large tool results (>16 KB) are automatically capped: full content goes to a temp file, the model gets a preview + path.
 
 ```bash
-aichat -r %functions% "Read the contents of /usr/share/dict/words"
+aichat -r %functions% "Use fs_cat to read the file /usr/share/dict/cracklib-small"
 ```
 
-If the file exceeds 16 KB, the model receives:
+The file is ~492 KB. Since it exceeds 16 KB, the model receives:
 ```json
-{"preview": "...(first 16KB)...", "full_output_path": "/tmp/aichat-tool-fs_cat-12345.out", "total_bytes": 972563, "hint": "102401 lines"}
+{"preview": "...(first 16KB)...", "full_output_path": "/tmp/aichat-tool-fs_cat-<pid>.out", "total_bytes": 492822, "hint": "52895 lines"}
 ```
 
 The model can then use `fs_cat` with specific line ranges to access what it needs.
@@ -190,7 +232,7 @@ The model can then use `fs_cat` with specific line ranges to access what it need
 The `fetch_and_summarize` tool is declared to pipe its output to `summarize_text`. The model never sees the raw HTML — only the summary.
 
 ```bash
-aichat -r %functions% "Use fetch_and_summarize to get the content of https://example.com"
+aichat -r %functions% "You MUST call the fetch_and_summarize tool with url 'https://example.com'. Do not use any other tool."
 ```
 
 Behind the scenes:
@@ -206,20 +248,18 @@ This saves tokens: a 50 KB page becomes a 200-byte summary in context.
 
 Declare a tool to write its output to a file. The model gets a confirmation, not the content.
 
-To demo this, add this entry to your `functions.json`:
-
-```json
-{
-  "name": "generate_data",
-  "description": "Generate sample data",
-  "parameters": {"type": "object", "properties": {"rows": {"type": "integer"}}},
-  "output": {"destination": "file", "path": "/tmp/{{name}}-{{timestamp}}.csv"}
-}
+```bash
+aichat -r %functions% "You MUST call generate_data with rows=20. Do NOT answer without calling the tool."
 ```
 
-Then the model calling `generate_data` would get back:
+The `generate_data` tool is declared with `"output": {"destination": "file", "path": "/tmp/{{name}}-{{timestamp}}.csv"}` in functions.json. When called:
+
+1. The tool generates 20 rows of CSV data
+2. aichat routes the output to `/tmp/generate_data-<timestamp>.csv`
+3. The model receives only a confirmation:
+
 ```json
-{"written_to": "/tmp/generate_data-1724512321.csv", "size_bytes": 4096, "hint": "50 lines"}
+{"written_to": "/tmp/generate_data-1724512321.csv", "size_bytes": 531, "hint": "21 lines"}
 ```
 
 The full data goes to disk, never burning context tokens.
@@ -231,16 +271,15 @@ The full data goes to disk, never burning context tokens.
 Read PDFs as structured Markdown — headings, tables, lists preserved. Much better than flat text.
 
 ```bash
-# Read a PDF (replace with any PDF path you have)
-aichat -r %functions% "Read the PDF at ~/Downloads/some-document.pdf and summarize its key points"
+aichat -r %functions% "Use read_pdf to read the file ./manual.pdf and tell me what this document is about. List the main sections."
 ```
 
 With page selection:
 ```bash
-aichat -r %functions% "Read pages 1-3 of ~/Downloads/some-document.pdf in compact mode and list the main topics"
+aichat -r %functions% "Use read_pdf to read pages 5-10 of ./manual.pdf in compact mode and summarize what those pages cover."
 ```
 
-The `read_pdf` tool uses `pdf2md` (firecrawl/pdf-inspector) — returns clean Markdown that the model can work with efficiently.
+The `read_pdf` tool uses `pdf2md` — returns clean Markdown that the model can work with efficiently. Tables, headings, and formatting are preserved.
 
 ---
 
@@ -252,16 +291,17 @@ Everything together — planning, parallel tools, sub-agents, observability:
 AICHAT_AGENT_LOOP_SHOW_TRACE=true \
 AICHAT_AGENT_LOOP_MAX_TURNS=15 \
 aichat --agent orchestrator \
-  "Research what MCP (Model Context Protocol) is and find 3 popular MCP servers. Write a brief markdown guide explaining MCP to a beginner."
+  "You MUST plan first using _plan, then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. Do NOT answer from memory — you MUST delegate."
 ```
 
 What happens:
 1. Orchestrator plans (via `_plan`)
-2. Delegates research to `researcher` agent (subprocess)
-3. Researcher uses `web_search_tavily` + `fetch_url_via_jina` (parallel)
-4. Results return to orchestrator
-5. Orchestrator synthesizes a final guide
-6. Bell rings when done, title shows "aichat: done"
+2. Delegates research to `researcher` agent (subprocess with own PID)
+3. Researcher tries `web_search_aichat`, circuit breaker trips after 3 failures
+4. Researcher pivots to `fetch_url_via_curl` (direct URL fetches)
+5. Results return to orchestrator
+6. Orchestrator synthesizes a final answer
+7. Bell rings when done, title shows `done | orchestrator:12345`
 
 ---
 
@@ -271,8 +311,11 @@ What happens:
 |----------|--------|
 | `AICHAT_FUNCTIONS_DIR` | Point at the llm-functions directory |
 | `AICHAT_AGENT_LOOP_MAX_TURNS` | Override turn budget (default: 20) |
-| `AICHAT_AGENT_LOOP_SHOW_TRACE` | Show live trace on stderr (`true`/`false`) |
+| `AICHAT_AGENT_LOOP_SHOW_TRACE` | Show live trace on terminal via `/dev/tty` (`true`/`false`) |
+| `AICHAT_AGENT_LOOP_MAX_COST` | Cost budget in USD (e.g. `1.0`). Stops loop if exceeded. |
 | `AICHAT_AGENT_DEPTH` | (Set by aichat internally for sub-agents) |
+| `WEB_SEARCH_MODEL` | Model for `web_search_aichat` tool (e.g. `gemini:gemini-2.5-pro`) |
+| `SUMMARIZE_MODEL` | Model for URL summarization (default: `gemini:gemini-3.6-flash`) |
 
 ## Config Reference (`agent_loop` section in config.yaml)
 
@@ -281,10 +324,62 @@ agent_loop:
   max_turns: 20           # Turn budget
   max_concurrency: 8      # Parallel tool limit
   max_agent_depth: 3      # Sub-agent nesting depth
-  show_trace: false       # Trace events on stderr
+  show_trace: false       # Trace to /dev/tty (live, pipe-proof)
   planning_tool: true     # Inject _plan pseudo-tool
-  osc_title: true         # Terminal title updates
-  status_file: true       # JSON status file
-  notify: true            # Bell + desktop notification
+  osc_title: true         # Terminal title via /dev/tty (tmux pane title)
+  status_file: true       # JSON status file ($XDG_RUNTIME_DIR/aichat-<pid>.json)
+  notify: true            # BEL + OSC 777/9/99 notifications via /dev/tty
   tool_output_limit: 16384  # Auto-cap threshold (bytes, 0=disabled)
+  max_cost: 0.0           # Cost budget in USD (0=unlimited). Stops loop if exceeded.
+```
+
+## tmux Configuration
+
+Required for observability features:
+
+```bash
+# In ~/.config/tmux/tmux.conf
+set -g allow-rename on        # Allow OSC title escape sequences
+set -g monitor-bell on        # Highlight window on BEL notification
+set -g status-right-length 80 # Room for title + hostname
+# Add #T to show pane title in status bar:
+set -g status-right "#[fg=magenta]#T #[fg=brightblack]#h"
+```
+
+## Troubleshooting
+
+### Binary hangs on startup
+
+The dev binary blocks on stdin when run non-interactively (e.g., from scripts). Redirect stdin:
+
+```bash
+# This hangs:
+./target/release/aichat --list-agents
+
+# This works:
+./target/release/aichat --list-agents < /dev/null
+```
+
+The alias in the Setup section handles this automatically.
+
+### Tools fail with "required arguments not provided"
+
+The `bin/` symlinks must point to `scripts/run-tool.sh`, which converts JSON args to CLI flags. If they point directly to tool scripts, the scripts receive raw JSON and fail.
+
+```bash
+# Check:
+ls -la ~/projects/llm-functions/bin/slow_task
+# Should show: bin/slow_task -> ../scripts/run-tool.sh
+
+# Fix:
+cd ~/projects/llm-functions
+for tool in bin/*; do rm "$tool"; ln -s ../scripts/run-tool.sh "$tool"; done
+```
+
+### Web search fails in researcher agent
+
+Ensure `WEB_SEARCH_MODEL` is set. The `web_search_aichat` tool requires it:
+
+```bash
+export WEB_SEARCH_MODEL="gemini:gemini-2.5-pro"
 ```
