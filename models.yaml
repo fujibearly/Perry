@@ -153,8 +153,8 @@
     - name: gemini-2.5-pro
       max_input_tokens: 1048576
       max_output_tokens: 65536
-      input_price: 0
-      output_price: 0
+      input_price: 1.25
+      output_price: 10
       supports_vision: true
       supports_function_calling: true
     - name: gemini-2.5-flash-lite
@@ -197,6 +197,24 @@
       max_output_tokens: 65536
       supports_vision: true
       reasoning_efforts: [minimal, low, medium, high]
+    - name: gemini-embedding-001
+      type: embedding
+      input_price: 0.0
+      max_tokens_per_chunk: 2048
+      default_chunk_size: 1536
+      max_batch_size: 100
+    - name: gemini-embedding-2
+      type: embedding
+      input_price: 0.0
+      max_tokens_per_chunk: 2048
+      default_chunk_size: 1536
+      max_batch_size: 100
+    - name: gemini-embedding-2-preview
+      type: embedding
+      input_price: 0.0
+      max_tokens_per_chunk: 2048
+      default_chunk_size: 1536
+      max_batch_size: 100
 
 # Links:
 #  - https://platform.claude.com/docs/en/about-claude/models/overview

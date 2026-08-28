@@ -52,8 +52,18 @@ impl TokenUsage {
     }
 
     pub fn add(&mut self, other: Self) {
-        self.input_tokens = sum_optional(self.input_tokens, other.input_tokens);
-        self.output_tokens = sum_optional(self.output_tokens, other.output_tokens);
+        self.input_tokens = match (self.input_tokens, other.input_tokens) {
+            (Some(a), Some(b)) => Some(a.saturating_add(b)),
+            (None, Some(b)) => Some(b),
+            (Some(a), None) => Some(a),
+            (None, None) => None,
+        };
+        self.output_tokens = match (self.output_tokens, other.output_tokens) {
+            (Some(a), Some(b)) => Some(a.saturating_add(b)),
+            (None, Some(b)) => Some(b),
+            (Some(a), None) => Some(a),
+            (None, None) => None,
+        };
     }
 }
 
@@ -935,10 +945,10 @@ mod tests {
     }
 
     #[test]
-    fn usage_total_is_unavailable_when_any_round_omits_usage() {
+    fn usage_total_preserves_accumulated_usage_when_round_omits_usage() {
         let mut usage = TokenUsage::new(Some(100), Some(20));
         usage.add(TokenUsage::default());
-        assert_eq!(usage, TokenUsage::default());
+        assert_eq!(usage, TokenUsage::new(Some(100), Some(20)));
     }
 
     async fn sanitized_fixture_error(

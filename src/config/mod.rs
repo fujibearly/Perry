@@ -2380,9 +2380,14 @@ impl Config {
         };
         let content = read_to_string(&model_override_path).with_context(err)?;
         let models_override: ModelsOverride = serde_yaml::from_str(&content).with_context(err)?;
-        if models_override.version != env!("CARGO_PKG_VERSION") {
-            bail!("Incompatible version")
-        }
+        // Note: The original upstream check strictly compared `models_override.version != env!("CARGO_PKG_VERSION")`.
+        // We relax this to allow coexistence between the production aichat config and the fork build.
+        // Serde deserialization above already validates the schema integrity; if invalid, it falls back
+        // to the built-in embedded MODELS_YAML in client/common.rs.
+        //
+        // if models_override.version != env!("CARGO_PKG_VERSION") {
+        //     bail!("Incompatible version")
+        // }
         Ok(models_override.list)
     }
 

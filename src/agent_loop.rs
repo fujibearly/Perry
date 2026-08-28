@@ -338,7 +338,7 @@ async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serd
     {
         let is_agent = {
             let config_read = config.read();
-            if let Some(agent) = &config_read.agent {
+            let has_agent_flag = if let Some(agent) = &config_read.agent {
                 agent
                     .functions()
                     .find(&call.name)
@@ -348,7 +348,8 @@ async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serd
                     .functions
                     .find(&call.name)
                     .map_or(false, |f| f.agent)
-            }
+            };
+            has_agent_flag && crate::config::list_agents().contains(&call.name)
         };
         if is_agent {
             let (result, sub_cost) = eval_agent_tool_subprocess(config, call).await?;
@@ -1509,6 +1510,7 @@ agent_loop:
             max_turns: 20,
             active_tools: vec!["fs_write".to_string(), "web_search".to_string()],
             elapsed: Duration::from_secs(5),
+            accumulated_cost: 0.0,
         };
         let msg = format_spinner_message(&snapshot);
         assert!(msg.contains("Turn 2/20"));
@@ -1523,6 +1525,7 @@ agent_loop:
             max_turns: 10,
             active_tools: vec![],
             elapsed: Duration::from_secs(3),
+            accumulated_cost: 0.0,
         };
         let msg = format_spinner_message(&snapshot);
         assert!(msg.contains("Turn 1/10"));
