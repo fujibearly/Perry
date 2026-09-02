@@ -199,7 +199,7 @@ Alternatively, the LLM could specify routing at call time via a special `_output
 
 ## 5. Test Suite Expansion & Code Coverage Hardening
 
-**Status:** In Progress — implemented on `feat/test-suite-hardening` (off `main`). Added 17 deterministic edge-case tests (13 in `agent_loop.rs`, 4 in `mcp.rs`); full suite 327 → 344, 0 fail. FR-1/FR-2/FR-3 (output-routing edges, cost parsing, event→state/notification mapping, sub-agent depth boundary) and FR-5 (MCP malformed-envelope decode) covered. FR-4 (real sub-agent crash capture) deferred to the E2E harness — not hermetic as a unit test. Spec: `.kiro/specs/test-suite-hardening/`.  
+**Status:** ✓ Done — merged to `main`. Added 25 deterministic tests (21 in `agent_loop.rs`, 4 in `mcp.rs`); full suite 327 → 352, 0 fail. FR-1/FR-2/FR-3/FR-5 covered by unit tests; FR-4 (sub-agent crash isolation) covered by the offline Demo 12 in `scripts/run-demos.nu`. Circuit-breaker/cost decision logic extracted from `run()` and unit-tested. Coverage (unit-test methodology): `agent_loop.rs` 46.8% → 64.7% line — see `.kiro/docs/coverage-remeasurement-2026-09-02.md`. Spec: `.kiro/specs/test-suite-hardening/`.  
 **Priority:** Medium  
 **Scope:** ~200-400 lines (unit & integration tests in `src/agent_loop.rs`, `src/function.rs`, `src/mcp.rs`, `src/config/agent.rs`)  
 **Driver:** Dynamic coverage analysis on 2026-08-31 showed strong baseline coverage across `agent_loop.rs` (72.9% line / 79.4% function coverage), but highlighted untested edge paths in error handling, crash isolation, cyclic pipe aborts, and budget edge conditions.
