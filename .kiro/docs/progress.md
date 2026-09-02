@@ -35,6 +35,7 @@
 7. `fb5e011` — feat: update models, refine agent dispatch, token tracking & add architecture docs
 8. `24b7912` — docs: add session summaries, coverage report, and backlog updates
 9. `e71b2bc` — docs: add rationale column to backlog status; fix auto-cap threshold
+10. `1490cbc` — test: update stale Gemini catalog guardrail; refresh progress
 
 ### `feat/agent-loop-enhancements` (off `feat/rust-mcp-bridge`)
 
