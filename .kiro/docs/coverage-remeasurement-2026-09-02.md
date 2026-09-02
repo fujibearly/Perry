@@ -9,21 +9,22 @@ first-party-only methodology for future coverage runs.
 ## 1. Headline Result
 
 The backlog #5 test-hardening pass raised `cargo test` coverage of the primary
-target file `src/agent_loop.rs` by **+15.7 line points** (46.8% → 62.5%) and
-**+14.8 function points** (50.0% → 64.8%), with a smaller lift on `src/mcp.rs`.
+target file `src/agent_loop.rs` by **+17.9 line points** (46.8% → 64.7%) and
+**+16.9 function points** (50.0% → 66.9%), with a smaller lift on `src/mcp.rs`.
 This is real, attributable improvement measured on identical methodology before
-and after. The gain came in two waves: 13 pure-function/edge unit tests, then 4
-tests driving the `apply_output_routing` async dispatcher.
+and after. The gain came in three waves: 13 pure-function/edge unit tests, 4
+tests driving the `apply_output_routing` async dispatcher, then 4 tests on the
+circuit-breaker and cost-budget helpers (extracted from `run()` for testability).
 
-| File | Metric | Baseline (`main`, 319 tests) | Post-#5 (348 tests) | Δ |
+| File | Metric | Baseline (`main`, 319 tests) | Post-#5 (352 tests) | Δ |
 |------|--------|:---:|:---:|:---:|
-| `src/agent_loop.rs` | Line | 46.76% | **62.50%** | **+15.74** |
-| `src/agent_loop.rs` | Function | 50.00% | **64.80%** | **+14.80** |
-| `src/agent_loop.rs` | Region | 48.54% | **62.70%** | **+14.16** |
+| `src/agent_loop.rs` | Line | 46.76% | **64.67%** | **+17.91** |
+| `src/agent_loop.rs` | Function | 50.00% | **66.92%** | **+16.92** |
+| `src/agent_loop.rs` | Region | 48.54% | **65.49%** | **+16.95** |
 | `src/mcp.rs` | Line | 80.41% | **82.82%** | **+2.41** |
 | `src/mcp.rs` | Function | 79.71% | **83.56%** | **+3.85** |
 | `src/function.rs` | Line | 54.92% | 54.92% | 0.00 |
-| **TOTAL** | Line | 53.81% | 54.68% | +0.87 |
+| **TOTAL** | Line | 53.81% | 54.82% | +1.01 |
 
 Notes:
 - `function.rs` is unchanged: the #5 tests exercised routing/cost/event/MCP
@@ -77,8 +78,14 @@ A second wave of 4 tests drives the **`apply_output_routing` async dispatcher**
 directly (offline, no LLM), covering runtime routing branches the pure-helper
 tests didn't reach: the pipe-cycle abort via the dispatcher (`pipe_cycle_error`),
 file-destination dispatch, empty-target pipe fallback, and the default
-context/capping path. This wave added the +3.7-line-point lift on top of the
-first wave.
+context/capping path.
+
+A third wave extracted two decision helpers out of the `run()` loop for
+testability and unit-tested them directly: `update_circuit_breaker` (failure
+counting, trip-after-3, success reset, independent per-tool tracking) and
+`cost_budget_exceeded` (under/over/equal/zero-unlimited/negative-unlimited). This
+was a minimal, behavior-preserving extract-method refactor (full suite stayed
+green), not a rearchitecture. It added the final +2.2-line-point lift.
 
 FR-4 (sub-agent crash isolation) is covered separately by **Demo 12** in
 `scripts/run-demos.nu` (deterministic/offline), not by unit tests — see the
@@ -86,19 +93,15 @@ test-suite-hardening spec.
 
 ### Remaining uncovered paths in `agent_loop.rs` (honest limitations)
 
-The ~37% still uncovered is dominated by code locked inside the `run()`
-orchestration loop, which is gated behind a live `call_llm_raw` and therefore
-**not reachable by unit tests without a mock-client seam**:
-
-- **Circuit breaker** — the trip-after-3-failures bookkeeping and tripped-tool
-  error results are inline in `run()`, not a standalone helper.
-- **Cost-budget exhaustion** (`CostExhausted` branch and early return).
-- **Turn iteration / event emission end-to-end** and nested sub-agent recursion.
-
-These are exercised by the live E2E harness (`run-demos.nu`) but not by
-`cargo test`. Closing them deterministically would require introducing a mock
-`Client` test seam so `run()` can be driven without a provider — a separate,
-larger piece of work, not part of this pass.
+The circuit-breaker and cost-budget *decision logic* is now unit-tested (via the
+extracted helpers). What remains uncovered is the surrounding `run()`
+**orchestration** — the turn loop, streaming, event emission, tripped-call
+short-circuit dispatch, and nested sub-agent recursion — all gated behind a live
+`call_llm_raw` and therefore **not reachable by unit tests without a mock-client
+seam**. Those paths are exercised by the live E2E harness (`run-demos.nu`) but
+not by `cargo test`. Closing them deterministically would require introducing a
+mock `Client` so `run()` can iterate turns without a provider — a larger,
+separate piece of work, deliberately out of scope for this pass.
 
 ---
 

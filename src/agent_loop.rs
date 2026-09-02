@@ -690,6 +690,50 @@ fn value_to_string(value: &serde_json::Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Circuit breaker & budget helpers (extracted from `run` for testability)
+// ---------------------------------------------------------------------------
+
+/// After this many consecutive failures of the same tool within one loop run,
+/// the tool is "tripped" and further calls short-circuit to an error.
+const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
+
+/// Update circuit-breaker state from a batch of tool results.
+///
+/// For each result: an error increments the tool's consecutive-failure count and,
+/// on reaching `CIRCUIT_BREAKER_THRESHOLD`, inserts it into `tripped`; a success
+/// resets (removes) the tool's counter. Mirrors the original inline logic exactly.
+fn update_circuit_breaker(
+    results: &[ToolResult],
+    failure_counts: &mut std::collections::HashMap<String, usize>,
+    tripped: &mut std::collections::HashSet<String>,
+) {
+    for result in results {
+        let name = &result.call.name;
+        let is_error = result.output.get("error").is_some();
+        if is_error {
+            let count = failure_counts.entry(name.clone()).or_insert(0);
+            *count += 1;
+            if *count >= CIRCUIT_BREAKER_THRESHOLD {
+                if tripped.insert(name.clone()) {
+                    warn!(
+                        "Circuit breaker tripped for tool '{}' after {} consecutive failures",
+                        name, count
+                    );
+                }
+            }
+        } else {
+            failure_counts.remove(name);
+        }
+    }
+}
+
+/// Whether the accumulated cost has exceeded the configured budget.
+/// A `max_cost` of `0.0` (or negative) means "no limit".
+fn cost_budget_exceeded(cost: f64, max_cost: f64) -> bool {
+    max_cost > 0.0 && cost > max_cost
+}
+
+// ---------------------------------------------------------------------------
 // Planning tool declaration
 // ---------------------------------------------------------------------------
 
@@ -750,7 +794,6 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     // Circuit breaker: track consecutive failures per tool name.
     // After 3 consecutive failures, the tool is "tripped" and further calls
     // return an error immediately without execution.
-    const CIRCUIT_BREAKER_THRESHOLD: usize = 3;
     let mut tool_failure_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut tripped_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -775,7 +818,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
         }
 
         // Cost budget check
-        if max_cost > 0.0 && params.progress.cost() > max_cost {
+        if cost_budget_exceeded(params.progress.cost(), max_cost) {
             params.progress.emit(AgentLoopEvent::CostExhausted {
                 cost: params.progress.cost(),
                 max_cost,
@@ -861,24 +904,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             .await?;
 
             // Update circuit breaker state based on results
-            for result in &real_results {
-                let name = &result.call.name;
-                let is_error = result.output.get("error").is_some();
-                if is_error {
-                    let count = tool_failure_counts.entry(name.clone()).or_insert(0);
-                    *count += 1;
-                    if *count >= CIRCUIT_BREAKER_THRESHOLD {
-                        tripped_tools.insert(name.clone());
-                        warn!(
-                            "Circuit breaker tripped for tool '{}' after {} consecutive failures",
-                            name, count
-                        );
-                    }
-                } else {
-                    // Success resets the counter
-                    tool_failure_counts.remove(name);
-                }
-            }
+            update_circuit_breaker(&real_results, &mut tool_failure_counts, &mut tripped_tools);
 
             tool_results.extend(real_results);
         }
@@ -1998,6 +2024,80 @@ agent_loop:
         assert!(obj_str.contains("\"a\""));
         assert!(obj_str.contains("1"));
     }
+
+    // --- Backlog #5: circuit breaker & cost budget helpers ---
+
+    fn err_result(tool: &str) -> ToolResult {
+        ToolResult::new(
+            ToolCall::new(tool.to_string(), json!({}), None),
+            json!({"error": {"type": "x", "message": "boom"}}),
+        )
+    }
+
+    fn ok_result(tool: &str) -> ToolResult {
+        ToolResult::new(ToolCall::new(tool.to_string(), json!({}), None), json!("ok"))
+    }
+
+    #[test]
+    fn circuit_breaker_trips_after_exactly_three_failures() {
+        let mut counts = std::collections::HashMap::new();
+        let mut tripped = std::collections::HashSet::new();
+
+        // Two failures — not yet tripped.
+        update_circuit_breaker(&[err_result("t")], &mut counts, &mut tripped);
+        update_circuit_breaker(&[err_result("t")], &mut counts, &mut tripped);
+        assert!(!tripped.contains("t"), "must not trip before 3 failures");
+        assert_eq!(counts.get("t"), Some(&2));
+
+        // Third failure — trips.
+        update_circuit_breaker(&[err_result("t")], &mut counts, &mut tripped);
+        assert!(tripped.contains("t"), "must trip on the 3rd consecutive failure");
+    }
+
+    #[test]
+    fn circuit_breaker_success_resets_the_counter() {
+        let mut counts = std::collections::HashMap::new();
+        let mut tripped = std::collections::HashSet::new();
+
+        update_circuit_breaker(&[err_result("t")], &mut counts, &mut tripped);
+        update_circuit_breaker(&[err_result("t")], &mut counts, &mut tripped);
+        // A success resets the count.
+        update_circuit_breaker(&[ok_result("t")], &mut counts, &mut tripped);
+        assert_eq!(counts.get("t"), None, "success must clear the failure counter");
+        // A subsequent single failure must not trip (count restarts at 1).
+        update_circuit_breaker(&[err_result("t")], &mut counts, &mut tripped);
+        assert!(!tripped.contains("t"), "counter must have reset after the success");
+        assert_eq!(counts.get("t"), Some(&1));
+    }
+
+    #[test]
+    fn circuit_breaker_tracks_tools_independently() {
+        let mut counts = std::collections::HashMap::new();
+        let mut tripped = std::collections::HashSet::new();
+
+        // Three failures for "a", one for "b", in mixed batches.
+        update_circuit_breaker(&[err_result("a"), err_result("b")], &mut counts, &mut tripped);
+        update_circuit_breaker(&[err_result("a")], &mut counts, &mut tripped);
+        update_circuit_breaker(&[err_result("a")], &mut counts, &mut tripped);
+
+        assert!(tripped.contains("a"), "a hit 3 failures and must be tripped");
+        assert!(!tripped.contains("b"), "b had only 1 failure and must not be tripped");
+    }
+
+    #[test]
+    fn cost_budget_exceeded_boundaries() {
+        // Under budget.
+        assert!(!cost_budget_exceeded(0.4, 0.5));
+        // Over budget.
+        assert!(cost_budget_exceeded(0.6, 0.5));
+        // Exactly at budget — uses strict `>`, so equal is NOT exceeded.
+        assert!(!cost_budget_exceeded(0.5, 0.5));
+        // Zero budget means unlimited, even with high cost.
+        assert!(!cost_budget_exceeded(1000.0, 0.0));
+        // Negative budget is treated as unlimited.
+        assert!(!cost_budget_exceeded(1000.0, -1.0));
+    }
+
 
     // --- Backlog #5: cost parsing, event->state/notification mapping (FR-2) ---
 
