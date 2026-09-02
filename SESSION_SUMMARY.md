@@ -25,3 +25,14 @@ This repository maintains continuous, chronological session handoff summaries do
      * LLVM Dynamic Code Coverage benchmarking (**72.9% line / 79.4% function** on `src/agent_loop.rs`).
      * Formalized Backlog items 5–10 (Tool safety modes, WAL session resumption, rolling compaction, ephemeral Git worktrees).
      * Agent loop Mermaid operational diagram (`.kiro/docs/agent-loop-operation.mmd`).
+
+3. **Session 3: Backlog #5 Completed & Merged — Test/Coverage Hardening, SAST, Coverage Re-Measurement**
+   * **Period:** `2026-09-02` (continues from Session 2)
+   * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-02.md`](.kiro/docs/session-summary-2026-09-02.md)
+   * **Focus Areas:**
+     * Committed pending Session-2 docs; fast-forward merged the full `feat/*` chain into `main` (`3804f5b`).
+     * Enriched the backlog table with Rationale, Architecture-Alignment, and Effort columns.
+     * **Completed & merged Backlog #5:** spec + 25 deterministic unit tests, optional non-gating Semgrep SAST, FR-4 offline E2E crash-isolation demo (Demo 12, harness relocated to `scripts/run-demos.nu`).
+     * **Coverage re-measurement (first-party llvm-tools):** `src/agent_loop.rs` **46.8% → 64.7% line** — a *unit-test* methodology, not comparable to Session 2's live-harness 72.9%. Documented + reproducible via `argc test-coverage`.
+     * Circuit-breaker/cost logic extracted for testability (behavior-preserving). Added **Backlog #11** (mock-Client test seam, Low priority).
+     * **State:** all local, `main` 136 commits ahead of `origin/main`, nothing pushed (intentional). Open: `$0.000000` cost-estimator bug (unlogged).
