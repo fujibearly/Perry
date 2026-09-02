@@ -1,8 +1,10 @@
 # aichat Architecture
 
-A Rust CLI tool (v0.31.0-fork.9) that provides a unified interface to multiple LLM providers. Authored by sigoden, forked with enhancements for native MCP, a provider-agnostic agent loop, and external observability. Operates in three modes: **command-line** (one-shot queries), **REPL** (interactive chat), and **HTTP server** (exposes OpenAI-compatible APIs).
+A Rust CLI tool (v0.31.0-fork.9) that provides a unified interface to multiple LLM providers. Authored by sigoden, forked with enhancements for native MCP, a provider-agnostic agent loop, declarative stream routing, and external observability. Operates in three modes: **command-line** (one-shot queries), **REPL** (interactive chat), and **HTTP server** (exposes OpenAI-compatible APIs).
 
-This is not a coding agent. It's a general-purpose LLM CLI — a Swiss army knife for interacting with any provider, with tools, sessions, RAG, roles, and an API server. The agent loop makes tool-calling reliable and efficient for *any* use case: research, data processing, automation, analysis, whatever the user configures.
+This is not a typical coding agent confined to a single Git repository or worktree. It is a **general-purpose, Unix-native AI execution engine operating with system-level scope** (interacting with filesystems, daemons, network tools, Kubernetes clusters, and APIs).
+
+The operational reality of **Systems Administration, DevOps, and SRE** serves as the primary stress test for this architecture: because system-wide operations involve high blast radiuses, massive unconstrained log outputs, and deployment to stripped-down bastions, the engine is intentionally designed around OS process isolation, declarative stream routing, bounded budgets, and zero-dependency static binaries.
 
 ---
 
@@ -20,13 +22,14 @@ Key principles:
 ### Fork additions
 
 The fork preserves this philosophy but adds **runtime intelligence to the dispatch layer**:
-- **Parallelism** — the harness knows tool calls are independent and executes them concurrently
-- **Budgets** — the harness knows to stop after N turns, preventing runaway
-- **Planning** — the harness gives the model a reasoning channel (`_plan`) without polluting output
-- **Observability** — the harness reports what's happening (OSC titles, status files, notifications)
-- **Delegation** — the harness can spawn other agents as subprocesses with independent lifecycles
+- **Parallelism** — the harness knows tool calls are independent and executes them concurrently (safe for parallel read/diagnostic swarms).
+- **Stream Routing & Auto-Capping** — intercepts large tool outputs (>16KB) and pipes tools without burning LLM context tokens.
+- **Budgets & Circuit Breakers** — the harness enforces hard turn and financial ($) limits, preventing runaway loops.
+- **Planning** — the harness gives the model an in-process reasoning channel (`_plan`) without polluting output.
+- **Observability** — the harness reports real-time telemetry out-of-band via `/dev/tty`, OSC titles, and `$XDG_RUNTIME_DIR` JSON files.
+- **Process-Isolated Delegation** — the harness spawns specialist agents as dedicated child OS subprocesses with unique PIDs.
 
-The LLM and the scripts are unchanged. The pipe between them got smarter.
+The LLM and the scripts are unchanged. The pipe between them got smarter and safer for system-wide execution.
 
 ### What changed vs. what didn't
 

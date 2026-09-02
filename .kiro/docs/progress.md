@@ -1,19 +1,26 @@
 # Project Progress
 
-## Current State (2026-08-24)
+## Current State (2026-08-31)
 
 **Branch:** `feat/tool-output-routing` (off `feat/agent-loop-enhancements`)  
 **Version:** v0.31.0-fork.9  
-**Tests:** 327 pass, 0 fail
+**Tests:** 319 unit tests pass, 0 fail (11/11 E2E multi-agent demos pass)  
+**Agent Loop Coverage:** 72.9% line / 79.4% function ([coverage report](file:///home/istari/projects/aichat/.kiro/docs/coverage-evaluation-2026-08-31.md))
 
 ## Backlog Status
 
-| # | Item | Status | Branch |
-|---|------|--------|--------|
-| 1 | Rust MCP Bridge | ✓ Done | `feat/rust-mcp-bridge` |
-| 3 | Client-Side Agent Loop | ✓ Done (Phases A-F) | `feat/agent-loop-enhancements` |
-| 4 | Tool Output Routing | ✓ Done | `feat/tool-output-routing` |
-| 2 | Gemini Interactions API | Deferred (OpenRouter covers it) | — |
+| # | Item | Status | Priority | Scope / Branch |
+|---|------|--------|----------|----------------|
+| 1 | Rust MCP Bridge | ✓ Done | High | `feat/rust-mcp-bridge` |
+| 3 | Client-Side Agent Loop | ✓ Done | High | `feat/agent-loop-enhancements` |
+| 4 | Tool Output Routing | ✓ Done | Medium | `feat/tool-output-routing` |
+| 5 | Test Suite & Coverage Hardening | Proposed | Medium | `feat/test-suite-hardening` |
+| 6 | Declarative Tool Safety Modes (`# @meta mode`) | Proposed | High | `feat/tool-safety-modes` |
+| 7 | Session Resumption & WAL Journaling (`--resume`) | Proposed | High | `feat/session-wal-resumption` |
+| 8 | Dynamic Multi-Turn Context Compaction | Proposed | Medium | `feat/context-compaction` |
+| 9 | Ephemeral Git Worktree Isolation for Coders | Proposed | Medium | `feat/ephemeral-git-worktrees` |
+| 10 | Staged Config & Dry-Run Protocol for Ops | Proposed | Medium | `feat/staged-ops-protocol` |
+| 2 | Gemini Interactions API | Deferred | Low | — (Covers via OpenRouter/Client Loop) |
 
 ## Commit History
 

@@ -13,6 +13,20 @@ This fork takes a fundamentally different path. It applies the **timeless princi
 > **3. Write programs to handle text streams, because that is a universal interface.** (Declarative output routing, pipes, and files)  
 > **4. Treat everything as an isolated process with clear boundaries.** (Dedicated child `aichat` subprocesses with unique PIDs)
 
+### System-Wide Scope vs. The "Coding Agent Worktree" Trap
+
+A central architectural distinction of `aichat` is that **it is not a typical coding agent confined to a single Git repository or worktree**.
+
+Typical coding agents (Claude Code, Devin, Cursor) operate under narrow assumptions: all actions are scoped to a single workspace directory (`$CWD`), tools are mostly file patchers/compilers, and the blast radius is low (a broken git branch). Consequently, they rely on in-memory object graphs.
+
+**`aichat` is a general-purpose, Unix-native AI execution engine with system-level scope.** It interacts with the entire OS, host filesystems, network interfaces, systemd daemons, logs, Kubernetes clusters, and cloud APIs. 
+
+The **SRE / Systems Administration use case** serves as the defining operational stress-test for this architecture:
+* When an agent operates across real infrastructure, sub-agents cannot be in-memory threads—they must be **process-isolated OS subprocesses (PIDs)**.
+* Tools cannot dump 500KB log files into context—they require **stream routing, auto-capping, and piping**.
+* Actuation cannot be reckless—it demands **parallel read-only diagnostic swarms and controlled, sequential state mutations**.
+* Deployment cannot require gigabytes of Python/Node runtimes—it requires **zero-dependency static musl binaries** that run on minimal VPC jump-boxes and legacy bastions.
+
 ---
 
 ## 2. Core Pillars of the Architecture

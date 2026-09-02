@@ -193,3 +193,102 @@ Alternatively, the LLM could specify routing at call time via a special `_output
 - Does not affect the agent loop's turn counting (a piped chain counts as one tool execution)
 
 **Dependencies:** Backlog #3 (agent loop enhancements) should be complete first — routing integrates into the async parallel dispatch layer.
+
+---
+
+## 5. Test Suite Expansion & Code Coverage Hardening
+
+**Priority:** Medium  
+**Scope:** ~200-400 lines (unit & integration tests in `src/agent_loop.rs`, `src/function.rs`, `src/mcp.rs`, `src/config/agent.rs`)  
+**Driver:** Dynamic coverage analysis on 2026-08-31 showed strong baseline coverage across `agent_loop.rs` (72.9% line / 79.4% function coverage), but highlighted untested edge paths in error handling, crash isolation, cyclic pipe aborts, and budget edge conditions.
+
+### Approach
+
+Systematically add targeted unit tests and harness assertions to boost coverage across critical operational paths:
+
+1. **Output Routing Edge Cases:**
+   - Cyclic pipe detection aborts (e.g. tool A -> tool B -> tool A).
+   - Templated file destination formatting errors, missing directory auto-creation, and permission failures.
+   - Auto-capping boundary tests at exact `tool_output_limit` byte boundaries.
+
+2. **Sub-Agent Isolation & Error Boundaries:**
+   - Non-zero exit code handling and stderr capture when a child `aichat` subprocess crashes.
+   - Sub-agent depth overflow boundary tests (`AICHAT_AGENT_DEPTH >= max_agent_depth`).
+   - Timeout and cancellation propagation to child subprocesses.
+
+3. **Budget & Cost Tracking Edge Conditions:**
+   - Mid-turn cost cap exhaustion (`max_cost` exceeded during multi-tool execution).
+   - Partial token usage tracking across fragmented SSE streaming chunks.
+   - Circuit breaker trip behavior under varied error patterns.
+
+4. **MCP Bridge Mock Testing:**
+   - Expanded unit tests for MCP server handshake timeouts and malformed JSON-RPC error responses.
+
+---
+
+## 6. Declarative Tool Safety Modes & Actuation Governance
+
+**Priority:** High  
+**Scope:** ~150-250 lines (`src/function.rs`, `src/agent_loop.rs`, `llm-functions/Argcfile.sh`)  
+**Driver:** In system-wide operations, parallel child sub-agents must perform read-only triage safely without risking accidental system or database mutations.
+
+### Approach
+1. **Metadata Annotation in `llm-functions`:** Tools declare `# @meta mode readonly` or `# @meta mode mutating` (and optional `# @meta confirm true`).
+2. **Schema & Dispatch Integration:** `FunctionDeclaration` parses the `mode` attribute.
+3. **Sub-Agent Restriction Rule:** By default, child `aichat` subprocesses spawned by the orchestrator inherit a read-only capability mask, preventing them from calling `mutating` tools directly.
+4. **Mutating Elevation:** Only the top-level orchestrator agent can execute `mutating` actuators, ensuring controlled, sequential execution.
+
+---
+
+## 7. Session Resumption & Write-Ahead Log (WAL) Journaling
+
+**Priority:** High  
+**Scope:** ~250-350 lines (`src/agent_loop.rs`, `src/cli.rs`, new `src/session_wal.rs`)  
+**Driver:** Long-running system diagnostic sessions must survive network dropouts, API rate-limits, or user interrupts (`SIGINT`) without re-running expensive diagnostic probes.
+
+### Approach
+1. **Append-Only Event Log:** Stream structured turn events (`TurnStart`, `ToolCall`, `ToolResult`, `Plan`) to `$XDG_RUNTIME_DIR/aichat-<session-id>.wal` (JSON-L format).
+2. **CLI Resume Flag:** Add `aichat --resume <session-id>` to reconstruct conversation context and completed tool artifacts from the journal and continue the loop from turn $N$.
+3. **Session Checkpointing:** Provide an atomic snapshot on clean loop completion or graceful cancellation.
+
+---
+
+## 8. Dynamic Multi-Turn Context Compaction
+
+**Priority:** Medium  
+**Scope:** ~200-300 lines (`src/agent_loop.rs`, `src/config/mod.rs`)  
+**Driver:** Extended 15+ turn troubleshooting investigations accumulate large message queues that consume tokens and degrade LLM reasoning.
+
+### Approach
+1. **Context Window Threshold Monitoring:** Track accumulated prompt tokens at the start of each turn. When tokens exceed a configurable ceiling (e.g. 70% of model window), trigger rolling compaction.
+2. **Rolling Micro-Summarization:** Summarize turns $1 \dots (N-3)$ into a dense, structured system state summary block (active hypothesis, verified facts, failed attempts) using a fast local/flash model.
+3. **Recent Turn Preservation:** Retain the most recent 3 turns in raw fidelity, preventing loss of immediate tool context while resetting the token budget.
+
+---
+
+## 9. Ephemeral Git Worktree Isolation for Multi-Agent Coding
+
+**Priority:** Medium  
+**Scope:** ~150-250 lines (`src/agent_loop.rs`, `src/function.rs`)  
+**Driver:** When an orchestrator delegates tasks to concurrent `coder` sub-agents inside a Git repository, child agents must build, edit, and test without file clobbering or build collision.
+
+### Approach
+1. **Worktree Provisioning:** When delegating to parallel sub-agents in a Git repository, `aichat` executes `git worktree add --detach /tmp/aichat-wt-<pid> HEAD`.
+2. **Isolated Child CWD:** Spawn child `aichat --agent coder` with `Cwd = /tmp/aichat-wt-<pid>`.
+3. **Diff Return & Consolidation:** Child agent compiles and tests in its private worktree, returning a unified diff or patch as its output.
+4. **Cleanup:** Parent orchestrator sequentially reviews/applies patches to the main workspace and executes `git worktree remove --force /tmp/aichat-wt-<pid>`.
+
+---
+
+## 10. Staged Configuration & Dry-Run Protocol for System Operations
+
+**Priority:** Medium  
+**Scope:** Standardized tooling and prompt contracts (`llm-functions`, `agents/orchestrator/index.yaml`)  
+**Driver:** Host config mutations (e.g. `/etc/caddy/Caddyfile`, Kubernetes manifests) require pre-flight syntax validation and rollback safety before live activation.
+
+### Approach
+1. **Staging Directory Convention:** System mutation tools target `/tmp/staging/` paths rather than live host files.
+2. **Validator Tool Integration:** Pair staging tools with explicit validation checks (`nginx -t -c ...`, `caddy validate`, `kubectl diff`, `terraform plan`).
+3. **Atomic Apply & Rollback:** The orchestrator verifies that pre-flight validation succeeds, takes an atomic backup (`.bak` or `etckeeper` snapshot), and copies the staged config to the live destination.
+
+
