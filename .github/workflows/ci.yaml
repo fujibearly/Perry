@@ -44,3 +44,13 @@ jobs:
 
     - name: Format
       run: cargo fmt --all --check
+
+    # Optional, non-gating SAST. Installs Semgrep best-effort and runs the
+    # Rust security pack for visibility. continue-on-error ensures findings —
+    # or a failed/absent install — never block the build. Linux only.
+    - name: SAST (Semgrep, optional)
+      if: runner.os == 'Linux'
+      continue-on-error: true
+      run: |
+        python3 -m pip install --user semgrep || pipx install semgrep || true
+        bash scripts/run-sast.sh

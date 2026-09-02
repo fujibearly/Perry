@@ -27,6 +27,14 @@ test-no-config() {
     cargo run -- "$@"
 }
 
+# @cmd Run Semgrep SAST (optional, non-gating).
+# Skips cleanly if semgrep is not installed. Findings are informational and do
+# NOT fail the run unless SAST_STRICT=1. Scans src/ by default.
+# @arg paths~
+test-sast() {
+    bash scripts/run-sast.sh "$@"
+}
+
 # @cmd Test function calling
 # @option -m --model[?`_choice_model`]
 # @option -p --preset[=weather|multi-weathers]
