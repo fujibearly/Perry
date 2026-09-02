@@ -1883,6 +1883,113 @@ agent_loop:
         assert!(!expanded.contains("{{"), "all variables resolved");
     }
 
+    // --- Backlog #5: apply_output_routing dispatcher (runtime routing entry point) ---
+    // These drive the async dispatcher directly (offline, no LLM), covering branches
+    // the pure-helper tests don't reach: cycle abort via the dispatcher, file dispatch,
+    // empty-target fallback, and the default context/capping path.
+
+    #[tokio::test]
+    async fn apply_output_routing_aborts_on_pipe_cycle() {
+        // A tool that pipes to itself must yield a pipe_cycle_error through the
+        // dispatcher (not just the detect_pipe_cycle helper).
+        let functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "cyc_tool",
+                "description": "self-pipe",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": "cyc_tool"}
+            }))
+            .unwrap(),
+        ]);
+        let config: GlobalConfig = Arc::new(RwLock::new(Config {
+            functions,
+            ..Default::default()
+        }));
+
+        let result = apply_output_routing(&config, "cyc_tool", json!("data"), 16384).await;
+        assert_eq!(
+            result["error"]["type"], "pipe_cycle_error",
+            "self-piping tool must abort with pipe_cycle_error, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_output_routing_dispatches_file_destination() {
+        let unique = format!(
+            "aichat-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let target = std::env::temp_dir().join(&unique).join("routed.txt");
+        let functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "file_tool",
+                "description": "writes to file",
+                "parameters": {"type": "object"},
+                "output": {"destination": "file", "path": target.to_string_lossy()}
+            }))
+            .unwrap(),
+        ]);
+        let config: GlobalConfig = Arc::new(RwLock::new(Config {
+            functions,
+            ..Default::default()
+        }));
+
+        let result = apply_output_routing(&config, "file_tool", json!("payload"), 16384).await;
+        assert!(
+            result.get("written_to").is_some(),
+            "file destination must return a written_to confirmation, got {result:?}"
+        );
+        assert!(target.exists(), "file must actually be written");
+
+        // Clean up the temp tree.
+        if let Some(base) = target.parent() {
+            let _ = std::fs::remove_dir_all(base);
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_output_routing_pipe_with_empty_target_falls_back_to_capping() {
+        // A pipe destination with an empty target string must not pipe; it falls
+        // back to capping (here: small output passes through unchanged).
+        let functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "empty_pipe",
+                "description": "pipe with no target",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": ""}
+            }))
+            .unwrap(),
+        ]);
+        let config: GlobalConfig = Arc::new(RwLock::new(Config {
+            functions,
+            ..Default::default()
+        }));
+
+        let small = json!("small output");
+        let result = apply_output_routing(&config, "empty_pipe", small.clone(), 16384).await;
+        assert_eq!(result, small, "empty-target pipe must fall back to capping/passthrough");
+    }
+
+    #[tokio::test]
+    async fn apply_output_routing_default_context_caps_large_output() {
+        // A tool with no routing declaration takes the default (context) path,
+        // which caps output exceeding the limit.
+        let config: GlobalConfig = Arc::new(RwLock::new(Config::default()));
+        let large = json!("x".repeat(200));
+        let result = apply_output_routing(&config, "unrouted_tool", large, 100).await;
+        assert!(
+            result.get("preview").is_some(),
+            "unrouted large output must be capped on the default context path, got {result:?}"
+        );
+        if let Some(path) = result["full_output_path"].as_str() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
     #[test]
     fn value_to_string_handles_all_types() {
         assert_eq!(value_to_string(&json!("hello")), "hello");

@@ -8,21 +8,22 @@ first-party-only methodology for future coverage runs.
 
 ## 1. Headline Result
 
-The +17 unit tests raised `cargo test` coverage of the primary target file
-`src/agent_loop.rs` by **+12.0 line points** (46.8% → 58.8%) and **+10.7
-function points** (50.0% → 60.7%), with a smaller lift on `src/mcp.rs`. This is
-real, attributable improvement measured on identical methodology before and
-after.
+The backlog #5 test-hardening pass raised `cargo test` coverage of the primary
+target file `src/agent_loop.rs` by **+15.7 line points** (46.8% → 62.5%) and
+**+14.8 function points** (50.0% → 64.8%), with a smaller lift on `src/mcp.rs`.
+This is real, attributable improvement measured on identical methodology before
+and after. The gain came in two waves: 13 pure-function/edge unit tests, then 4
+tests driving the `apply_output_routing` async dispatcher.
 
-| File | Metric | Baseline (`main`, 319 tests) | Post-#5 (336 tests) | Δ |
+| File | Metric | Baseline (`main`, 319 tests) | Post-#5 (348 tests) | Δ |
 |------|--------|:---:|:---:|:---:|
-| `src/agent_loop.rs` | Line | 46.76% | **58.80%** | **+12.04** |
-| `src/agent_loop.rs` | Function | 50.00% | **60.68%** | **+10.68** |
-| `src/agent_loop.rs` | Region | 48.54% | **58.66%** | **+10.12** |
+| `src/agent_loop.rs` | Line | 46.76% | **62.50%** | **+15.74** |
+| `src/agent_loop.rs` | Function | 50.00% | **64.80%** | **+14.80** |
+| `src/agent_loop.rs` | Region | 48.54% | **62.70%** | **+14.16** |
 | `src/mcp.rs` | Line | 80.41% | **82.82%** | **+2.41** |
 | `src/mcp.rs` | Function | 79.71% | **83.56%** | **+3.85** |
 | `src/function.rs` | Line | 54.92% | 54.92% | 0.00 |
-| **TOTAL** | Line | 53.81% | 54.46% | +0.65 |
+| **TOTAL** | Line | 53.81% | 54.68% | +0.87 |
 
 Notes:
 - `function.rs` is unchanged: the #5 tests exercised routing/cost/event/MCP
@@ -72,9 +73,32 @@ functions that were previously **0% covered** by `cargo test`:
 The `mcp.rs` gain comes from the 4 new `parse_call_tool_result` edge tests
 (missing content, error-without-text, unknown block types, image → data URI).
 
+A second wave of 4 tests drives the **`apply_output_routing` async dispatcher**
+directly (offline, no LLM), covering runtime routing branches the pure-helper
+tests didn't reach: the pipe-cycle abort via the dispatcher (`pipe_cycle_error`),
+file-destination dispatch, empty-target pipe fallback, and the default
+context/capping path. This wave added the +3.7-line-point lift on top of the
+first wave.
+
 FR-4 (sub-agent crash isolation) is covered separately by **Demo 12** in
 `scripts/run-demos.nu` (deterministic/offline), not by unit tests — see the
 test-suite-hardening spec.
+
+### Remaining uncovered paths in `agent_loop.rs` (honest limitations)
+
+The ~37% still uncovered is dominated by code locked inside the `run()`
+orchestration loop, which is gated behind a live `call_llm_raw` and therefore
+**not reachable by unit tests without a mock-client seam**:
+
+- **Circuit breaker** — the trip-after-3-failures bookkeeping and tripped-tool
+  error results are inline in `run()`, not a standalone helper.
+- **Cost-budget exhaustion** (`CostExhausted` branch and early return).
+- **Turn iteration / event emission end-to-end** and nested sub-agent recursion.
+
+These are exercised by the live E2E harness (`run-demos.nu`) but not by
+`cargo test`. Closing them deterministically would require introducing a mock
+`Client` test seam so `run()` can be driven without a provider — a separate,
+larger piece of work, not part of this pass.
 
 ---
 
