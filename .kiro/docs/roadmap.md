@@ -1,6 +1,6 @@
 # aichat Fork — Strategic Roadmap
 
-**Purpose:** a single consolidated view of the fork's strategic direction, replacing the fragments previously scattered across [`sre-and-supervisory-landscape.md`](sre-and-supervisory-landscape.md) and the Session 1 summary. It maps each strategic strand to the **4-layer architectural taxonomy** and to its **tracked backlog item** (or explicitly notes when none exists yet).
+**Purpose:** a single consolidated view of the fork's strategic direction, replacing the fragments previously scattered across [`sre-and-supervisory-landscape.md`](sre-and-supervisory-landscape.md), the Session 1 summary, and the Session-2 architecture blueprint ([`architecture-blueprint-2026-08-28-to-2026-09-02.md`](architecture-blueprint-2026-08-28-to-2026-09-02.md) — the origin of the 4-Layer Taxonomy and the #5-#10 specs). It maps each strategic strand to the **4-layer architectural taxonomy** and to its **tracked backlog item** (or explicitly notes when none exists yet).
 
 > **Roadmap vs. Backlog.** The *roadmap* (this doc) is strategic direction — mostly cross-cutting and Layer 3/4. The *backlog* ([`backlog.md`](backlog.md) / the table in [`progress.md`](progress.md)) is the tracked, actionable Layer-2 engine work queue. A roadmap strand is only "committed work" once it has a backlog item. Strands without one are aspirations, not obligations.
 
@@ -13,7 +13,7 @@
 | **L1 — Actuation** | Deterministic CLI tools | `llm-functions` (31 Bash/`argc` tools) | Separate repo; some backlog items touch it (#6, #10) |
 | **L2 — Execution Engine** | The reasoning loop, MCP, RAG, routing, budgets | **this `aichat` fork** | **The backlog is almost entirely here** |
 | **L3 — Workspace Supervisors** | Terminal multiplexing, HITL gates, worktrees | `dot-agent-deck`, `bohay`, `AoE` | External tools (adoption, not our code) |
-| **L4 — Enterprise Control Plane** | Multi-tenant auth, cloud audit, fleet coordination, shared cache | `TrueForge`, **Fleet Commander / "Hive-Mind"** | **Proposed only — not built, mostly out of engine scope** |
+| **L4 — Enterprise Control Plane** | Multi-tenant auth, cloud audit, fleet coordination, shared cache | `TrueForge`, `Portkey`, **Fleet Commander / "Hive-Mind"** | **Proposed only — not built, mostly out of engine scope** |
 
 Design intent: the engine (L2) is the fixed constant; L3/L4 sit *around* it and drive it via CLI/PTY (L3) or Remote MCP/HTTP/WSS (L4). This is why the roadmap and backlog barely overlap — the roadmap largely describes what surrounds the engine.
 
@@ -41,7 +41,7 @@ Design intent: the engine (L2) is the fixed constant; L3/L4 sit *around* it and 
 | **Adopt `bohay`/Luvus** (worktree multiplexer, file leases) | L3 | 🧭 External adoption | *(overlaps #9)* | #1 code-refactoring supervisor. |
 | **Agent of Empires (AoE)** (tmux fleet dashboard) | L3 | 🧭 External option | *(none)* | Host-dependent; lower portability. |
 | **Fleet Commander MCP Server / "Hive-Mind"** (cloud shared semantic cache, fleet coordination) | L4 | 💭 Proposed concept only | *(none — see #13 for the engine-level slice)* | **Not built, not enumerated as phases, not in the backlog.** A cloud/fleet aspiration above the engine. |
-| **TrueForge / enterprise K8s gateway** (RBAC, cloud audit) | L4 | 💭 External / concept | *(none)* | Out of engine scope entirely. |
+| **TrueForge / enterprise K8s gateway** (RBAC, cloud audit) | L4 | 💭 External / concept | *(none)* | Also `Portkey` — LLM gateway/observability. Out of engine scope entirely. |
 
 Legend: ✅ shipped · 🔜 proposed & tracked in backlog · ⏸ deferred · 🧭 external tool to adopt · 💭 concept only (no backlog item).
 
@@ -50,8 +50,23 @@ Legend: ✅ shipped · 🔜 proposed & tracked in backlog · ⏸ deferred · �
 ## Honest Status Notes
 
 - **The "Hive-Mind" / 3-Tier Evolving Semantic RAG Cache is a concept, not code.** It appears only in the Session 1 summary (as a "formulated" idea) and in the SRE-landscape doc (as a *proposed* Layer-4 component). It is **not implemented and not in the backlog.** The only thing that exists today is the per-instance Layer-2 hybrid RAG (`src/rag/`, HNSW + BM25 + RRF) — retrieval, not shared cross-agent memory. Backlog **#13** captures the *engine-level, single-tree* slice of the idea; the cloud/fleet version remains an L4 aspiration.
-- **The "6-phase Distributed Fleet" roadmap was never enumerated.** It exists only as a one-line mention in the Session 1 summary. The six phases were not written down anywhere, so they are intentionally not reproduced here rather than fabricated. If a phased plan is wanted, it needs to be authored deliberately.
+- **The "six-capability" roadmap = backlog #5-#10, not a distributed-fleet phasing.** The Session-2 architecture blueprint ([`architecture-blueprint-2026-08-28-to-2026-09-02.md`](architecture-blueprint-2026-08-28-to-2026-09-02.md) §5) crystallized **six high-leverage Layer-2 engine capabilities** — these are exactly backlog items **#5, #6, #7, #8, #9, #10**. Earlier session-summary phrasing ("6-phase Distributed Fleet") was imprecise: there is no separate enumerated fleet-phasing plan; the "six" are the engine backlog items, all tracked. The Fleet Commander itself (below) remains a distinct, un-phased L4 concept.
 - **L3/L4 tools are adoption recommendations, not fork deliverables.** `dot-agent-deck`, `bohay`, `AoE`, `TrueForge` are external projects. The engine's job is to emit the right contracts (status files, `/dev/tty` signals, Remote MCP via #12) so they can drive it — not to build them.
+
+---
+
+## The Containment Spectrum (from the Session-2 blueprint)
+
+Containment in this system-level engine is not one mechanism but a spectrum across layers (blueprint §4). Three distinct patterns, each mapped to its backlog item:
+
+| Pattern | Layer | Lifetime | Mechanism | Backlog |
+|---------|-------|----------|-----------|---------|
+| **System staging / dry-run** | L1/L2 | per-mutation | write to `/tmp/staging/`, run validators (`nginx -t`, `kubectl diff`), atomic apply + `.bak` rollback | **#10** |
+| **Micro-worktrees** | L2 | seconds–minutes | ephemeral detached `git worktree add /tmp/aichat-wt-<pid>`, automated diff → orchestrator consolidation | **#9** |
+| **Macro-worktrees** | L3 | hours–days | long-lived developer branches, human review/merge (external: `bohay`) | *(L3 tool)* |
+| **Parallel read-only swarms** | L2 | per-turn | collision-free concurrent diagnostics (already shipped) | *(part of #3)* |
+
+The takeaway: #9 (micro) and #10 (staging) are two points on the same containment continuum, and the macro end is deliberately delegated to an L3 supervisor rather than built into the engine.
 
 ---
 

@@ -10,6 +10,8 @@
 
 ## Backlog Status
 
+> Strategic context: [`roadmap.md`](roadmap.md) (4-layer roadmap ↔ backlog crosswalk). Items #5-#10 originate from the Session-2 architecture blueprint ([`architecture-blueprint-2026-08-28-to-2026-09-02.md`](architecture-blueprint-2026-08-28-to-2026-09-02.md)).
+
 | # | Item | Status | Priority | Scope / Branch | Rationale | Alignment to Architecture & Philosophy | Effort |
 |---|------|--------|----------|----------------|-----------|----------------------------------------|--------|
 | 1 | Rust MCP Bridge | ✓ Done | High | `feat/rust-mcp-bridge` | Foundation. Replaces the Node.js MCP bridge with an in-process Rust client, unblocking tool-ecosystem access for both loops with no new abstractions or runtime dependency. | **Pillar 6 (Portability / Zero-Dependency) + Tenet 5:** removes the Node runtime, keeping the single static musl binary deployable on 64MB bastions. | L — done (~1272 lines) |

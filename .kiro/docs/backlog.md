@@ -1,5 +1,7 @@
 # aichat Fork Backlog
 
+> Items #5-#10 originate from the Session-2 architecture blueprint ([`architecture-blueprint-2026-08-28-to-2026-09-02.md`](architecture-blueprint-2026-08-28-to-2026-09-02.md) §5, "six high-leverage Layer-2 capabilities"). Strategic context and the roadmap↔backlog crosswalk live in [`roadmap.md`](roadmap.md).
+
 ## 1. Rust MCP Bridge ✓
 
 **Status:** Complete — committed on `feat/rust-mcp-bridge` (commit `3e95825`)  
@@ -280,6 +282,8 @@ Systematically add targeted unit tests and harness assertions to boost coverage 
 3. **Diff Return & Consolidation:** Child agent compiles and tests in its private worktree, returning a unified diff or patch as its output.
 4. **Cleanup:** Parent orchestrator sequentially reviews/applies patches to the main workspace and executes `git worktree remove --force /tmp/aichat-wt-<pid>`.
 
+> **Containment Spectrum:** #9 (micro-worktrees) is the L2 mid-point of the containment continuum — see [`roadmap.md`](roadmap.md#the-containment-spectrum-from-the-session-2-blueprint). The macro end (long-lived branches, human review) is delegated to the L3 supervisor `bohay`, not built into the engine.
+
 ---
 
 ## 10. Staged Configuration & Dry-Run Protocol for System Operations
@@ -292,6 +296,8 @@ Systematically add targeted unit tests and harness assertions to boost coverage 
 1. **Staging Directory Convention:** System mutation tools target `/tmp/staging/` paths rather than live host files.
 2. **Validator Tool Integration:** Pair staging tools with explicit validation checks (`nginx -t -c ...`, `caddy validate`, `kubectl diff`, `terraform plan`).
 3. **Atomic Apply & Rollback:** The orchestrator verifies that pre-flight validation succeeds, takes an atomic backup (`.bak` or `etckeeper` snapshot), and copies the staged config to the live destination.
+
+> **Containment Spectrum:** #10 (system staging / dry-run) is the L1/L2 per-mutation end of the containment continuum, alongside #9 (micro-worktrees) — see [`roadmap.md`](roadmap.md#the-containment-spectrum-from-the-session-2-blueprint).
 
 
 
