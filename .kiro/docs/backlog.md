@@ -12,7 +12,8 @@ Replaced the Node.js MCP bridge with an in-process Rust implementation. MCP-sour
 
 ## 2. Gemini Interactions API Module
 
-**Priority:** High  
+**Status:** Deferred — Priority downgraded to Low. Gemini agentic use is already covered via OpenRouter + the provider-agnostic client-side loop (#3). Google's Interactions API may still shift, so this is a long-term bet rather than active work. Revisit if `generateContent` deprecation becomes imminent or OpenRouter coverage proves insufficient.  
+**Priority:** Low (was High)  
 **Scope:** ~1000-1500 lines (new file: `src/client/gemini_interactions.rs`)  
 **Driver:** Google's `generateContent` endpoint is labelled "legacy" since June 2026. The Interactions API is GA, supports both Gemini 2.x and 3.x models uniformly, and maps almost 1:1 to the pattern already established in `openai_responses.rs`.
 
