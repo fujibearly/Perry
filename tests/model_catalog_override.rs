@@ -398,6 +398,9 @@ fn overlay_is_append_only_and_preserves_reviewed_catalog_entries() {
             "gemini-3.1-flash-lite",
             "gemma-3-27b-it",
             "gemini-3-flash-preview",
+            "gemini-embedding-001",
+            "gemini-embedding-2",
+            "gemini-embedding-2-preview",
         ]
     );
     assert_eq!(

@@ -1,10 +1,10 @@
 # Project Progress
 
-## Current State (2026-08-31)
+## Current State (2026-09-02)
 
 **Branch:** `feat/tool-output-routing` (off `feat/agent-loop-enhancements`)  
 **Version:** v0.31.0-fork.9  
-**Tests:** 319 unit tests pass, 0 fail (11/11 E2E multi-agent demos pass)  
+**Tests:** 327 tests pass, 0 fail (319 unit + 5 catalog-override + 3 integration; 11/11 E2E multi-agent demos pass)  
 **Agent Loop Coverage:** 72.9% line / 79.4% function ([coverage report](file:///home/istari/projects/aichat/.kiro/docs/coverage-evaluation-2026-08-31.md))
 
 ## Backlog Status
@@ -27,21 +27,31 @@
 ### `feat/tool-output-routing` (off `feat/agent-loop-enhancements`)
 
 1. `8d3f921` — feat: switch default PDF loader to pdf2md (structured Markdown)
-2. `d3c9423` — docs: add spec for tool output routing
+2. `d3c9423` — docs: add spec for backlog #4 — Tool Output Routing
 3. `9b0794a` — feat: tool output routing — capping, file destination, pipe chains
+4. `b5f1914` — docs: update README, architecture, and progress for backlog #4
+5. `9fc8817` — docs: add enhancements-demo.md — copy-paste examples for all features
+6. `5acb23b` — feat: observability hardening, circuit breaker, cost tracking
+7. `fb5e011` — feat: update models, refine agent dispatch, token tracking & add architecture docs
+8. `24b7912` — docs: add session summaries, coverage report, and backlog updates
+9. `e71b2bc` — docs: add rationale column to backlog status; fix auto-cap threshold
 
 ### `feat/agent-loop-enhancements` (off `feat/rust-mcp-bridge`)
 
-1. `65ef41c` — Phase A: config, module skeleton, async eval, raw LLM call
-2. `aeff42b` — Phase B: iterative loop replaces recursion, turn budget enforced
-3. `012a7a2` — docs: .kiro specs/steering
-4. `ae68429` — Phase C: parallel tool execution
-5. `45ed50d` — docs: architecture and progress update
-6. `6b46a38` — docs: Fork Enhancements in README
-7. `c48f0d5` — Phase D: observability and progress rendering
-8. `841e582` — Phase E: planning tool and sub-agent subprocess
-9. `73ca1a5` — Phase F: polish, --info display, tests
-10. `3cbc2aa` — docs: enriched architecture with design philosophy
+1. `65ef41c` — feat: agent loop Phase A — config, module skeleton, async eval, raw LLM call
+2. `aeff42b` — feat: agent loop Phase B — iterative loop replaces recursion, turn budget enforced
+3. `012a7a2` — docs: add .kiro project docs, specs, and steering
+4. `ae68429` — feat: agent loop Phase C — parallel tool execution
+5. `45ed50d` — docs: update architecture and progress for Phase A-C completion
+6. `6b46a38` — docs: add Fork Enhancements section to README
+7. `c48f0d5` — feat: agent loop Phase D — observability and progress rendering
+8. `841e582` — feat: agent loop Phase E — planning tool and sub-agent subprocess
+9. `3cbc2aa` — docs: enrich architecture and README with design philosophy
+10. `73ca1a5` — feat: agent loop Phase F — polish, --info display, tests
+
+### `feat/rust-mcp-bridge` (off `main`)
+
+1. `3e95825` — feat: add native Rust MCP bridge (replaces Node.js bridge)
 
 ## What's Implemented
 
