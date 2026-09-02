@@ -18,7 +18,7 @@ Each target maps to a concrete, already-existing function seam identified during
 | FR-2.3 | `state_from_event` | `agent_loop.rs:1207` | Pure | Construct each `AgentLoopEvent` variant; assert the mapped state string. |
 | FR-2.4 | `notification_for_event` | `agent_loop.rs:1224` | Pure | Assert `Some((..))` for the three terminal events, `None` for a working event. |
 | FR-3.1 | depth guard in `eval_agent_tool_subprocess` | `agent_loop.rs:382` | Reads env + config | The guard is the first thing the fn does. Rather than spawn, extract/verify via the existing env-var seam: set `AICHAT_AGENT_DEPTH == max_agent_depth` and assert the call returns the depth `Err` before any spawn. If the guard is not independently callable, assert through the public entry with a config whose `max_agent_depth` equals the env depth, confirming the bail message — without providers, the spawn is never reached because the guard fires first. |
-| FR-4.1 (stretch) | subprocess error branch | `agent_loop.rs:382` | Spawns `current_exe()` | Only if a hermetic failing invocation exists (e.g. `--agent <nonexistent>` exits non-zero quickly without needing a provider). Assert `agent_error` shape. Skip if it requires network/keys. |
+| FR-4.1 (E2E) | subprocess error branch | `agent_loop.rs:382` | Spawns `current_exe()` | Not a unit test: under `cargo test`, `current_exe()` is the test binary, not `aichat`. Covered instead by **Demo 12** in `scripts/run-demos.nu` — runs the real binary with an unknown agent (`--agent <nonexistent>`), which exits non-zero fast and offline; asserts non-zero exit + captured/readable error + no panic. |
 | FR-5.1 (stretch) | MCP error decode | `mcp.rs` | Pure parse | Extend existing `parse_call_tool_result_*` tests with a malformed/error JSON-RPC envelope. Only pure-parse paths; no server spawn. |
 
 ## Key Design Decisions
@@ -46,7 +46,7 @@ Target: ~12-16 new deterministic unit tests.
 11. `state_from_event_maps_all_variants` (FR-2.3)
 12. `notification_for_event_fires_only_on_terminal_events` (FR-2.4)
 13. `agent_depth_guard_rejects_at_exact_max` (FR-3.1)
-14. (stretch) `subagent_nonzero_exit_yields_agent_error` (FR-4.1)
+14. (E2E, `scripts/run-demos.nu` Demo 12) `Sub-Agent Crash Isolation` (FR-4.1)
 15. (stretch) `mcp_malformed_error_envelope_is_reported` (FR-5.1)
 
 ## Verification

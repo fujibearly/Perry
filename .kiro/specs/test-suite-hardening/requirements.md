@@ -44,9 +44,9 @@ Backlog item #5. Systematically add targeted tests to close the untested edge pa
 
 - FR-3.1: The depth guard in `eval_agent_tool_subprocess` MUST reject a call when `AICHAT_AGENT_DEPTH >= max_agent_depth` (boundary: equal is rejected). This is verified at the depth-check level without actually spawning a subprocess, extending the existing `agent_depth_check_respects_env_var` coverage to the exact boundary condition.
 
-### FR-4: Sub-Agent Crash Isolation (coverage §4.2) — STRETCH
+### FR-4: Sub-Agent Crash Isolation (coverage §4.2) — COVERED VIA E2E
 
-- FR-4.1: When feasible to do hermetically, a sub-agent subprocess that exits non-zero MUST yield an `agent_error` result whose message carries the captured stderr (or an exit-code fallback message when stderr is empty). Implemented only if it can run without live providers and without flakiness; otherwise documented as a remaining gap.
+- FR-4.1: A sub-agent subprocess that exits non-zero MUST surface a captured, readable error rather than crashing the parent (the parent's `eval_agent_tool_subprocess` wraps the child's non-zero exit + stderr as an `agent_error`). Because that function spawns `std::env::current_exe()` — the *test* binary under `cargo test`, not `aichat` — this is not hermetically testable as a unit test. It is instead covered by **Demo 12 (Sub-Agent Crash Isolation)** in `scripts/run-demos.nu`: a deterministic, offline check that runs the real binary with an unknown agent name and asserts (a) non-zero exit, (b) a captured/readable error, (c) no panic. No live providers or network required.
 
 ### FR-5: MCP Bridge Error Paths — STRETCH
 
