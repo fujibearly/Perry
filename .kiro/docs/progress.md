@@ -6,7 +6,7 @@
 **Version:** v0.31.0-fork.9  
 **Tests:** 344 tests pass, 0 fail (336 unit + 5 catalog-override + 3 integration) — +17 from backlog #5 hardening  
 **E2E demos (2026-09-02, live):** 11 scenarios executed, 23/24 assertions pass. The one miss — the OSC tmux pane-title update in Demo 6 — requires an interactive tmux pane as the process's controlling `/dev/tty`; it does not land when run nested inside another CLI. The pipe-proof observability path (status file + `/dev/tty` trace) passes.  
-**Agent Loop Coverage:** 72.9% line / 79.4% function (from 2026-08-31; predates recent commits — [coverage report](file:///home/istari/projects/aichat/.kiro/docs/coverage-evaluation-2026-08-31.md)). Backlog #5 added 17 targeted edge-case tests hitting previously-uncovered paths; a fresh instrumented re-measure is deferred (optional, gated on the live harness).
+**Agent Loop Coverage:** unit-test (`cargo test`) line coverage of `src/agent_loop.rs` rose **46.8% → 58.8%** (+12.0 pts) from the backlog #5 tests — see [coverage re-measurement 2026-09-02](file:///home/istari/projects/aichat/.kiro/docs/coverage-remeasurement-2026-09-02.md). NB: not comparable to the older 72.9% figure, which used the live E2E harness (different methodology — [2026-08-31 report](file:///home/istari/projects/aichat/.kiro/docs/coverage-evaluation-2026-08-31.md)).
 
 ## Backlog Status
 

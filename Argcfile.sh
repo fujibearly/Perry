@@ -35,6 +35,27 @@ test-sast() {
     bash scripts/run-sast.sh "$@"
 }
 
+# @cmd Measure unit-test code coverage (first-party llvm-tools only).
+# Requires `rustup component add llvm-tools-preview`. Instruments the bin test
+# binary, runs it, and prints an llvm-cov report for our code (deps/stdlib
+# excluded). First instrumented build is slow (full rebuild); warm builds fast.
+# See .kiro/docs/coverage-remeasurement-2026-09-02.md for methodology.
+test-coverage() {
+    set -e
+    bindir="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin"
+    covdir="$(mktemp -d)"
+    echo "Building instrumented test binary (first run may take 10-15 min)..."
+    RUSTFLAGS="-C instrument-coverage" cargo test --bin aichat --no-run
+    bin="$(ls -t target/debug/deps/aichat-* | grep -vE '\.(d|o|txt)$' | head -n1)"
+    echo "Running: $bin"
+    LLVM_PROFILE_FILE="$covdir/aichat-%p-%m.profraw" "$bin"
+    "$bindir/llvm-profdata" merge -sparse "$covdir"/aichat-*.profraw -o "$covdir/aichat.profdata"
+    "$bindir/llvm-cov" report "$bin" \
+        --instr-profile="$covdir/aichat.profdata" \
+        --ignore-filename-regex='(/.cargo/|/rustc/|library/std)'
+    rm -rf "$covdir"
+}
+
 # @cmd Test function calling
 # @option -m --model[?`_choice_model`]
 # @option -p --preset[=weather|multi-weathers]

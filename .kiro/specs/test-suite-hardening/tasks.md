@@ -32,7 +32,7 @@ Branch: `feat/test-suite-hardening` (off `main` @ `64ebd7d`)
 ## Phase 5 — Verify & Land
 
 - [x] 5.1 Full `cargo test` — all green (344 pass, 0 fail: 336 unit + 5 catalog-override + 3 integration; was 327).
-- [ ] 5.2 (optional) Re-run LLVM coverage on `agent_loop.rs`; update `.kiro/docs/coverage-evaluation-*` with the delta. **DEFERRED** — gated on the instrumented build + live billed harness; improvement argued qualitatively instead (17 tests hitting previously-0%-covered functions).
+- [x] 5.2 Re-run coverage on `agent_loop.rs`; record the delta. **DONE** via first-party llvm-tools on `cargo test` (before/after `main` vs branch): `agent_loop.rs` line **46.8% → 58.8%** (+12.0 pts), function **50.0% → 60.7%**; `mcp.rs` line **80.4% → 82.8%**. Report: `.kiro/docs/coverage-remeasurement-2026-09-02.md`; reproducible via `argc test-coverage`. NB: measured on the unit-test methodology, not the live-harness one that produced the older 72.9% figure.
 - [x] 5.3 Update `.kiro/docs/progress.md` (test count 327→344; #5 status In Progress) and `backlog.md` #5 status.
 - [x] 5.4 Commit on `feat/test-suite-hardening` (`b6505f3`) with a message referencing the covered FRs. (Spec committed earlier at `3cb4e71`.)
 
