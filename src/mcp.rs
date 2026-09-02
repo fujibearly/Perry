@@ -1056,6 +1056,53 @@ done
         assert!(parsed.is_null());
     }
 
+    // --- Backlog #5 (FR-5): malformed / edge MCP CallToolResult envelopes ---
+
+    #[test]
+    fn test_parse_call_tool_result_missing_content_field() {
+        // No "content" key at all — must not panic; treated as empty → null.
+        let result = json!({"someOtherField": true});
+        let parsed = parse_call_tool_result(result).unwrap();
+        assert!(parsed.is_null());
+    }
+
+    #[test]
+    fn test_parse_call_tool_result_error_without_text_content() {
+        // isError set but no text blocks — must yield an error envelope with an
+        // empty message rather than panicking or losing the error signal.
+        let result = json!({"isError": true, "content": []});
+        let parsed = parse_call_tool_result(result).unwrap();
+        assert_eq!(
+            parsed,
+            json!({"error": {"type": "tool_execution_error", "message": ""}})
+        );
+    }
+
+    #[test]
+    fn test_parse_call_tool_result_skips_unknown_block_types() {
+        // Unknown/malformed block types are skipped; text blocks still collected.
+        let result = json!({
+            "content": [
+                {"type": "audio", "data": "ignored"},
+                {"type": "text", "text": "kept"},
+                {"nonsense": "no type field"}
+            ]
+        });
+        let parsed = parse_call_tool_result(result).unwrap();
+        assert_eq!(parsed, json!({"output": "kept"}));
+    }
+
+    #[test]
+    fn test_parse_call_tool_result_image_block_becomes_data_uri() {
+        let result = json!({
+            "content": [
+                {"type": "image", "data": "QUJD", "mimeType": "image/png"}
+            ]
+        });
+        let parsed = parse_call_tool_result(result).unwrap();
+        assert_eq!(parsed, json!({"output": "data:image/png;base64,QUJD"}));
+    }
+
     #[test]
     fn test_expand_env_vars() {
         std::env::set_var("AICHAT_TEST_VAR", "hello");

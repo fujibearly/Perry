@@ -1717,6 +1717,172 @@ agent_loop:
         assert!(result.is_ok());
     }
 
+    // --- Backlog #5: output-routing edge cases (FR-1) ---
+
+    #[test]
+    fn pipe_cycle_detection_catches_multi_hop_cycle() {
+        // A -> B -> C -> A must be rejected (existing tests only cover A->A and linear).
+        let functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "hop_a",
+                "description": "pipes to b",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": "hop_b"}
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "name": "hop_b",
+                "description": "pipes to c",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": "hop_c"}
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "name": "hop_c",
+                "description": "pipes back to a",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": "hop_a"}
+            }))
+            .unwrap(),
+        ]);
+        let config_inner = Config {
+            functions,
+            ..Default::default()
+        };
+        let config: GlobalConfig = Arc::new(RwLock::new(config_inner));
+
+        let result = detect_pipe_cycle(&config, "hop_a");
+        assert!(result.is_err(), "multi-hop cycle A->B->C->A must be detected");
+    }
+
+    #[test]
+    fn pipe_cycle_detection_allows_multi_hop_linear_chain() {
+        // A -> B -> C (terminating) must be accepted.
+        let functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "lin_a",
+                "description": "pipes to b",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": "lin_b"}
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "name": "lin_b",
+                "description": "pipes to c",
+                "parameters": {"type": "object"},
+                "output": {"destination": "pipe", "target": "lin_c"}
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "name": "lin_c",
+                "description": "terminal, no pipe",
+                "parameters": {"type": "object"}
+            }))
+            .unwrap(),
+        ]);
+        let config_inner = Config {
+            functions,
+            ..Default::default()
+        };
+        let config: GlobalConfig = Arc::new(RwLock::new(config_inner));
+
+        let result = detect_pipe_cycle(&config, "lin_a");
+        assert!(result.is_ok(), "linear chain A->B->C must be allowed");
+    }
+
+    #[test]
+    fn capping_passes_result_at_exact_limit_boundary() {
+        // A string value serializes to itself (value_to_string returns the raw string),
+        // so a string of length == limit is exactly at the boundary and must pass unchanged.
+        let limit = 128;
+        let exact = json!("x".repeat(limit));
+        let result = apply_capping(exact.clone(), "boundary_exact", limit);
+        assert_eq!(result, exact, "content length == limit must pass unchanged");
+    }
+
+    #[test]
+    fn capping_caps_result_one_byte_over_limit() {
+        let limit = 128;
+        let over = json!("x".repeat(limit + 1));
+        let result = apply_capping(over, "boundary_over", limit);
+        assert!(
+            result.get("preview").is_some(),
+            "content length == limit + 1 must be capped"
+        );
+        assert_eq!(result["total_bytes"], limit + 1);
+        let preview = result["preview"].as_str().unwrap();
+        assert_eq!(preview.len(), limit);
+
+        if let Some(path) = result["full_output_path"].as_str() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn file_routing_creates_missing_parent_directories() {
+        // FR-1.4: nested, not-yet-existing parent dirs must be created.
+        let unique = format!(
+            "aichat-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let base = std::env::temp_dir().join(&unique);
+        let nested = base.join("a").join("b").join("c");
+        let target = nested.join("out.txt");
+        // Precondition: none of these dirs exist yet.
+        assert!(!base.exists());
+
+        let routing = OutputRouting {
+            destination: OutputDestination::File,
+            path: Some(target.to_string_lossy().to_string()),
+            target: None,
+        };
+        let output = json!("nested content");
+        let result = route_to_file(&output, "nested_dir_test", &routing);
+
+        assert!(
+            result.get("written_to").is_some(),
+            "write into freshly-created nested dirs must succeed, got {result:?}"
+        );
+        assert!(target.exists(), "parent directories must have been created");
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(content, "nested content");
+
+        // Clean up the whole temp tree.
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn template_expansion_substitutes_numeric_timestamp() {
+        let expanded = expand_path_template("/tmp/{{timestamp}}.out", "tool", None);
+        assert!(!expanded.contains("{{"), "no unresolved markers");
+        // Extract the timestamp segment and confirm it is all-numeric.
+        let ts = expanded
+            .trim_start_matches("/tmp/")
+            .trim_end_matches(".out");
+        assert!(!ts.is_empty(), "timestamp must expand to a value");
+        assert!(
+            ts.chars().all(|c| c.is_ascii_digit()),
+            "timestamp must be numeric, got '{ts}'"
+        );
+    }
+
+    #[test]
+    fn template_expansion_resolves_all_variables_combined() {
+        let expanded = expand_path_template(
+            "/data/{{name}}/{{id}}-{{timestamp}}.{{ext}}",
+            "combo_tool",
+            Some("call-9"),
+        );
+        assert!(expanded.contains("combo_tool"));
+        assert!(expanded.contains("call-9"));
+        assert!(expanded.contains("txt"));
+        assert!(!expanded.contains("{{"), "all variables resolved");
+    }
+
     #[test]
     fn value_to_string_handles_all_types() {
         assert_eq!(value_to_string(&json!("hello")), "hello");
@@ -1724,6 +1890,156 @@ agent_loop:
         let obj_str = value_to_string(&json!({"a": 1}));
         assert!(obj_str.contains("\"a\""));
         assert!(obj_str.contains("1"));
+    }
+
+    // --- Backlog #5: cost parsing, event->state/notification mapping (FR-2) ---
+
+    #[test]
+    fn parse_cost_extracts_dollar_amount_from_stderr() {
+        let stderr = "some trace line\nTokens: 100 input + 20 output | Estimated cost: $0.0123 (done)\nmore output";
+        let cost = parse_cost_from_stderr(stderr);
+        assert!((cost - 0.0123).abs() < 1e-9, "expected 0.0123, got {cost}");
+    }
+
+    #[test]
+    fn parse_cost_returns_zero_when_marker_absent() {
+        let stderr = "no cost marker here\njust regular trace output\n";
+        assert_eq!(parse_cost_from_stderr(stderr), 0.0);
+    }
+
+    #[test]
+    fn parse_cost_tolerates_malformed_amount() {
+        // Marker present but the token after '$' is not a valid float — must not panic, returns 0.0.
+        let stderr = "Estimated cost: $notanumber trailing";
+        assert_eq!(parse_cost_from_stderr(stderr), 0.0);
+        // Empty after marker (marker at end of line).
+        let stderr2 = "Estimated cost: $";
+        assert_eq!(parse_cost_from_stderr(stderr2), 0.0);
+    }
+
+    #[test]
+    fn state_from_event_maps_all_variants() {
+        use std::time::Duration;
+        // Terminal / budget / cost states
+        assert_eq!(state_from_event(&AgentLoopEvent::LoopComplete), "done");
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::BudgetExhausted { max_turns: 20 }),
+            "budget_exhausted"
+        );
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::CostExhausted {
+                cost: 1.0,
+                max_cost: 0.5
+            }),
+            "cost_exhausted"
+        );
+        // Working states — every non-terminal event maps to "working"
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::TurnStart {
+                turn: 1,
+                max_turns: 20
+            }),
+            "working"
+        );
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::ToolStart {
+                name: "t".into(),
+                id: None
+            }),
+            "working"
+        );
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::ToolComplete {
+                name: "t".into(),
+                duration: Duration::from_secs(1),
+                success: true
+            }),
+            "working"
+        );
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::SubAgentStart {
+                agent_name: "a".into(),
+                pid: 1
+            }),
+            "working"
+        );
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::SubAgentComplete {
+                agent_name: "a".into(),
+                pid: 1,
+                duration: Duration::from_secs(1),
+                success: true
+            }),
+            "working"
+        );
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::PlanReceived {
+                content: "c".into()
+            }),
+            "working"
+        );
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::BudgetWarning {
+                turn: 18,
+                max_turns: 20
+            }),
+            "working"
+        );
+    }
+
+    #[test]
+    fn notification_for_event_fires_only_on_terminal_events() {
+        use std::time::Duration;
+        // Terminal events produce a notification.
+        assert!(notification_for_event(&AgentLoopEvent::LoopComplete).is_some());
+        assert!(notification_for_event(&AgentLoopEvent::BudgetExhausted { max_turns: 20 }).is_some());
+        assert!(notification_for_event(&AgentLoopEvent::CostExhausted {
+            cost: 1.0,
+            max_cost: 0.5
+        })
+        .is_some());
+        // Non-terminal / working events do not.
+        assert!(notification_for_event(&AgentLoopEvent::TurnStart {
+            turn: 1,
+            max_turns: 20
+        })
+        .is_none());
+        assert!(notification_for_event(&AgentLoopEvent::ToolComplete {
+            name: "t".into(),
+            duration: Duration::from_secs(1),
+            success: true
+        })
+        .is_none());
+        assert!(notification_for_event(&AgentLoopEvent::BudgetWarning {
+            turn: 18,
+            max_turns: 20
+        })
+        .is_none());
+    }
+
+    // --- Backlog #5: sub-agent depth boundary (FR-3) ---
+
+    #[tokio::test]
+    async fn agent_depth_guard_rejects_at_exact_max() {
+        // eval_agent_tool_subprocess bails when current_depth >= max_agent_depth,
+        // BEFORE spawning any subprocess. Using max_agent_depth: 0 means the guard
+        // fires at the default depth (0 >= 0) without touching the process-global
+        // AICHAT_AGENT_DEPTH env var — hermetic, race-free under parallel tests,
+        // and no child process / provider involved.
+        let config = config_with_agent_loop("agent_loop:\n  max_agent_depth: 0\n");
+        let call = ToolCall::new("some_agent".to_string(), json!({"task": "noop"}), None);
+
+        let result = eval_agent_tool_subprocess(&config, &call).await;
+
+        assert!(
+            result.is_err(),
+            "depth (0) >= max_agent_depth (0) must be rejected before spawning"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("depth") && msg.contains("maximum"),
+            "error should explain the depth limit, got: {msg}"
+        );
     }
 
     #[test]
