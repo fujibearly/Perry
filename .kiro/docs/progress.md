@@ -9,18 +9,18 @@
 
 ## Backlog Status
 
-| # | Item | Status | Priority | Scope / Branch |
-|---|------|--------|----------|----------------|
-| 1 | Rust MCP Bridge | ✓ Done | High | `feat/rust-mcp-bridge` |
-| 3 | Client-Side Agent Loop | ✓ Done | High | `feat/agent-loop-enhancements` |
-| 4 | Tool Output Routing | ✓ Done | Medium | `feat/tool-output-routing` |
-| 5 | Test Suite & Coverage Hardening | Proposed | Medium | `feat/test-suite-hardening` |
-| 6 | Declarative Tool Safety Modes (`# @meta mode`) | Proposed | High | `feat/tool-safety-modes` |
-| 7 | Session Resumption & WAL Journaling (`--resume`) | Proposed | High | `feat/session-wal-resumption` |
-| 8 | Dynamic Multi-Turn Context Compaction | Proposed | Medium | `feat/context-compaction` |
-| 9 | Ephemeral Git Worktree Isolation for Coders | Proposed | Medium | `feat/ephemeral-git-worktrees` |
-| 10 | Staged Config & Dry-Run Protocol for Ops | Proposed | Medium | `feat/staged-ops-protocol` |
-| 2 | Gemini Interactions API | Deferred | Low | — (Covers via OpenRouter/Client Loop) |
+| # | Item | Status | Priority | Scope / Branch | Rationale |
+|---|------|--------|----------|----------------|-----------|
+| 1 | Rust MCP Bridge | ✓ Done | High | `feat/rust-mcp-bridge` | Foundation. Replaces the Node.js MCP bridge with an in-process Rust client, unblocking tool-ecosystem access for both loops with no new abstractions or runtime dependency. |
+| 3 | Client-Side Agent Loop | ✓ Done | High | `feat/agent-loop-enhancements` | The only provider-agnostic orchestration; enhancing it (parallel tools, turn budget, sub-agents, `_plan`) gives *every* provider agentic capability without server-side support. |
+| 4 | Tool Output Routing | ✓ Done | Medium | `feat/tool-output-routing` | Every tool result currently re-enters LLM context, which is wasteful for large/final outputs; routing to file or pipe makes tool composition practical without burning context. |
+| 5 | Test Suite & Coverage Hardening | Proposed | Medium | `feat/test-suite-hardening` | Coverage analysis showed strong baseline (72.9% line) but untested edge paths in error handling, crash isolation, cyclic pipe aborts, and budget conditions. |
+| 6 | Declarative Tool Safety Modes (`# @meta mode`) | Proposed | High | `feat/tool-safety-modes` | In system-wide operations, parallel child sub-agents must triage read-only safely; capability masking prevents accidental system/database mutations. |
+| 7 | Session Resumption & WAL Journaling (`--resume`) | Proposed | High | `feat/session-wal-resumption` | Long diagnostic sessions must survive network dropouts, rate-limits, and `SIGINT` without re-running expensive probes. |
+| 8 | Dynamic Multi-Turn Context Compaction | Proposed | Medium | `feat/context-compaction` | Preserves context hygiene (Pillar 1): extended 15+ turn investigations accumulate context monoliths that contaminate reasoning; rolling micro-summaries keep the working context dense. |
+| 9 | Ephemeral Git Worktree Isolation for Coders | Proposed | Medium | `feat/ephemeral-git-worktrees` | Concurrent `coder` sub-agents in a Git repo must build, edit, and test without file clobbering or build collision. |
+| 10 | Staged Config & Dry-Run Protocol for Ops | Proposed | Medium | `feat/staged-ops-protocol` | Host config mutations (Caddyfile, K8s manifests) require pre-flight syntax validation and rollback safety before live activation. |
+| 2 | Gemini Interactions API | Deferred | Low | — (Covers via OpenRouter/Client Loop) | Future-proofs against `generateContent` deprecation, but Google's API may still shift and OpenRouter + client loop already cover Gemini agentic use. |
 
 ## Commit History
 

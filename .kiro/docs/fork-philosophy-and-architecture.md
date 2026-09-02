@@ -91,7 +91,7 @@ graph TD
 ### Pillar 3: Declarative Data Flow (Pipes, Files, and Auto-Capping)
 * In traditional function calling, tools return raw strings into the prompt. If a tool outputs a 500KB dump, the context window overflows.
 * The fork introduces **Unix-style stream routing** configured directly via companion JSONs:
-  * **Auto-Capping:** Returns over 100KB are automatically offloaded to `/tmp/aichat-tool-*.out`, giving the LLM a clean preview and a path.
+  * **Auto-Capping:** Returns over the configured `tool_output_limit` (default 16 KB) are automatically offloaded to `/tmp/aichat-tool-*.out`, giving the LLM a clean preview and a path.
   * **Piping (`"destination": "pipe"`):** The output of `fetch_url_via_curl` is piped automatically into `summarize_text` before reaching the LLM.
   * **File Targets (`"destination": "file"`):** Generated mock data is written directly to disk without bloating prompt tokens.
 
