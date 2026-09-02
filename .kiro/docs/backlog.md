@@ -294,3 +294,20 @@ Systematically add targeted unit tests and harness assertions to boost coverage 
 3. **Atomic Apply & Rollback:** The orchestrator verifies that pre-flight validation succeeds, takes an atomic backup (`.bak` or `etckeeper` snapshot), and copies the staged config to the live destination.
 
 
+
+---
+
+## 11. Mock-Client Test Seam for Agent-Loop Orchestration Coverage
+
+**Priority:** Low
+**Scope:** ~150-300 lines (`src/agent_loop.rs`, `src/client/` trait plumbing, tests)
+**Driver:** The backlog #5 hardening pass raised `src/agent_loop.rs` unit-test line coverage from 46.8% to 64.7% by testing pure/near-pure helpers (routing, capping, cost/circuit-breaker decision logic, event mapping). The remaining uncovered ~35% is dominated by the `run()` orchestration loop itself — turn iteration, streaming, event emission, the tripped-call short-circuit dispatch, and nested sub-agent recursion — all gated behind a live `call_llm_raw` (`input.create_client()`). These paths are exercised only by the live, billed, non-deterministic E2E harness (`run-demos.nu`), never by `cargo test`.
+
+### Approach
+1. **Inject an LLM turn source.** Refactor `run()` (or `call_llm_raw`) so the "produce `(ChatCompletionsOutput, Vec<ToolCall>)` for this turn" step is an injectable dependency rather than a hard call to `input.create_client()`. Options: a `trait LlmTurnSource`, a boxed async closure on `AgentLoopParams`, or a small `Client` mock behind the existing trait.
+2. **Deterministic scripted turns.** In tests, feed a fixed sequence of fake turns (e.g. turn 1 → two tool calls; turn 2 → a `_plan`; turn 3 → final text) so the loop iterates without any provider, network, or cost.
+3. **Cover the orchestration branches.** With scripted turns, unit-test: multi-turn iteration, turn-budget exhaustion end-to-end, the `_plan` partition path, tripped-call short-circuit dispatch, `CostExhausted` early return through the real loop, and (optionally) sub-agent recursion.
+
+### Notes
+- This is deliberately **Low priority**: the decision logic these paths depend on is already unit-tested via extracted helpers (backlog #5), and the end-to-end behavior is covered by the E2E harness. This item buys *deterministic, offline* coverage of the orchestration wiring — valuable but not urgent.
+- Introducing the seam is a real production-code change in the engine's hot path, so it warrants its own spec and careful, behavior-preserving review — not a test-only patch.
