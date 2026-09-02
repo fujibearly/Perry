@@ -2,6 +2,8 @@
 
 This repository maintains continuous, chronological session handoff summaries documenting all architectural decisions, code changes, and test coverage.
 
+**Key references:** [`.kiro/docs/roadmap.md`](.kiro/docs/roadmap.md) (consolidated 4-layer roadmap ↔ backlog crosswalk) · [`.kiro/docs/backlog.md`](.kiro/docs/backlog.md) (tracked engine work) · [`.kiro/docs/progress.md`](.kiro/docs/progress.md) (status table).
+
 ---
 
 ### Chronological Session Records:

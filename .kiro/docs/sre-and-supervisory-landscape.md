@@ -38,6 +38,8 @@ graph TD
 * **Layer 3 (Workspace & Session Multiplexing):** Supervisors (`dot-agent-deck`, `bohay`, `AoE`) manage user-facing terminal layouts, isolated Git worktrees, and human-in-the-loop approval gates.
 * **Layer 4 (Enterprise Control Plane):** Centralized gateways (`TrueForge`, Fleet Commander) handle multi-tenant authentication, cloud audit logging, fleet-wide coordination, and shared semantic caching.
 
+> **Status note:** the Layer-4 items above — including the Fleet Commander / "Hive-Mind" shared semantic cache — are **proposed concepts, not implemented and not in the backlog.** See the consolidated [`roadmap.md`](roadmap.md) for the full roadmap↔backlog crosswalk. The engine-level (single orchestration tree) slice of shared cross-agent memory is tracked as backlog **#13**.
+
 ---
 
 ## 2. SRE & Production Operations Evaluation Matrix

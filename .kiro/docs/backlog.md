@@ -311,3 +311,39 @@ Systematically add targeted unit tests and harness assertions to boost coverage 
 ### Notes
 - This is deliberately **Low priority**: the decision logic these paths depend on is already unit-tested via extracted helpers (backlog #5), and the end-to-end behavior is covered by the E2E harness. This item buys *deterministic, offline* coverage of the orchestration wiring — valuable but not urgent.
 - Introducing the seam is a real production-code change in the engine's hot path, so it warrants its own spec and careful, behavior-preserving review — not a test-only patch.
+
+---
+
+## 12. Remote MCP Transports (HTTP / WSS)
+
+**Priority:** Medium
+**Scope:** ~200-400 lines (`src/mcp.rs`, config plumbing for server URLs/auth)
+**Driver:** The native Rust MCP engine (backlog #1) speaks only stdio to locally-spawned servers. The roadmap's Layer-4 control planes (Fleet Commander, TrueForge) and remote MCP servers require the engine to also connect over **HTTP and WebSocket (WSS)** transports. This is the concrete Layer-2 engine work that unblocks the roadmap's "Remote MCP / HTTP / WSS" arrow from Layer 4 into `aichat`, and was called out under SRE-landscape §5 "Future Work".
+
+### Approach
+1. **Transport abstraction.** Generalize the MCP connection layer so a server can be reached via stdio (current), HTTP, or WSS, selected by the server's config entry (e.g. a `url:` / `transport:` field alongside the existing `command:`).
+2. **Auth pass-through.** Support bearer/token headers for remote servers (reuse the config-field env-expansion already used for API keys).
+3. **Reconnect & timeout semantics.** Remote transports need connection timeouts and reconnect handling distinct from the stdio spawn model; keep the lazy-connect + per-server pooling behavior.
+4. **Transparent to the rest of the system.** Remote MCP tools MUST still appear as regular `FunctionDeclaration` entries — no changes to `use_tools`, agents, or the loop.
+
+### Notes
+- Alignment: extends **Transparent MCP Integration** (native Rust MCP) upward; enables the roadmap's Layer-4 remote coordination without changing the tool model. Preserves Pillar 6 (still a single static binary; no new runtime).
+- Keep the stdio path the zero-config default so bastion/air-gapped deployments are unaffected.
+
+---
+
+## 13. Scoped Shared Artifact Store for Orchestration Trees
+
+**Priority:** Low
+**Scope:** ~150-300 lines (`src/agent_loop.rs`, `src/function.rs`, a small store abstraction)
+**Driver:** Sub-agents currently collaborate only through (a) the orchestrator's context (delegation), (b) tool output routing (pipe/file handoff, #4), and (c) read-only status files. There is no way for sibling agents in one orchestration tree to share intermediate artifacts (e.g. two `researcher` sub-agents deduplicating an expensive fetch/embed, or a producer agent leaving a dataset for a consumer agent) **without** round-tripping through the parent. This is the engine-level counterpart to the roadmap's Layer-4 "Hive-Mind" shared cache — but scoped to a single local orchestration tree, not a cloud fleet.
+
+### Approach (deliberately NOT a free-form blackboard)
+1. **Scoped to one tree.** The store is keyed by the root orchestrator PID (`AICHAT_AGENT_ROOT` or similar), living under `$XDG_RUNTIME_DIR/aichat-tree-<root-pid>/`. Sub-agents inherit the key via env, exactly like `AICHAT_AGENT_DEPTH`.
+2. **Structured, append-only, declared writes.** Agents write artifacts via a declared tool (`artifact_put name=... `), not by freely mutating shared memory. Reads are `artifact_get` / `artifact_list`. This mirrors the existing declarative-output philosophy — no ambient shared mutable state.
+3. **Read-mostly for siblings.** Preserves the isolation tenet: parallel agents read freely (dedup/handoff) but the write surface is explicit and auditable, avoiding the race/injection/context-pollution hazards of a blackboard.
+4. **Lifecycle.** Created on root-agent start, torn down on completion (like status files); stale trees cleaned at startup via `/proc/<pid>` checks.
+
+### Notes
+- **Why Low priority and why NOT a blackboard:** a general "agents chat freely" scratchpad fights the fork's core process-isolation / context-hygiene thesis (see `fork-philosophy-and-architecture.md`, Pillars 1 & 2). This item captures the *narrow, structured* version that preserves isolation. It should get its own spec and careful review before implementation.
+- Interacts with #7 (WAL — artifacts could be journaled) and #9 (worktrees — a coder tree's shared patch area). The Layer-4 "Hive-Mind" (cloud, cross-fleet, evolving semantic cache) remains a separate, roadmap-only concept above this.
