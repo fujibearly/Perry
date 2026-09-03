@@ -243,6 +243,65 @@ pub struct FunctionDeclaration {
     /// Absent or null = context (default behavior).
     #[serde(skip_serializing, default)]
     pub output: Option<OutputRouting>,
+    /// Safety mode (backlog #6a): whether this tool only reads (`readonly`) or
+    /// may change state (`mutating`). Governance metadata — never serialized to
+    /// the LLM. Absent means *unclassified* (see [`FunctionDeclaration::safety_class`]),
+    /// which is treated as the most conservative disposition.
+    #[serde(skip_serializing, default)]
+    pub mode: Option<ToolMode>,
+}
+
+impl FunctionDeclaration {
+    /// Resolve this tool's safety classification for capability-mask enforcement.
+    ///
+    /// - `Some(ToolMode::Readonly)` → the tool declares it only reads.
+    /// - `Some(ToolMode::Mutating)` → the tool declares it changes state.
+    /// - `None` (no `mode` declared) → **unclassified**: reserved to humans (for now),
+    ///   the most conservative disposition. Unclassified tools are treated as at
+    ///   least as restricted as `mutating` for masking purposes.
+    pub fn safety_class(&self) -> SafetyClass {
+        match self.mode {
+            Some(ToolMode::Readonly) => SafetyClass::Readonly,
+            Some(ToolMode::Mutating) => SafetyClass::Mutating,
+            None => SafetyClass::Unclassified,
+        }
+    }
+}
+
+/// Declared safety mode of a tool (backlog #6a).
+///
+/// Serialized form (in `functions.json`): `"readonly"` / `"mutating"`.
+/// An *absent* mode is intentionally NOT one of these variants — see
+/// [`SafetyClass::Unclassified`] — so that "no declaration" is distinguishable
+/// from an explicit `mutating` and can carry the stricter reserved-to-humans policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolMode {
+    /// The tool only reads state; safe to run under a read-only capability mask.
+    Readonly,
+    /// The tool may change state; blocked under a read-only capability mask.
+    Mutating,
+}
+
+/// Resolved safety classification of a tool, including the "no declaration" case.
+///
+/// This is what capability-mask enforcement (backlog #6a) checks. It exists so
+/// that an *undeclared* tool (`Unclassified`) is strictly more conservative than
+/// an explicitly-`Mutating` one: undeclared tools are reserved to humans for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafetyClass {
+    Readonly,
+    Mutating,
+    Unclassified,
+}
+
+impl SafetyClass {
+    /// Whether a tool with this classification may run under a `readonly`
+    /// capability mask. Only explicitly-`readonly` tools may; both `mutating`
+    /// and `unclassified` are denied to masked (sub-agent) contexts.
+    pub fn allowed_under_readonly_mask(&self) -> bool {
+        matches!(self, SafetyClass::Readonly)
+    }
 }
 
 /// Routing declaration for a tool's output.
@@ -695,5 +754,85 @@ mod tests {
     #[cfg(windows)]
     fn nonzero_command() -> &'static str {
         "where.exe"
+    }
+
+    // --- Backlog #6a: tool safety mode parsing & classification ---
+
+    #[test]
+    fn mode_readonly_parses_and_classifies() {
+        let decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "fs_cat",
+            "description": "read a file",
+            "parameters": {"type": "object"},
+            "mode": "readonly"
+        }))
+        .unwrap();
+        assert_eq!(decl.mode, Some(ToolMode::Readonly));
+        assert_eq!(decl.safety_class(), SafetyClass::Readonly);
+        assert!(decl.safety_class().allowed_under_readonly_mask());
+    }
+
+    #[test]
+    fn mode_mutating_parses_and_classifies() {
+        let decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "fs_write",
+            "description": "write a file",
+            "parameters": {"type": "object"},
+            "mode": "mutating"
+        }))
+        .unwrap();
+        assert_eq!(decl.mode, Some(ToolMode::Mutating));
+        assert_eq!(decl.safety_class(), SafetyClass::Mutating);
+        assert!(
+            !decl.safety_class().allowed_under_readonly_mask(),
+            "mutating tools must be denied under a readonly mask"
+        );
+    }
+
+    #[test]
+    fn absent_mode_is_unclassified_and_denied_under_mask() {
+        // FR-6a.2: a tool with no declared mode is *unclassified* — the most
+        // conservative disposition (reserved to humans), NOT an implicit mutating.
+        let decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "some_tool",
+            "description": "no mode declared",
+            "parameters": {"type": "object"}
+        }))
+        .unwrap();
+        assert_eq!(decl.mode, None);
+        assert_eq!(decl.safety_class(), SafetyClass::Unclassified);
+        assert!(
+            !decl.safety_class().allowed_under_readonly_mask(),
+            "unclassified tools must be denied under a readonly mask"
+        );
+    }
+
+    #[test]
+    fn mode_is_not_serialized_to_the_llm() {
+        // Governance metadata must never leak into the schema sent to the model
+        // (matches the skip_serializing treatment of `agent` and `output`).
+        let decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "fs_write",
+            "description": "write a file",
+            "parameters": {"type": "object"},
+            "mode": "mutating"
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(&decl).unwrap();
+        assert!(
+            serialized.get("mode").is_none(),
+            "mode must be skipped during serialization, got {serialized}"
+        );
+    }
+
+    #[test]
+    fn unclassified_is_stricter_than_mutating_but_distinct() {
+        // Both are denied under a readonly mask, but they are distinguishable so
+        // later increments can apply the stricter reserved-to-humans policy only
+        // to the unclassified case.
+        assert_ne!(SafetyClass::Unclassified, SafetyClass::Mutating);
+        assert!(!SafetyClass::Unclassified.allowed_under_readonly_mask());
+        assert!(!SafetyClass::Mutating.allowed_under_readonly_mask());
+        assert!(SafetyClass::Readonly.allowed_under_readonly_mask());
     }
 }

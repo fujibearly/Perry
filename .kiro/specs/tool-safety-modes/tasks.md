@@ -18,18 +18,23 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 
 ## Phase #6a — Deterministic Capability Mask (branch `feat/tool-safety-6a`)
 
-- [ ] 6a.1 Add `ToolMode { Readonly, Mutating(default) }` and `mode: Option<ToolMode>` to
-      `FunctionDeclaration` (`#[serde(skip_serializing, default)]`). (FR-6a.1)
-- [ ] 6a.2 Unit tests: JSON round-trip; a tool declaring a bare mode → `Mutating`; an **unclassified**
+- [x] 6a.1 Add `ToolMode { Readonly, Mutating(default) }` and `mode: Option<ToolMode>` to
+      `FunctionDeclaration` (`#[serde(skip_serializing, default)]`). (FR-6a.1) Also added
+      `SafetyClass { Readonly, Mutating, Unclassified }` so *absent* mode is distinguishable from
+      an explicit `mutating` and carries the stricter reserved-to-humans disposition.
+- [x] 6a.2 Unit tests: JSON round-trip; a tool declaring a bare mode → `Mutating`; an **unclassified**
       tool (no `mode`) and MCP-sourced tools → reserved-to-humans disposition (blocked in masked sub-agent). (FR-6a.2)
-- [ ] 6a.3 In `eval_agent_tool_subprocess`, set `AICHAT_CAPABILITY_MASK=readonly` on the child; leave
-      top-level (depth 0) unmasked. (FR-6a.3, FR-6a.5)
-- [ ] 6a.4 Add a capability gate in `eval_single_tool` (before MCP/agent/shell routes): if masked and the
-      resolved tool is `mutating`, return `{"error":{"type":"capability_denied",…}}` without executing —
-      mirror the tripped-tool short-circuit shape. (FR-6a.4)
-- [ ] 6a.5 Unit tests: masked context denies a mutating tool and permits a readonly tool; unmasked permits both.
-- [ ] 6a.6 `cargo test` + `cargo clippy` green. Confirm behavior is complete standalone. (FR-6a.6, NFR-1)
-- [ ] 6a.7 Docs: note the mask in architecture/progress; document the `mode` metadata for tool authors.
+- [x] 6a.3 In `eval_agent_tool_subprocess`, set `AICHAT_CAPABILITY_MASK=readonly` on the child; leave
+      top-level (depth 0) unmasked. Monotonic — descendants stay masked. (FR-6a.3, FR-6a.5)
+- [x] 6a.4 Add a capability gate in `eval_single_tool` (before MCP/agent/shell routes): if masked and the
+      resolved tool is `mutating`/unclassified, return `{"error":{"type":"capability_denied",…}}` without
+      executing — mirror the tripped-tool short-circuit shape. `_plan` always permitted. (FR-6a.4)
+- [x] 6a.5 Unit tests: masked context denies mutating + unclassified, permits readonly + `_plan`; unmasked
+      permits all; `tool_safety_class` resolves from config. Env-var tests serialized via a mutex.
+- [x] 6a.6 `cargo test` (352 unit, 0 fail; +8) + `cargo clippy` (no new warnings) green. Standalone
+      behavior confirmed. (FR-6a.6, NFR-1)
+- [x] 6a.7 Docs: capability mask, dispatch gate, and `mode` metadata documented in `.kiro/architecture.md`;
+      `progress.md` #6a status + test count updated.
 
 ## Phase #6b — Tiers, Reversibility, Protected Policy, Authority Gradient (branch `feat/tool-safety-6b`)
 

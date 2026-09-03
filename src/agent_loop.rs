@@ -286,8 +286,100 @@ pub async fn eval_tool_calls_parallel(
     Ok(results)
 }
 
+/// Whether this process runs under a read-only capability mask (backlog #6a).
+///
+/// The mask is set on every spawned sub-agent via `AICHAT_CAPABILITY_MASK=readonly`.
+/// The top-level process has no such env var and is therefore unmasked.
+fn under_readonly_mask() -> bool {
+    std::env::var("AICHAT_CAPABILITY_MASK")
+        .map(|v| v.eq_ignore_ascii_case("readonly"))
+        .unwrap_or(false)
+}
+
+/// Resolve a tool's declared safety classification from config.
+///
+/// Looks in the active agent's functions first, then the global function set.
+/// MCP-sourced tools (and any tool with no `mode`) resolve to `Unclassified`.
+fn tool_safety_class(config: &GlobalConfig, tool_name: &str) -> crate::function::SafetyClass {
+    use crate::function::SafetyClass;
+    let config_read = config.read();
+    if let Some(agent) = &config_read.agent {
+        if let Some(decl) = agent.functions().find(tool_name) {
+            return decl.safety_class();
+        }
+    }
+    if let Some(decl) = config_read.functions.find(tool_name) {
+        return decl.safety_class();
+    }
+    // Unknown here (e.g. MCP tools live in a separate registry) → unclassified,
+    // the most conservative disposition.
+    SafetyClass::Unclassified
+}
+
+/// If the capability mask forbids this tool, return the structured denial result.
+///
+/// Returns `None` when the call is permitted (unmasked process, or a `readonly`
+/// tool). Returns `Some(error_json)` when a masked (sub-agent) process attempts a
+/// `mutating` or `unclassified` tool. The `_plan` pseudo-tool is always permitted.
+fn capability_denied_result(
+    config: &GlobalConfig,
+    tool_name: &str,
+) -> Option<serde_json::Value> {
+    use crate::function::SafetyClass;
+
+    // The planning scratchpad is internal and never mutates state.
+    if tool_name == "_plan" {
+        return None;
+    }
+    if !under_readonly_mask() {
+        return None;
+    }
+    let class = tool_safety_class(config, tool_name);
+    if class.allowed_under_readonly_mask() {
+        return None;
+    }
+
+    let (reason, message) = match class {
+        SafetyClass::Unclassified => (
+            "unclassified",
+            format!(
+                "Tool '{tool_name}' is unclassified (no safety mode declared) and is \
+                 reserved to the top-level operator. A sub-agent running under a \
+                 read-only capability mask cannot execute it. Perform read-only \
+                 triage and return findings to your caller for actuation."
+            ),
+        ),
+        _ => (
+            "mutating",
+            format!(
+                "Tool '{tool_name}' is a mutating tool. A sub-agent running under a \
+                 read-only capability mask cannot execute it. Perform read-only \
+                 triage and return findings to your caller for actuation."
+            ),
+        ),
+    };
+
+    Some(json!({
+        "error": {
+            "type": "capability_denied",
+            "reason": reason,
+            "message": message
+        }
+    }))
+}
+
 /// Dispatch a single tool call asynchronously.
 async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serde_json::Value> {
+    // Backlog #6a: capability-mask gate. If this process runs under a read-only
+    // mask (i.e. it is a spawned sub-agent) and the requested tool is not
+    // explicitly `readonly`, refuse to execute it. The refusal is a structured
+    // result (not an Err) so it reaches the model verbatim — mirroring the
+    // circuit-breaker short-circuit — letting the sub-agent choose another
+    // approach (and, in later increments, escalate).
+    if let Some(denied) = capability_denied_result(config, &call.name) {
+        return Ok(denied);
+    }
+
     // Route 1: MCP tools (async native)
     #[cfg(feature = "mcp")]
     {
@@ -425,6 +517,13 @@ async fn eval_agent_tool_subprocess(
 
     // Pass depth to child
     cmd.env("AICHAT_AGENT_DEPTH", (current_depth + 1).to_string());
+
+    // Backlog #6a: every spawned sub-agent inherits a read-only capability mask.
+    // Sub-agents perform triage in parallel; only the unmasked top-level process
+    // may actuate `mutating` tools ("triage in parallel, actuate in sequence").
+    // The mask is monotonic — once set it is never cleared for descendants — so a
+    // sub-sub-agent stays masked regardless of nesting.
+    cmd.env("AICHAT_CAPABILITY_MASK", "readonly");
 
     // Inherit config dir so sub-agent sees same agents/tools/MCP
     if let Ok(config_dir) = std::env::var("AICHAT_CONFIG_DIR") {
@@ -770,6 +869,8 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
         },
         agent: false,
         output: None,
+        // The planning scratchpad never touches state — safe under any mask.
+        mode: Some(crate::function::ToolMode::Readonly),
     }
 }
 
@@ -1325,6 +1426,10 @@ mod tests {
     use super::*;
     use crate::config::{Config, RoleLike};
     use parking_lot::RwLock;
+
+    /// Serializes tests that mutate the process-global `AICHAT_CAPABILITY_MASK`
+    /// env var, so they don't race each other under the parallel test runner.
+    static MASK_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     fn default_config() -> GlobalConfig {
         Arc::new(RwLock::new(Config::default()))
@@ -2287,5 +2392,104 @@ agent_loop:
         let config: Config =
             serde_yaml::from_str("agent_loop:\n  tool_output_limit: 32768\n").unwrap();
         assert_eq!(config.agent_loop.tool_output_limit, 32768);
+    }
+
+    // --- Backlog #6a: capability-mask gate ---
+
+    fn config_with_modes() -> GlobalConfig {
+        let functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "fs_cat",
+                "description": "read a file",
+                "parameters": {"type": "object"},
+                "mode": "readonly"
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "name": "fs_write",
+                "description": "write a file",
+                "parameters": {"type": "object"},
+                "mode": "mutating"
+            }))
+            .unwrap(),
+            serde_json::from_value(json!({
+                "name": "mystery_tool",
+                "description": "no mode declared",
+                "parameters": {"type": "object"}
+            }))
+            .unwrap(),
+        ]);
+        Arc::new(RwLock::new(Config {
+            functions,
+            ..Default::default()
+        }))
+    }
+
+    #[test]
+    fn tool_safety_class_resolves_from_config() {
+        use crate::function::SafetyClass;
+        let config = config_with_modes();
+        assert_eq!(tool_safety_class(&config, "fs_cat"), SafetyClass::Readonly);
+        assert_eq!(tool_safety_class(&config, "fs_write"), SafetyClass::Mutating);
+        assert_eq!(
+            tool_safety_class(&config, "mystery_tool"),
+            SafetyClass::Unclassified
+        );
+        // A tool not present in config at all is treated as unclassified.
+        assert_eq!(
+            tool_safety_class(&config, "not_in_config"),
+            SafetyClass::Unclassified
+        );
+    }
+
+    #[test]
+    fn capability_gate_permits_everything_when_unmasked() {
+        // With no AICHAT_CAPABILITY_MASK set (top-level process), nothing is denied.
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_CAPABILITY_MASK").ok();
+        std::env::remove_var("AICHAT_CAPABILITY_MASK");
+
+        let config = config_with_modes();
+        assert!(capability_denied_result(&config, "fs_cat").is_none());
+        assert!(capability_denied_result(&config, "fs_write").is_none());
+        assert!(capability_denied_result(&config, "mystery_tool").is_none());
+
+        // Restore whatever was there (normally nothing).
+        if let Some(v) = prev {
+            std::env::set_var("AICHAT_CAPABILITY_MASK", v);
+        }
+    }
+
+    #[test]
+    fn capability_gate_denies_mutating_and_unclassified_when_masked() {
+        // Serialize the env-var manipulation via a process-wide guard so this
+        // test does not race the unmasked test above under the parallel runner.
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_CAPABILITY_MASK").ok();
+        std::env::set_var("AICHAT_CAPABILITY_MASK", "readonly");
+
+        let config = config_with_modes();
+
+        // Readonly tool and the internal _plan pseudo-tool are always permitted.
+        assert!(capability_denied_result(&config, "fs_cat").is_none());
+        assert!(capability_denied_result(&config, "_plan").is_none());
+
+        // Mutating tool is denied with reason "mutating".
+        let mutating = capability_denied_result(&config, "fs_write")
+            .expect("mutating tool must be denied under a readonly mask");
+        assert_eq!(mutating["error"]["type"], "capability_denied");
+        assert_eq!(mutating["error"]["reason"], "mutating");
+
+        // Unclassified tool is denied with reason "unclassified".
+        let unclassified = capability_denied_result(&config, "mystery_tool")
+            .expect("unclassified tool must be denied under a readonly mask");
+        assert_eq!(unclassified["error"]["type"], "capability_denied");
+        assert_eq!(unclassified["error"]["reason"], "unclassified");
+
+        // Restore prior state.
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_CAPABILITY_MASK", v),
+            None => std::env::remove_var("AICHAT_CAPABILITY_MASK"),
+        }
     }
 }

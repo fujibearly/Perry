@@ -69,7 +69,7 @@ User
            └─ fs_write, execute_command
 ```
 
-Each agent in the tree is a full aichat instance: own PID, own turn budget, own tools, own session, own status file. The depth is bounded by `max_agent_depth` (default 3) via `AICHAT_AGENT_DEPTH` env var.
+Each agent in the tree is a full aichat instance: own PID, own turn budget, own tools, own session, own status file. The depth is bounded by `max_agent_depth` (default 3) via `AICHAT_AGENT_DEPTH` env var. Sub-agents additionally inherit a read-only capability mask (`AICHAT_CAPABILITY_MASK=readonly`, backlog #6a) — see "Tool safety modes & capability mask" below.
 
 ---
 
@@ -257,15 +257,45 @@ ToolCall arrives from LLM
   │
   ├─ _plan?  → return "acknowledged" (handled in loop, not dispatched)
   │
+  ├─ capability mask (#6a): under readonly mask AND tool not readonly?
+  │     → return capability_denied result (no execution)
+  │
   ├─ MCP match?  → call_mcp_tool_async (await, no blocking)
   │
   ├─ agent: true? → eval_agent_tool_subprocess
   │     └─ spawn: aichat --agent <name> "<task>"
-  │        (AICHAT_AGENT_DEPTH incremented, own PID/budget/status)
+  │        (AICHAT_AGENT_DEPTH incremented, AICHAT_CAPABILITY_MASK=readonly,
+  │         own PID/budget/status)
   │
   └─ Shell tool → spawn_blocking + eval_shell
        └─ run_command(bin_name, args, envs)
 ```
+
+### Tool safety modes & capability mask (backlog #6a)
+
+Governs *which* agent may perform *which* action — the enforcement layer behind
+Tenet 4 ("triage in parallel, actuate in sequence"). This is the deterministic floor
+of the larger Tool Safety Modes work (see [`specs/tool-safety-modes/`](specs/tool-safety-modes/)
+for the full #6a–#6d plan).
+
+- **Tool metadata.** A tool may declare a safety mode in its `functions.json` entry:
+  `"mode": "readonly"` (only reads state) or `"mode": "mutating"` (may change state).
+  Like `agent` and `output`, `mode` is `skip_serializing` — the LLM never sees it.
+- **Unclassified = reserved to humans.** A tool with **no** declared mode (including all
+  MCP-sourced tools, which carry no such metadata) is *unclassified* — the most
+  conservative disposition. For now it is treated as at least as restricted as `mutating`
+  and cannot be run by a masked sub-agent.
+- **The mask.** Every spawned sub-agent inherits `AICHAT_CAPABILITY_MASK=readonly`
+  (alongside `AICHAT_AGENT_DEPTH`). The mask is monotonic — descendants stay masked
+  regardless of nesting. The top-level process has no mask and may actuate `mutating` tools.
+- **Enforcement.** A masked process refuses any non-`readonly` tool, returning a structured
+  `{"error": {"type": "capability_denied", "reason": "mutating"|"unclassified", ...}}` result
+  (not a crash) — mirroring the circuit-breaker short-circuit, so the sub-agent sees the
+  refusal and can return findings to its caller for actuation. The `_plan` scratchpad is
+  always permitted.
+- **Fallback role.** #6a is the permanent safety floor the richer increments (#6b tiers,
+  #6c LLM risk evaluator, #6d escalation) degrade to when their machinery is absent.
+
 
 Tool calls are deduplicated and infinite loops are detected (before dispatch).
 
