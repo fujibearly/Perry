@@ -38,3 +38,14 @@ This repository maintains continuous, chronological session handoff summaries do
      * **Coverage re-measurement (first-party llvm-tools):** `src/agent_loop.rs` **46.8% → 64.7% line** — a *unit-test* methodology, not comparable to Session 2's live-harness 72.9%. Documented + reproducible via `argc test-coverage`.
      * Circuit-breaker/cost logic extracted for testability (behavior-preserving). Added **Backlog #11** (mock-Client test seam, Low priority).
      * **State:** all local, `main` 136 commits ahead of `origin/main`, nothing pushed (intentional). Open: `$0.000000` cost-estimator bug (unlogged).
+
+4. **Session 4: Backlog #6 Designed (umbrella #6a–#6d) & #6a Implemented — Tool Safety Modes & Actuation Governance**
+   * **Period:** `2026-09-02` (distinct session, same day as Session 3)
+   * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-02-session4.md`](.kiro/docs/session-summary-2026-09-02-session4.md)
+   * **Focus Areas:**
+     * Extended design conversation turned Backlog #6 from a ~150-250-line binary mask into a **four-part umbrella (#6a–#6d)**: a layered decision funnel (non-pardonable Protected Policy File → 5-tier blast radius + orthogonal *proven* reversibility → stricter-only `%assess-risk%` LLM evaluator → HMAC-authenticated file-based escalation/control with human-in-the-loop). Graceful degradation: `#6d → #6c/#6b block → #6a mask`.
+     * Wrote the umbrella spec [`.kiro/specs/tool-safety-modes/`](.kiro/specs/tool-safety-modes/) (requirements/design/tasks) and folded #6a–#6d into `backlog.md`/`progress.md` (commit `c28dfd5`).
+     * **Implemented Backlog #6a (deterministic capability mask):** `ToolMode`/`SafetyClass` on `FunctionDeclaration`, `AICHAT_CAPABILITY_MASK=readonly` propagated to sub-agents, `capability_denied` gate in `eval_single_tool`; unclassified/MCP tools reserved to humans. +8 tests, suite 352→360, 0 fail, clippy clean (commit `8994922`).
+     * **State:** on branch `feat/tool-safety-6a` (2 ahead of `main`); `main` 140 ahead of `origin/main`, nothing pushed (intentional). **Next: #6b** off `feat/tool-safety-6a`.
+
+
