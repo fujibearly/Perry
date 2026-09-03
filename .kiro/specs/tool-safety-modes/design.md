@@ -1,0 +1,213 @@
+# Tool Safety Modes & Actuation Governance — Design
+
+## Approach
+
+Implement the decision funnel as a set of composable gates evaluated **cheapest and most
+deterministic first**, so that the LLM evaluator can never precede its own guardrail and the
+fast-path stays free. Each increment adds one gate (or the channel that connects them) and is
+wired so that, absent the richer gates, control falls through to the next-simplest behavior.
+
+```
+Action proposed by any agent (any depth)
+   │
+   ▼
+[Protected Policy File]  deterministic, non-pardonable            ──(forbid)──► BLOCKED
+   │                                                                            (policy_forbidden)
+   ▼
+Blast-radius classify {Safe…Catastrophic}  +  reversibility PROVEN? (real artifact)
+   │      effective required authority = f(tier, proven_reversible)
+   ├─ ≤ this agent's ceiling ───────────────────────────────────────────────► EXECUTE
+   │        └─ plan-time flagged step? → mandatory act-time evaluator re-check
+   ▼ (> ceiling, or uncertain, or Safe? → skip evaluator entirely)
+[%assess-risk% role · dedicated model · minimal context]  STRICTER-ONLY
+   │        clamp: may raise tier / withhold reversibility credit; may NOT loosen
+   │        (fail / low-confidence ─► escalate)
+   ▼
+Escalate → INVOKING agent    (branch suspends; siblings run on)
+   │   child writes escalation file (WHY + enrichment + proposed action), STAYS ALIVE polling
+   │   parent merges enrichment into its context, decides, writes AUTHENTICATED verdict file:
+   │        HALT (graceful) │ REVERT (child rolls back) │ CONTINUE (child resumes)
+   │        unresponsive child → hard-kill
+   ▼ (parent ceiling insufficient → escalate upward, accumulating evidence … → Orchestrator)
+Orchestrator ceiling insufficient
+   │
+   ▼
+HUMAN — blocking prompt on THIS branch via interactive CLI (siblings continue)
+        │ OR │ emit same escalation record to a Layer 3 supervisor (headless/preferred)
+```
+
+The funnel is the *target* (#6d complete). Each increment realizes a prefix of it, with the
+"escalate" arrow replaced by "block" until #6d lands.
+
+## Data model
+
+### `FunctionDeclaration` additions (`src/function.rs`)
+
+Following the exact pattern that added `output: Option<OutputRouting>` — all skip-serialized so
+the model never sees governance metadata:
+
+```rust
+pub struct FunctionDeclaration {
+    pub name: String,
+    pub description: String,
+    pub parameters: JsonSchema,
+    #[serde(skip_serializing, default)] pub agent: bool,
+    #[serde(skip_serializing, default)] pub output: Option<OutputRouting>,
+
+    // #6a
+    #[serde(skip_serializing, default)] pub mode: Option<ToolMode>,       // readonly | mutating
+    // #6b
+    #[serde(skip_serializing, default)] pub risk: Option<BlastRadius>,    // Safe..Catastrophic
+    #[serde(skip_serializing, default)] pub reversible: Option<bool>,     // intrinsic reversibility
+    #[serde(skip_serializing, default)] pub reversible_via: Option<String>, // e.g. "backup", "worktree"
+}
+```
+
+```rust
+#[derive(…, Default)] #[serde(rename_all = "lowercase")]
+pub enum ToolMode { Readonly, #[default] Mutating }
+// Note: an *absent* `mode`/`risk` is "unclassified" — treated as reserved-to-humans
+// (FR-6a.2/6b.3), which is stricter than `Mutating`. `Mutating` is the default only for a
+// tool that positively declares a mode without a finer tier.
+
+#[derive(…, PartialEq, Eq, PartialOrd, Ord)] #[serde(rename_all = "lowercase")]
+pub enum BlastRadius { Safe, Reversible, Disruptive, Destructive, Catastrophic }
+```
+
+`BlastRadius` derives `Ord` so ceiling comparisons are a simple `<=`. Note `Reversible` appears as a
+*tier name* for the low-impact-but-mutating band **and** reversibility is *also* a separate proven
+boolean (FR-6b.2) — the tier is the impact axis, the boolean is the proof axis; they are combined only
+when computing required authority.
+
+### Effective required authority (the orthogonal combination)
+
+```
+required_authority(action) =
+    if unclassified(action) { HUMAN }                                            // reserved-to-humans (for now)
+    else {
+        let base = max(static_tier(tool, args), policy_tier(policy_file, action)); // policy can only raise
+        if proven_reversible(action) { one_step_down(base) } else { base }         // proof lowers requirement
+    }
+    // #6c: evaluator may raise `base` and may withhold proof; never the reverse
+```
+
+An **unclassified** action (tool declares no `mode`/`risk`, including MCP tools) yields a
+`HUMAN` requirement that sits above every autonomous ceiling, so it always escalates to a human
+(or blocks in increments before #6d). `proven_reversible` is true iff the tool declares intrinsic
+reversibility **or** a rollback artifact is registered for this invocation (a backup/staged
+copy/worktree recorded out-of-band — consumed from #9/#10).
+
+### Config additions (new top-level `safety:` section in `src/config/mod.rs`)
+
+The safety configuration is its **own top-level section** (a sibling of `agent_loop:`, not nested
+under it), since it governs actuation policy across the whole tree rather than a single loop's
+budget/observability knobs.
+
+```rust
+// top-level `safety:` — all serde(default), safe defaults (NFR-7):
+pub struct SafetyConfig {
+    pub policy_file: Option<PathBuf>,   // #6b Protected Policy File; None = built-in fail-safe defaults
+    pub risk_model: Option<String>,     // #6c evaluator model; None = evaluator skipped (degrade to #6b)
+    pub default_ceiling: BlastRadius,    // top-level ceiling; default e.g. Destructive (human for Catastrophic)
+    pub escalation_dir: Option<PathBuf>, // #6d; default $XDG_RUNTIME_DIR
+    pub verdict_timeout_secs: u64,       // #6d poll timeout before further escalation / hard-kill
+}
+```
+
+Defaults are the safe choice (NFR-7): no policy file → built-in fail-safe classification; no risk model →
+deterministic-only; ceiling defaults leave `Catastrophic` to humans.
+
+### Environment propagation (child spawn, `eval_agent_tool_subprocess`)
+
+Rides the existing `AICHAT_AGENT_DEPTH` channel:
+
+| Env var | Increment | Meaning |
+|---------|-----------|---------|
+| `AICHAT_CAPABILITY_MASK` | #6a | `readonly` restricts child to `Safe`/`readonly` tools |
+| `AICHAT_AUTHORITY_CEILING` | #6b | max `BlastRadius` the child may act on autonomously (parent may only lower) |
+| `AICHAT_TREE_SECRET` | #6d | per-tree secret for authenticating verdict files (never written to disk in cleartext) |
+| `AICHAT_ESCALATION_PATH` | #6d | this child's escalation-request file path |
+
+## Seam Map
+
+| Requirement | Seam / function | Location | Technique |
+|-------------|-----------------|----------|-----------|
+| FR-6a.1/6a.2 | `FunctionDeclaration.mode` + deserialize default | `function.rs` | Add field; `ToolMode::default()==Mutating`; unit-test JSON round-trip + default |
+| FR-6a.3/6a.5 | mask env set on child | `agent_loop.rs::eval_agent_tool_subprocess` | Set `AICHAT_CAPABILITY_MASK=readonly`; top-level (depth 0) unmasked |
+| FR-6a.4 | capability gate before dispatch | `agent_loop.rs::eval_single_tool` (pre-Route) | If masked && tool mutating → return `capability_denied` result (mirror tripped-tool partition) |
+| FR-6b.1/6b.2/6b.3 | `BlastRadius`, `reversible*` fields | `function.rs` | Enum w/ `Ord`; map legacy `mode`; unit tests for ordering + mapping |
+| FR-6b.4 | Protected Policy File loader + matcher | new `src/safety.rs` | Load owner-only file; `policy_tier(action) -> BlastRadius | Forbidden`; can only raise |
+| FR-6b.5/6b.6 | ceiling compare + env propagation | `agent_loop.rs` | `required_authority(action) <= ceiling` else `authority_exceeded`; child ceiling = min(self, granted) |
+| FR-6b.7 | escalation record schema (reserved) | `src/safety.rs` | `struct EscalationRecord { …, nonce, signature }` defined now, unused until #6d |
+| FR-6c.1 | `%assess-risk%` role asset | `assets/roles/%assess-risk%.md` | Terse structured-verdict prompt, `%explain-shell%` shape |
+| FR-6c.2 | evaluator invocation w/ dedicated model | `src/safety.rs` + client | Build a minimal `Input` with `safety.risk_model`; parse JSON verdict |
+| FR-6c.3 | minimal-context builder | `src/safety.rs` | Only {tool, resolved args, static tier, reversibility, this-step intent}; explicitly exclude history |
+| FR-6c.4 | verdict struct + parse | `src/safety.rs` | `RiskVerdict { tier, reversible, confidence, rationale, concerns, enrichment }`; tolerate malformed → low-confidence |
+| FR-6c.5 | stricter-only clamp | `src/safety.rs` | `effective = max(static, verdict.tier)`; proof only removed, never added; policy untouched. **Pure fn, unit-tested** |
+| FR-6c.6 | fast-path | `agent_loop.rs` | `if tier == Safe { skip evaluator }` |
+| FR-6c.7 | plan-time flagging + act-time recheck | `agent_loop.rs::run` (plan partition) | Plan pass tags steps; only tagged steps re-evaluated at dispatch |
+| FR-6c.8 | fail-toward | `src/safety.rs` | evaluator error/low-confidence → escalate (or block pre-#6d) |
+| FR-6d.2/6d.3 | file rendezvous + HMAC | `src/safety.rs` | atomic `0600` writes, per-branch path, `AICHAT_TREE_SECRET`-keyed HMAC over record; reject unverified |
+| FR-6d.4 | HALT/REVERT/CONTINUE handling | `agent_loop.rs` (child poll loop) | Child suspends at pending action, polls verdict file, dispatches verb; REVERT/RESUME run in child |
+| FR-6d.5 | upward propagation | `agent_loop.rs` | Parent that can't decide re-escalates, appending to evidence trace |
+| FR-6d.6 | human sink | `agent_loop.rs` + `main.rs`/`repl` | Interactive: branch-blocking prompt (siblings run). Headless: emit record to Layer 3 |
+| FR-6d.7 | graceful/hard stop | `agent_loop.rs` | Cooperative HALT; signal-kill on poll timeout |
+| FR-6d.8 | branch-scoped suspension | `agent_loop.rs` | Suspension is per-lineage future; `join_all` siblings unaffected |
+
+## Key Design Decisions
+
+- **New module `src/safety.rs`.** Classification, policy loading, the evaluator invocation +
+  stricter-only clamp, and the escalation record/HMAC live in one cohesive module with a small,
+  pure, heavily-unit-tested core (`required_authority`, `clamp_verdict`, `policy_tier`, record
+  sign/verify). `agent_loop.rs` calls into it; `function.rs` only holds the metadata fields.
+- **Metadata is skip-serialized.** Governance is invisible to the LLM (consistent with `output`),
+  so the model can't reason about — or be manipulated through — its own guardrails.
+- **Fail-safe defaults everywhere.** *Unclassified* tool (no `mode`/`risk`, incl. MCP) → reserved
+  to humans (for now); a tool that declares a mode but no finer tier → `Mutating`; missing policy
+  file → built-in conservative rules; evaluator absent/failed → deterministic block/escalate;
+  `Catastrophic` reserved to humans by default. Safety is the default, capability is opt-in.
+- **Ordering enum for cheap comparisons.** `BlastRadius: Ord` makes ceiling checks and the
+  stricter-only clamp trivial `max`/`<=` operations that are obviously correct and unit-testable.
+- **Reversibility is proof-gated and orthogonal.** It is *not* a tier; it is a separate boolean that
+  only counts with a real artifact and only ever *reduces* the authority required — never the radius.
+- **Escalation is a live control relationship over a still-running child, via files.** Chosen over
+  stdin/stdout (couples to the child's I/O, fragile under the existing stdout-capture paths) and over
+  kill-only (can't express REVERT/CONTINUE). Files in `$XDG_RUNTIME_DIR` are the same durable,
+  pipe-immune substrate the status-file observability already uses. ARGC is explicitly not used.
+- **Adversarial integrity from day one of #6d.** The verdict authenticator (HMAC keyed by a
+  per-tree secret passed via env, never persisted) means only the real parent can author a valid
+  CONTINUE — a forged or injected file is rejected and treated as no-verdict. The record *schema*
+  (with the nonce/signature fields) is fixed in #6b so the format never churns.
+- **The evaluator is a role, not hardcoded.** `%assess-risk%` is a user-editable asset like
+  `%explain-shell%`, keeping prompt logic in the declarative layer and the *enforcement* (clamp,
+  fail-toward, fast-path) in Rust where it must be trustworthy.
+
+## Threat Model (explicit, per NFR-2/3/4)
+
+1. **Prompt injection into the evaluator** — a tool's arguments or fetched content tries to coerce a
+   low verdict. Mitigations: minimal context (no room to hide instructions that matter), stricter-only
+   clamp (a low verdict *cannot* unlock anything the deterministic layer didn't already allow), and the
+   non-pardonable policy floor (forbidden stays forbidden without ever consulting the LLM).
+2. **Forged control files** — a tool or peer writes a fake `CONTINUE`/low escalation. Mitigation:
+   owner-only atomic files on per-branch paths + HMAC over the record keyed by a secret only the real
+   parent holds (env, never on disk). Unverified verdicts are ignored.
+3. **Cost/latency** — an evaluator call before every mutation. Mitigation: `Safe` fast-path skips the
+   evaluator entirely; plan-time pass bounds calls and flags only the steps needing an act-time recheck.
+4. **Evaluator as single point of trust** — mitigated structurally: it is advisory and stricter-only;
+   the deterministic floor and human escalation are the real authority.
+
+## Verification
+
+- Pure-core unit tests (in `src/safety.rs`): tier ordering; legacy-mode mapping; `required_authority`
+  with/without proven reversibility; `policy_tier` raise-only; `clamp_verdict` stricter-only (a
+  permissive verdict is a no-op; a stricter one raises); record sign/verify (valid accepts, tampered
+  rejects, wrong-secret rejects).
+- `agent_loop.rs` tests: masked child denies a mutating tool (`capability_denied`); over-ceiling →
+  `authority_exceeded`; `Safe` fast-path skips evaluator (assert no evaluator call via a mock seam);
+  escalation record round-trips through the file rendezvous with a mock parent verdict; HALT/REVERT/
+  CONTINUE dispatch; sibling parallelism unaffected by a suspended branch.
+- Evaluator tested with a **mock verdict** (deterministic), never a live model.
+- Full `cargo test` green at the end of each phase (NFR-1); `cargo clippy` clean.
+- Because `eval_agent_tool_subprocess` spawns `current_exe()` (the test binary under `cargo test`),
+  full parent↔child escalation over real subprocesses is validated by an **offline demo** in
+  `scripts/run-demos.nu` (à la Demo 12), not a unit test.

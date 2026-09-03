@@ -230,17 +230,53 @@ Systematically add targeted unit tests and harness assertions to boost coverage 
 
 ---
 
-## 6. Declarative Tool Safety Modes & Actuation Governance
+## 6. Tool Safety Modes & Actuation Governance (umbrella)
 
-**Priority:** High  
-**Scope:** ~150-250 lines (`src/function.rs`, `src/agent_loop.rs`, `llm-functions/Argcfile.sh`)  
-**Driver:** In system-wide operations, parallel child sub-agents must perform read-only triage safely without risking accidental system or database mutations.
+**Priority:** High
+**Status:** Spec written — [`.kiro/specs/tool-safety-modes/`](../specs/tool-safety-modes/). Decomposed into four stacked, independently-shippable increments (#6a–#6d). #6a in progress on `feat/tool-safety-6a`.
+**Driver:** In system-wide operations, autonomous agents — especially parallel sub-agents on real infrastructure — must never cause catastrophe. The engine already enforces *loop* safety (turns, cost, per-tool circuit breaker) but has no notion of an action's *danger* nor any gate on *which agent* may perform it. #6 adds that missing actuation-governance layer.
 
-### Approach
-1. **Metadata Annotation in `llm-functions`:** Tools declare `# @meta mode readonly` or `# @meta mode mutating` (and optional `# @meta confirm true`).
-2. **Schema & Dispatch Integration:** `FunctionDeclaration` parses the `mode` attribute.
-3. **Sub-Agent Restriction Rule:** By default, child `aichat` subprocesses spawned by the orchestrator inherit a read-only capability mask, preventing them from calling `mutating` tools directly.
-4. **Mutating Elevation:** Only the top-level orchestrator agent can execute `mutating` actuators, ensuring controlled, sequential execution.
+> **Scope note:** the original #6 was a ~150-250 line binary capability mask. In design it grew into a layered decision funnel (deterministic policy floor → blast-radius tiers + proven reversibility → stricter-only LLM risk evaluator → escalation/human-in-the-loop). It is therefore tracked as an **umbrella** with sub-items #6a–#6d. Each increment is usable alone and **degrades gracefully** to the one below: **#6d escalates → without it #6c/#6b _block_ → without them #6a's binary mask applies.**
+
+### Core principles (invariants across all increments)
+1. **The LLM is not a Pardoner** — a risk verdict may only make an action *stricter*, never loosen a deterministic decision.
+2. **Deterministic floor first, LLM second** — the policy floor + static classification run before any LLM is consulted.
+3. **Blast radius is action-intrinsic; authority grows toward the root** — danger does not correlate with delegation depth, but the autonomous ceiling increases toward the orchestrator (more context up top).
+4. **Reversibility must be proven, not asserted** — only real rollback artifacts (tool-intrinsic, or agent-manufactured backup/staging/worktree) count.
+5. **Fail toward escalation, not action** — unavailable judgment or over-ceiling escalates; absent an escalation channel it blocks; never silently permitted.
+6. **Escalation suspends only the branch** — sibling parallel work continues.
+
+### Increment #6a — Deterministic capability mask (the floor / fallback)
+**Branch:** `feat/tool-safety-6a` · **Scope:** `function.rs`, `agent_loop.rs`
+- `FunctionDeclaration` gains a skip-serialized `mode: readonly | mutating` (LLM never sees it).
+- Sub-agent subprocesses inherit `AICHAT_CAPABILITY_MASK=readonly` (same channel as `AICHAT_AGENT_DEPTH`); a masked child refuses `mutating` tools with a structured `capability_denied` result.
+- **Unclassified tools (no `mode`, incl. MCP) are reserved to humans** (for now) — stricter than a plain `mutating` default.
+- Fully functional standalone; the permanent fallback for all later layers.
+
+### Increment #6b — Blast-radius tiers, proven reversibility, Protected Policy File, authority gradient
+**Branch:** `feat/tool-safety-6b` · **Scope:** new `src/safety.rs`, top-level `safety:` config, `function.rs`
+- 5-tier ordered blast radius: `Safe < Reversible < Disruptive < Destructive < Catastrophic`.
+- **Reversibility is an orthogonal *proven* boolean**, not a tier point; proof lowers the *authority required*, never the radius.
+- **Protected Policy File** — deterministic, non-pardonable rules; can only raise an action's tier or forbid it. Owner-only; adversarial escalation-record schema (nonce/signature) is defined here for #6d.
+- **Root-favoring authority ceiling** propagated down the spawn chain (parent may only lower). Over-ceiling / policy-forbidden actions **block** (escalation not built yet). Still fully deterministic — no LLM.
+
+### Increment #6c — `%assess-risk%` LLM evaluator (stricter-only overlay)
+**Branch:** `feat/tool-safety-6c` · **Scope:** `assets/roles/%assess-risk%.md`, `src/safety.rs`, `safety.risk_model` config
+- A new role shaped like `%explain-shell%` returns a **terse structured verdict** for a single action, using a **dedicated cheap model** and **minimal context** (tool + resolved args + static tier + reversibility + this-step intent only — never the full plan/history).
+- Verdict `{ tier, reversible, confidence, rationale, concerns[], enrichment }` is **clamped stricter-only** in Rust: may raise the tier or withhold reversibility credit; may never loosen or override policy.
+- `Safe`/reads skip the evaluator (fast-path). Plan-time pass **flags key steps**; only flagged steps get a mandatory pre-exec re-check. Fail/low-confidence ⇒ escalate (block pre-#6d).
+
+### Increment #6d — Escalation & control protocol + human-in-the-loop
+**Branch:** `feat/tool-safety-6d` · **Scope:** `src/safety.rs`, `agent_loop.rs`, `main.rs`/`repl`
+- **File-based parent↔child rendezvous** in `$XDG_RUNTIME_DIR` (`0600`, atomic, per-branch, **HMAC-authenticated** by a per-tree secret so forged/injected `CONTINUE` verdicts are rejected). No stdin/stdout coupling; ARGC explicitly dropped.
+- Hesitating child writes an escalation (WHY + enrichment + proposed action) and **stays alive polling**. The invoking agent merges the enrichment, then issues **HALT** (graceful stop) / **REVERT** (child rolls back via its artifact) / **CONTINUE** (child resumes) — executed by the child; unresponsive child → hard-kill.
+- Escalation **propagates upward** (accumulating an evidence trace) to the orchestrator; if still undecided, reaches a **human** — a branch-blocking interactive CLI prompt (siblings keep running) **or** the same record emitted to a **Layer 3** supervisor when headless.
+- **Branch-scoped suspension** — a waiting lineage never blocks sibling parallelism.
+
+### Threats (explicit)
+- **Prompt injection** into the evaluator → mitigated by minimal context + stricter-only clamp + non-pardonable policy floor.
+- **Forged control files** → owner-only atomic per-branch files + HMAC keyed by an env-only per-tree secret.
+- **Cost/latency** → `Safe` fast-path + plan-time batch + flagged-only re-check; separate cheap evaluator model.
 
 ---
 
