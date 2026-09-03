@@ -22,7 +22,7 @@
 | 6a | ↳ Deterministic capability mask (floor / fallback) | ✓ Implemented (`feat/tool-safety-6a`, unmerged) | High | `feat/tool-safety-6a` | Binary `readonly`/`mutating` mask; sub-agents read-only by default; **unclassified tools reserved to humans**. The permanent floor everything degrades to. | **Pillar 2 + Pillar 5:** capability mask rides the child-PID env channel (like `AICHAT_AGENT_DEPTH`). | S–M — done. `function.rs` (`ToolMode`/`SafetyClass` + `mode` field), `agent_loop.rs` (mask propagation + `capability_denied` gate), `mcp.rs` (MCP tools → unclassified). +8 unit tests; suite 352→360, 0 fail. |
 | 6b | ↳ Blast-radius tiers + proven reversibility + Protected Policy File + authority gradient | Proposed | High | `feat/tool-safety-6b` | 5-tier radius (`Safe`→`Catastrophic`), orthogonal *proven* reversibility, non-pardonable Protected Policy File, root-favoring authority ceiling. Fully deterministic. | **Tenet 4 + Pillar 5:** deterministic floor before any LLM; authority grows toward the root (more context). | M — new `src/safety.rs`, config `safety:` section, `function.rs` fields |
 | 6c | ↳ `%assess-risk%` LLM evaluator (stricter-only overlay) | Proposed | High | `feat/tool-safety-6c` | Dedicated cheap model + minimal-context role returns a structured verdict that can only make things *stricter*; plan-time pass flags key steps, act-time re-check. | **Principle: "the LLM is not a Pardoner."** Advisory overlay clamped in Rust. | M — role asset + `safety.rs` evaluator/clamp; ~fast-path skip for `Safe` |
-| 6d | ↳ Escalation & control protocol + human-in-the-loop | Proposed | High | `feat/tool-safety-6d` | File-based parent↔child rendezvous (HMAC-authenticated), HALT/REVERT/CONTINUE verbs, branch-only suspension, upward propagation to orchestrator, then interactive-CLI human prompt or Layer 3 emission. | **Pillar 2 (process-isolated control) + Pillar 4 (out-of-band files).** | L — live parent↔child control over subprocesses; adversarial file integrity |
+| 6d | ↳ Escalation & control protocol + human-in-the-loop | Proposed | High | `feat/tool-safety-6d` | mTLS **WebSocket** inter-agent channel (child dials parent, loopback WSS), typed `Escalation`/`Verdict{Halt\|Revert\|Continue}`/`Cancel` protocol, durable rollback journal (REVERT replays it — survives connection/child death), branch-only suspension, upward propagation to orchestrator, then interactive-CLI human prompt or Layer 3. Forward-compatible with remote agents. | **Pillar 2 (process-isolated control) + Pillar 5.** Control plane = ephemeral WSS; durability plane = on-disk journal; audit plane = #14. | L — WSS listener + mutual-auth handshake + message protocol + rollback journal; live parent↔child control |
 | 7 | Session Resumption & WAL Journaling (`--resume`) | Proposed | High | `feat/session-wal-resumption` | Long diagnostic sessions must survive network dropouts, rate-limits, and `SIGINT` without re-running expensive probes. | **Tenet 1 (system-level scope) + Pillar 4 (Observability):** extends out-of-band state (status files → durable WAL). Fits, though it introduces a modest new stateful concept. | L — ~250-350 lines + new `session_wal.rs`; replay/checkpoint correctness is the hard part |
 | 8 | Dynamic Multi-Turn Context Compaction | Proposed | Medium | `feat/context-compaction` | Preserves context hygiene (Pillar 1): extended 15+ turn investigations accumulate context monoliths that contaminate reasoning; rolling micro-summaries keep the working context dense. | **Pillar 1 (Delegation over Context Monoliths):** directly named. Tension: the fork's *primary* answer to bloat is delegation/routing; compaction is a complementary in-thread fallback. | M — ~200-300 lines; summarization-quality tuning adds uncertainty |
 | 9 | Ephemeral Git Worktree Isolation for Coders | Proposed | Medium | `feat/ephemeral-git-worktrees` | Concurrent `coder` sub-agents in a Git repo must build, edit, and test without file clobbering or build collision. | **Pillar 2 (Process Isolation)** extended to filesystem isolation. **Caveat:** scoped to the coding sub-case, which the philosophy frames as the non-default "worktree trap" — fine while opt-in. | M — ~150-250 lines; worktree lifecycle/cleanup edge cases |
@@ -30,6 +30,7 @@
 | 11 | Mock-Client Test Seam for Loop Coverage | Proposed | Low | `feat/mock-client-seam` | Backlog #5 covered the loop's decision helpers, but the `run()` orchestration (turn iteration, streaming, tripped-call dispatch, sub-agent recursion) is gated behind a live LLM and only reached by the billed E2E harness. A mock-client seam enables deterministic, offline coverage of that wiring. | **Pillar 5 (Deterministic Safety):** hardens the core loop with reproducible tests. Follow-on to #5; touches the engine hot path so warrants its own spec. | M — ~150-300 lines; injectable LLM turn source + scripted-turn tests; behavior-preserving refactor risk |
 | 12 | Remote MCP Transports (HTTP/WSS) | Proposed | Medium | `feat/remote-mcp-transports` | Native MCP speaks only stdio to local servers; roadmap Layer-4 control planes and remote MCP servers need HTTP/WSS. Concrete L2 engine work unblocking the roadmap's "Remote MCP" arrow. | **Transparent MCP Integration + Pillar 6:** remote tools still appear as normal `FunctionDeclaration`s; stays a single static binary, stdio remains the zero-config default. | M — ~200-400 lines; transport abstraction + auth/reconnect in `src/mcp.rs` |
 | 13 | Scoped Shared Artifact Store for Orchestration Trees | Proposed | Low | `feat/shared-artifact-store` | No way for sibling sub-agents in one tree to share intermediate artifacts (dedup expensive fetches, producer→consumer handoff) without round-tripping the parent. Engine-level counterpart to the L4 "Hive-Mind", scoped to a local tree. | **Pillars 1 & 2 (tension, managed):** structured append-only, root-PID-scoped, read-mostly for siblings — deliberately NOT a free-form blackboard, to preserve process isolation & context hygiene. | M — ~150-300 lines; needs its own spec; interacts with #7 (WAL) and #9 (worktrees) |
+| 14 | Per-Machine Consolidated Audit Log (auditability) | Proposed | Medium | `feat/audit-log` | Observability today is live/ephemeral/single-process (`/dev/tty`, OSC, per-PID status files that vanish). No durable, consolidated, historical record for an external auditor/SRE/platform to reconstruct what aichat did on a host over time. Auditability is a *distinct goal* from observability. | **Pillar 4 extended to durability + Pillar 1/2:** each isolated agent authors its own append-only JSONL records; consolidated per-machine view via correlation IDs at read time. Distinct *audit plane* (vs. #6d control + rollback planes). | M — ~200-400 lines new writer; also the natural home to fix the `$0.000000` cost bug; needs its own spec |
 | 2 | Gemini Interactions API | Deferred | Low | — (Covers via OpenRouter/Client Loop) | Future-proofs against `generateContent` deprecation, but Google's API may still shift and OpenRouter + client loop already cover Gemini agentic use. | **Weakest fit.** Provider-specific server-side integration vs. the fork's provider-agnostic thesis; #3 already makes Gemini agentic, which is why it's deferred. | L — ~1000-1500 lines + new `gemini_interactions.rs`; external API stability risk |
 
 **Effort scale:** S ≈ under ~150 lines / a few hours · M ≈ ~150-400 lines / 1-2 days · L ≈ ~400+ lines or new modules / multi-day. Estimates are relative and derive from the scope figures in [`backlog.md`](file:///home/istari/projects/aichat/.kiro/docs/backlog.md); risk notes flag where correctness or external dependencies widen the range. Pillar/Tenet references map to [`fork-philosophy-and-architecture.md`](file:///home/istari/projects/aichat/.kiro/docs/fork-philosophy-and-architecture.md).
@@ -91,6 +92,15 @@ Declarative output routing on FunctionDeclaration:
 - Pipe destination: chain tools without LLM round-trip, cycle detection
 - 16 tests covering capping, file routing, pipe chains, templates, config
 
+### Backlog #6a: Deterministic Capability Mask ✓ (unmerged, `feat/tool-safety-6a`)
+
+First increment of the #6 Tool Safety Modes umbrella:
+- `ToolMode { Readonly, Mutating }` + skip-serialized `mode` field on `FunctionDeclaration`; `SafetyClass { Readonly, Mutating, Unclassified }` (absent mode = Unclassified, reserved to humans)
+- Sub-agents inherit `AICHAT_CAPABILITY_MASK=readonly`; masked processes refuse mutating/unclassified tools with a structured `capability_denied` result (not a crash)
+- MCP tools → unclassified; `_plan` always permitted
+- +8 unit tests; suite 352→360 unit, 0 fail; clippy clean
+- The permanent safety floor #6b–#6d degrade back to
+
 ### PDF Loader Enhancement
 
 Default `document_loaders.pdf` switched from `pdftotext` to `pdf2md --compact --raw` (firecrawl/pdf-inspector). Structured Markdown for better RAG chunking and token efficiency.
@@ -113,19 +123,21 @@ Default `document_loaders.pdf` switched from `pdftotext` to `pdf2md --compact --
 
 ## Branch Status
 
-- `main` — upstream fork at v0.31.0-fork.9
-- `rc-branch` — release candidate
-- `feat/rust-mcp-bridge` — Backlog #1, complete
-- `feat/agent-loop-enhancements` — Backlog #3, complete (Phases A-F)
-- `feat/tool-output-routing` — Backlog #4, complete (active)
+- `main` — upstream fork at v0.31.0-fork.9 (all prior `feat/*` branches merged here)
+- `rc-branch` — release candidate (stale ancestor of `main`)
+- `feat/rust-mcp-bridge` — Backlog #1, complete (merged to `main`)
+- `feat/agent-loop-enhancements` — Backlog #3, complete (merged to `main`)
+- `feat/tool-output-routing` — Backlog #4, complete (merged to `main`)
+- `feat/test-suite-hardening` — Backlog #5, complete (merged to `main`)
+- **`feat/tool-safety-6a`** — Backlog #6a, **implemented (active, unmerged; 3 commits ahead of `main`)**
 
 ## Merge Strategy
 
 ```
-main ← feat/rust-mcp-bridge ← feat/agent-loop-enhancements ← feat/tool-output-routing
+main ← feat/rust-mcp-bridge ← feat/agent-loop-enhancements ← feat/tool-output-routing (all merged)
+main ← feat/tool-safety-6a (current, unmerged)
+     ← feat/tool-safety-6b ← …6c ← …6d (future, each off the previous)
 ```
-
-Each branch builds on the previous. Merge in order.
 
 ## Environment Reminders
 

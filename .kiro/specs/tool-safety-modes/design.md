@@ -125,8 +125,9 @@ Rides the existing `AICHAT_AGENT_DEPTH` channel:
 |---------|-----------|---------|
 | `AICHAT_CAPABILITY_MASK` | #6a | `readonly` restricts child to `Safe`/`readonly` tools |
 | `AICHAT_AUTHORITY_CEILING` | #6b | max `BlastRadius` the child may act on autonomously (parent may only lower) |
-| `AICHAT_TREE_SECRET` | #6d | per-tree secret for authenticating verdict files (never written to disk in cleartext) |
-| `AICHAT_ESCALATION_PATH` | #6d | this child's escalation-request file path |
+| `AICHAT_AGENT_PARENT_ADDR` | #6d | loopback WSS address + port the child dials back to connect to the parent |
+| `AICHAT_AGENT_TOKEN` | #6d | per-child credential seed for the mTLS mutual-auth handshake |
+| `AICHAT_TREE_SECRET` | #6d | per-tree root-of-trust for ephemeral key derivation (never written to disk) |
 
 ## Seam Map
 
@@ -147,11 +148,14 @@ Rides the existing `AICHAT_AGENT_DEPTH` channel:
 | FR-6c.6 | fast-path | `agent_loop.rs` | `if tier == Safe { skip evaluator }` |
 | FR-6c.7 | plan-time flagging + act-time recheck | `agent_loop.rs::run` (plan partition) | Plan pass tags steps; only tagged steps re-evaluated at dispatch |
 | FR-6c.8 | fail-toward | `src/safety.rs` | evaluator error/low-confidence → escalate (or block pre-#6d) |
-| FR-6d.2/6d.3 | file rendezvous + HMAC | `src/safety.rs` | atomic `0600` writes, per-branch path, `AICHAT_TREE_SECRET`-keyed HMAC over record; reject unverified |
-| FR-6d.4 | HALT/REVERT/CONTINUE handling | `agent_loop.rs` (child poll loop) | Child suspends at pending action, polls verdict file, dispatches verb; REVERT/RESUME run in child |
-| FR-6d.5 | upward propagation | `agent_loop.rs` | Parent that can't decide re-escalates, appending to evidence trace |
-| FR-6d.6 | human sink | `agent_loop.rs` + `main.rs`/`repl` | Interactive: branch-blocking prompt (siblings run). Headless: emit record to Layer 3 |
-| FR-6d.7 | graceful/hard stop | `agent_loop.rs` | Cooperative HALT; signal-kill on poll timeout |
+| FR-6d.2/6d.3 | WSS listener + mTLS handshake | `src/safety.rs` + `agent_loop.rs` | Parent binds loopback WSS; child dials back; mutual auth via ephemeral pinned keys + channel-bound challenge–response; reject unverified connections |
+| FR-6d.4 | message protocol + escalation flow | `src/safety.rs` + `agent_loop.rs` | Typed messages (Hello/Event/Escalation/Result upstream; Verdict/Cancel downstream) over the WSS connection; child blocks on `recv()` (no polling) |
+| FR-6d.5 | HALT/REVERT/CONTINUE handling | `agent_loop.rs` (child's connection handler) | Child awaits Verdict on open socket, dispatches verb; REVERT replays durable on-disk journal entry |
+| FR-6d.6 | durable rollback journal | `src/safety.rs` | Append-only on-disk journal (separate from the control channel) — reversibility survives connection drops / child death |
+| FR-6d.7 | upward propagation | `agent_loop.rs` | Parent that can't decide re-escalates up its own connection to its parent, appending to evidence trace |
+| FR-6d.8 | human sink | `agent_loop.rs` + `main.rs`/`repl` | Interactive: branch-blocking prompt (siblings run). Headless: emit record to Layer 3 |
+| FR-6d.9 | liveness | (implicit from connection state) | Parent/child death → immediate EOF on the other side; replaces `/proc/<pid>` scanning |
+| FR-6d.10 | graceful/hard stop | `agent_loop.rs` | Cooperative Cancel/HALT via the connection; signal-kill on verdict timeout |
 | FR-6d.8 | branch-scoped suspension | `agent_loop.rs` | Suspension is per-lineage future; `join_all` siblings unaffected |
 
 ## Key Design Decisions
@@ -170,14 +174,26 @@ Rides the existing `AICHAT_AGENT_DEPTH` channel:
   stricter-only clamp trivial `max`/`<=` operations that are obviously correct and unit-testable.
 - **Reversibility is proof-gated and orthogonal.** It is *not* a tier; it is a separate boolean that
   only counts with a real artifact and only ever *reduces* the authority required — never the radius.
-- **Escalation is a live control relationship over a still-running child, via files.** Chosen over
-  stdin/stdout (couples to the child's I/O, fragile under the existing stdout-capture paths) and over
-  kill-only (can't express REVERT/CONTINUE). Files in `$XDG_RUNTIME_DIR` are the same durable,
-  pipe-immune substrate the status-file observability already uses. ARGC is explicitly not used.
-- **Adversarial integrity from day one of #6d.** The verdict authenticator (HMAC keyed by a
-  per-tree secret passed via env, never persisted) means only the real parent can author a valid
-  CONTINUE — a forged or injected file is rejected and treated as no-verdict. The record *schema*
-  (with the nonce/signature fields) is fixed in #6b so the format never churns.
+- **Escalation is a live control relationship over a still-running child, via a mutually-authenticated
+  WebSocket.** The parent binds a loopback WSS listener; the child dials back after spawn. Chosen
+  over files (eliminates polling latency and liveness-scanning overhead), over stdin/stdout (couples
+  to the child's I/O, fragile under the existing stdout-capture paths), and over kill-only (can't
+  express REVERT/CONTINUE). The connection gives free bidirectional messaging and free liveness
+  detection (EOF on death). ARGC is explicitly not used.
+- **Mutual TLS with ephemeral fingerprint-pinned keys, no CA/PKI.** Both sides prove identity at
+  connection time. The parent generates an ephemeral keypair per agent tree; the child receives the
+  parent's public-key fingerprint + a per-child credential via its private spawn env. The handshake
+  is channel-bound so leaked credentials cannot be replayed on another connection. Loopback-only
+  binding as defense-in-depth.
+- **The control channel is NOT the durability plane.** The WebSocket is ephemeral — it dies with the
+  connection. Reversibility is backed by a **durable on-disk rollback journal** (append-only, per
+  agent, written before/at mutation). REVERT replays a journal entry, not in-memory state, so
+  reversal survives connection drops, child crashes, and re-spawns. The control channel carries
+  the *verdict to revert*; the journal carries the *recipe for how*.
+- **Transport-independent message protocol.** Messages are typed data (Hello, Event, Escalation,
+  Result, Verdict, Cancel) defined independently of the transport. The same protocol generalizes
+  to remote agents (WSS over a routable interface with real certs) without a redesign — this is a
+  stated forward-compatibility requirement (FR-6d.12).
 - **The evaluator is a role, not hardcoded.** `%assess-risk%` is a user-editable asset like
   `%explain-shell%`, keeping prompt logic in the declarative layer and the *enforcement* (clamp,
   fail-toward, fast-path) in Rust where it must be trustworthy.
@@ -188,9 +204,12 @@ Rides the existing `AICHAT_AGENT_DEPTH` channel:
    low verdict. Mitigations: minimal context (no room to hide instructions that matter), stricter-only
    clamp (a low verdict *cannot* unlock anything the deterministic layer didn't already allow), and the
    non-pardonable policy floor (forbidden stays forbidden without ever consulting the LLM).
-2. **Forged control files** — a tool or peer writes a fake `CONTINUE`/low escalation. Mitigation:
-   owner-only atomic files on per-branch paths + HMAC over the record keyed by a secret only the real
-   parent holds (env, never on disk). Unverified verdicts are ignored.
+2. **Forged control messages / unauthorized connection** — a local tool, injected content, or
+   compromised peer attempts to connect to the parent's WSS listener and forge a CONTINUE verdict
+   or inject a fake escalation. Mitigation: mutual TLS with ephemeral fingerprint-pinned keys;
+   channel-bound challenge–response so leaked credentials are non-replayable; loopback-only binding
+   so off-box connections are physically impossible; connection failing handshake is rejected before
+   any message is exchanged.
 3. **Cost/latency** — an evaluator call before every mutation. Mitigation: `Safe` fast-path skips the
    evaluator entirely; plan-time pass bounds calls and flags only the steps needing an act-time recheck.
 4. **Evaluator as single point of trust** — mitigated structurally: it is advisory and stricter-only;

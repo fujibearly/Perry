@@ -75,7 +75,7 @@ can fall back to it.
 | **#6a** | Binary `readonly`/`mutating` capability mask; sub-agents read-only by default; unclassified tools reserved to humans | Yes | Block (mutating/unclassified in sub-agent) |
 | **#6b** | 5-tier blast radius + orthogonal proven-reversibility; Protected Policy File; root-favoring authority ceiling | Yes | Block (over ceiling) |
 | **#6c** | `%assess-risk%` LLM evaluator (stricter-only); plan-time pass flags key steps; mandatory pre-exec re-check of flagged steps | No (advisory overlay) | Block (no channel yet) |
-| **#6d** | File-based parent↔child escalation/control (HALT/REVERT/CONTINUE); branch-only suspension; upward propagation; human-in-the-loop (interactive CLI or Layer 3) | N/A (protocol) | Escalate → human |
+| **#6d** | mTLS WebSocket inter-agent channel (child dials parent); typed message protocol (Escalation/Verdict/Cancel); durable rollback journal; branch-only suspension; upward propagation; human-in-the-loop (interactive CLI or Layer 3) | N/A (protocol) | Escalate → human |
 
 ---
 
@@ -139,10 +139,11 @@ can fall back to it.
 - **FR-6b.6 — Deterministic block on over-ceiling (pre-#6d).** Until the escalation protocol
   (#6d) exists, an over-ceiling or policy-forbidden action returns a structured
   `{"error": {"type": "authority_exceeded" | "policy_forbidden", ...}}` result. No LLM is involved.
-- **FR-6b.7 — Escalation record format defined (reserved).** #6b defines the on-disk escalation
-  record schema — including the **security fields** (per-tree secret / nonce / signature)
-  required for the adversarial protection in #6d — even though #6b does not yet act on them.
-  This keeps the format stable across increments.
+- **FR-6b.7 — Escalation message schema defined (reserved).** #6b defines the typed escalation
+  and verdict message schemas — including the **security-relevant fields** (agent-id, tree-id,
+  challenge/nonce) required for the mutual-auth handshake and channel-bound protocol in #6d —
+  even though #6b does not yet act on them. This keeps the message format stable across increments
+  and ensures #6d is a transport addition, not a schema redesign.
 
 ### Phase #6c — `%assess-risk%` LLM Evaluator (stricter-only overlay)
 
@@ -175,32 +176,73 @@ can fall back to it.
 
 - **FR-6d.1 — Escalation trigger.** When an action exceeds an agent's ceiling, or the evaluator
   fails/hesitates, the agent **escalates to its invoking agent** rather than deciding.
-- **FR-6d.2 — File-based rendezvous (protected surface).** Escalation and verdict are exchanged
-  via files in `$XDG_RUNTIME_DIR` (fallback `/tmp`), `0600`, atomically written, on per-branch
-  unique paths. The child writes an escalation request (WHY + enrichment context + the proposed
-  action); it then **stays alive polling** for a verdict. (No stdin/stdout coupling; no ARGC.)
-- **FR-6d.3 — Adversarial integrity.** The parent mints a per-tree secret at spawn and passes it to
-  the child out-of-band (env). Verdict files MUST carry an unforgeable authenticator (HMAC/nonce
-  over the record) so that a tool, injected content, or a compromised peer **cannot forge a
-  `CONTINUE` verdict or downgrade an escalation**. The engine MUST reject any verdict failing
-  verification and treat it as no-verdict (keep waiting / escalate further).
-- **FR-6d.4 — Parent verdict verbs.** The invoking agent, having merged the child's enrichment into
-  its own context (and possibly re-run its own evaluation/attempt), issues one of:
+- **FR-6d.2 — WebSocket-based inter-agent channel (child dials parent).** The parent binds a
+  **loopback WSS listener** at spawn time and passes the address + per-child credentials to the
+  child via its private spawn environment (`AICHAT_AGENT_PARENT_ADDR`, `AICHAT_AGENT_TOKEN`,
+  `AICHAT_TREE_SECRET`). The child **connects back** to the parent after starting. One parent
+  listener accepts connections from all its children (one connection per child, identified by
+  credentials). The connection is **bidirectional**: the child streams events and escalation
+  requests *upstream*; the parent pushes verdicts and cancellation *downstream*.
+  (Replaces the earlier file-rendezvous design — WebSocket eliminates polling latency, gives
+  free liveness detection via connection state, and generalizes to remote agents in the future.)
+- **FR-6d.3 — Mutual authentication (mTLS, no CA/PKI).** Both sides MUST prove identity:
+  - The parent generates an **ephemeral keypair per agent tree** at startup (in memory, never
+    written to disk). The child receives the parent's **public-key fingerprint** via env to pin
+    the server it dials.
+  - The child authenticates via a **client credential** derived from the per-tree secret, verified
+    by the parent. The handshake includes a **challenge–response that is channel-bound** to the
+    specific TLS session, so a leaked credential cannot be replayed on another connection.
+  - A connection failing mutual auth MUST be rejected immediately. A tool, injected content, or
+    compromised local peer **cannot forge a `CONTINUE` verdict or inject an escalation** because
+    they cannot complete the handshake.
+  - The parent binds **loopback only** (`127.0.0.1`, never `0.0.0.0`) as defense-in-depth.
+- **FR-6d.4 — Message protocol (typed, transport-independent).**
+  - **Child → parent (upstream):**
+    `Hello { agent_id, depth, capabilities }` (handshake, first frame after mTLS);
+    `Event(AgentLoopEvent)` (live trace — enables tree-wide observability at orchestrator);
+    `Escalation { id, action, reason, enrichment, blast_radius, reversible }` (child pauses,
+    awaits verdict on the open connection — **no polling**);
+    `Result { output, cost }` / `Error` (terminal).
+  - **Parent → child (downstream):**
+    `Verdict { escalation_id, decision: Halt | Revert | Continue, added_context? }`;
+    `Cancel` (cooperative graceful stop — generalizes HALT beyond escalation).
+  - The protocol is defined as **transport-independent typed messages** so the same message set
+    works over loopback WSS (local) and routable WSS (future remote agents).
+- **FR-6d.5 — Parent verdict verbs.** The invoking agent, having merged the child's enrichment into
+  its own context (and possibly re-run its own evaluation/attempt), pushes one of:
   **HALT** (child stops before the pending action, gracefully), **REVERT** (child performs the
-  rollback using its held reversibility artifact), or **CONTINUE** (child resumes and performs the
-  action). REVERT and RESUME are executed **by the child**.
-- **FR-6d.5 — Upward propagation.** If the invoking agent's own ceiling/context is insufficient, it
-  escalates further up the chain, accumulating the evidence trace, until it reaches the orchestrator.
-- **FR-6d.6 — Human-in-the-loop.** If the orchestrator cannot decide, escalation reaches a **human**:
+  rollback by replaying its **durable on-disk journal entry** — reversibility does NOT depend on
+  the child's in-memory state or the connection surviving), or **CONTINUE** (child resumes and
+  performs the action). REVERT and CONTINUE are executed **by the child**.
+- **FR-6d.6 — Durable rollback journal (separate from the control channel).** Mutations that are
+  proven-reversible MUST record a rollback entry to a durable on-disk journal **before or at
+  execution** (`{ action, artifact_path, undo_command, agent_id, timestamp, signed }`). The
+  WebSocket is the **control plane** (fast, ephemeral, live coordination); the journal is the
+  **durability plane** (survives crashes, connection drops, child death). REVERT replays a journal
+  entry, not in-memory state — so reversal works even if the child crashed and was re-spawned, or
+  the connection was lost. (Complements backlog #7 WAL.)
+- **FR-6d.7 — Upward propagation.** If the invoking agent's own ceiling/context is insufficient, it
+  escalates further up **its own connection to its parent**, accumulating the evidence trace, until
+  it reaches the orchestrator. Every agent is both a listener (for its children) and a client (to
+  its parent) — escalation chains recurse naturally.
+- **FR-6d.8 — Human-in-the-loop.** If the orchestrator cannot decide, escalation reaches a **human**:
   - **Interactive CLI path (default when a human operates the CLI):** a **blocking prompt on that
     branch only** (siblings keep running) presenting the action, tiers, and the accumulated evidence
     trace, with approve / deny / revert.
   - **Layer 3 path (headless/preferred):** emit the *same* structured escalation record to a Layer 3
     supervisor instead of prompting. One escalation format, two sinks.
-- **FR-6d.7 — Graceful vs. hard stop.** HALT is cooperative (the child is waiting anyway). A child
-  that is **unresponsive** to a HALT within a timeout MAY be hard-killed (signal) as the escape hatch.
-- **FR-6d.8 — Branch-scoped suspension.** A suspended, escalating lineage MUST NOT block sibling
-  parallel work elsewhere in the tree.
+- **FR-6d.9 — Liveness (free from connection state).** Parent death → child's socket read EOFs
+  immediately (no `/proc` scanning, no stale-file cleanup). Child death → parent's connection
+  errors immediately. This replaces the `/proc/<pid>`-based liveness checks entirely.
+- **FR-6d.10 — Graceful vs. hard stop.** HALT and Cancel are cooperative (pushed over the
+  connection). A child that is **unresponsive** to a HALT/Cancel within `verdict_timeout_secs`
+  MAY be hard-killed (signal) as the escape hatch.
+- **FR-6d.11 — Branch-scoped suspension.** A suspended, escalating lineage (one child's connection
+  blocked awaiting a verdict) MUST NOT block sibling parallel work elsewhere in the tree.
+- **FR-6d.12 — Future remote generalization.** The protocol MUST be designed so that the same
+  message types and auth model generalize to **remote sub-agents** by binding WSS to a routable
+  interface with real certificates (org-CA or pinned), and adding an `endpoint:` field to the
+  agent registry. This is NOT built in #6d but the protocol MUST NOT preclude it.
 
 ## Non-Functional Requirements
 
@@ -210,8 +252,11 @@ can fall back to it.
   clamp + non-pardonable policy floor MUST be the stated, tested mitigations against arguments or
   fetched content attempting to talk the evaluator into a low verdict. A low verdict can never
   unlock a policy-forbidden or over-ceiling action.
-- **NFR-3 — Control-file integrity (threat).** Escalation/verdict files MUST be owner-only, atomic,
-  per-branch-unique, and (from #6d) authenticated so forged control messages are rejected.
+- **NFR-3 — Control-channel integrity (threat).** The inter-agent WebSocket channel MUST use
+  mutual TLS with ephemeral fingerprint-pinned keys (no CA), channel-bound challenge–response,
+  and loopback-only binding. A connection failing mutual auth is rejected; forged control messages
+  are structurally impossible without completing the handshake. The durable rollback journal is
+  separate and owner-only (`0600`).
 - **NFR-4 — Cost/latency bound (threat).** `Safe`/read actions never invoke the evaluator; evaluator
   calls are bounded by the plan-time pass + flagged-only re-check. The evaluator model is separately
   configurable so it can be a cheap model.

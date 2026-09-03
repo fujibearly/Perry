@@ -74,26 +74,33 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 
 ## Phase #6d — Escalation & Control Protocol + Human-in-the-Loop (branch `feat/tool-safety-6d`)
 
-- [ ] 6d.1 File rendezvous in `safety.rs`: atomic `0600` writes, per-branch unique paths under
-      `$XDG_RUNTIME_DIR` (fallback `/tmp`); write escalation request (WHY + enrichment + proposed action). (FR-6d.2)
-- [ ] 6d.2 Adversarial integrity: mint `AICHAT_TREE_SECRET` at spawn (env, never persisted); HMAC over the
-      record; verify on read; reject tampered/wrong-secret/forged as no-verdict. Unit tests (accept/tamper/wrong-key). (FR-6d.3, NFR-3)
-- [ ] 6d.3 Child suspend-and-poll loop: at a pending over-ceiling/hesitant action, write escalation, stay alive
-      polling for a verdict up to `verdict_timeout_secs`. (FR-6d.1/6d.2)
-- [ ] 6d.4 Verdict verbs handled **in the child**: HALT (graceful stop before action), REVERT (child rolls back via
-      its reversibility artifact), CONTINUE (child resumes + performs). Unit-test dispatch of each. (FR-6d.4)
-- [ ] 6d.5 Parent side: merge child enrichment into context, decide or re-escalate upward accumulating the evidence
-      trace to the orchestrator. (FR-6d.5)
-- [ ] 6d.6 Human-in-the-loop: interactive branch-blocking prompt (siblings keep running) with action/tiers/evidence
-      + approve/deny/revert; OR emit the same record to a Layer 3 sink when headless/preferred. (FR-6d.6)
-- [ ] 6d.7 Graceful vs hard stop: cooperative HALT; signal-kill an unresponsive child on poll timeout. Test the
-      timeout→hard-kill path offline. (FR-6d.7)
-- [ ] 6d.8 Branch-scoped suspension: verify a suspended lineage does not block `join_all` siblings. Unit/async test. (FR-6d.8)
-- [ ] 6d.9 Offline demo in `scripts/run-demos.nu` (à la Demo 12): real parent↔child escalation over subprocesses,
-      asserting verdict verbs + no forged-file acceptance + branch-only suspension. (Verification)
-- [ ] 6d.10 `cargo test` + `cargo clippy` green; degrade check: disabling #6d ⇒ over-ceiling/hesitant actions block
+- [ ] 6d.1 WSS listener in the parent: bind loopback (`127.0.0.1:<port>`) at spawn; pass
+      `AICHAT_AGENT_PARENT_ADDR` + `AICHAT_AGENT_TOKEN` + `AICHAT_TREE_SECRET` to the child via env. Child dials back. (FR-6d.2)
+- [ ] 6d.2 Mutual auth (mTLS, no CA): parent generates ephemeral per-tree keypair (in-memory); child pins parent
+      fingerprint + presents credential derived from the tree secret; channel-bound challenge–response; reject
+      connections failing the handshake. Unit tests (valid connects / wrong-cred rejected / replay rejected). (FR-6d.3, NFR-3)
+- [ ] 6d.3 Typed message protocol in `safety.rs`: Hello / Event / Escalation / Result upstream; Verdict / Cancel
+      downstream. Transport-independent (works over loopback WSS now, routable WSS later). Unit-test (de)serialization. (FR-6d.4)
+- [ ] 6d.4 Child connection handler: on a pending over-ceiling/hesitant action, send `Escalation`, then **block on
+      `recv()`** for a `Verdict` (no polling), up to `verdict_timeout_secs`. (FR-6d.1/6d.4)
+- [ ] 6d.5 Verdict verbs handled **in the child**: HALT (graceful stop before action), REVERT (replay durable
+      journal entry), CONTINUE (resume + perform). Unit-test dispatch of each. (FR-6d.5)
+- [ ] 6d.6 Durable rollback journal (append-only, on-disk, separate from the connection): write entry before/at a
+      proven-reversible mutation; REVERT replays it. Survives connection drop / child death / re-spawn. Unit tests. (FR-6d.6)
+- [ ] 6d.7 Parent side: merge child enrichment into context, decide or re-escalate upward its own connection to its
+      parent, accumulating the evidence trace to the orchestrator. (FR-6d.7)
+- [ ] 6d.8 Human-in-the-loop: interactive branch-blocking prompt (siblings keep running) with action/tiers/evidence
+      + approve/deny/revert; OR emit the same record to a Layer 3 sink when headless/preferred. (FR-6d.8)
+- [ ] 6d.9 Liveness from connection state: child EOFs on parent death, parent errors on child death (replaces
+      `/proc` scanning). Graceful Cancel/HALT via connection; signal-kill an unresponsive child on timeout. Test offline. (FR-6d.9/6d.10)
+- [ ] 6d.10 Branch-scoped suspension: verify a lineage blocked on a verdict does not block `join_all` siblings. Async test. (FR-6d.11)
+- [ ] 6d.11 Offline demo in `scripts/run-demos.nu` (à la Demo 12): real parent↔child escalation over a loopback WSS
+      connection between spawned processes — assert mutual-auth rejection of an unauthenticated connection, verdict
+      verbs, journal-based REVERT survives a killed child, and branch-only suspension. (Verification, FR-6d.12 hooks)
+- [ ] 6d.12 `cargo test` + `cargo clippy` green; degrade check: disabling #6d ⇒ over-ceiling/hesitant actions block
       exactly as #6b/#6c. (NFR-1/6)
-- [ ] 6d.11 Docs: full funnel diagram, escalation record format, human/Layer-3 paths, threat model.
+- [ ] 6d.13 Docs: full funnel diagram, the WebSocket channel (topology, mTLS, message protocol, control-vs-durability
+      planes), human/Layer-3 paths, threat model, and the remote-generalization hook. (FR-6d.12)
 
 ## Cross-cutting / Land
 

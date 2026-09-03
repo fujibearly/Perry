@@ -268,15 +268,46 @@ Systematically add targeted unit tests and harness assertions to boost coverage 
 
 ### Increment #6d — Escalation & control protocol + human-in-the-loop
 **Branch:** `feat/tool-safety-6d` · **Scope:** `src/safety.rs`, `agent_loop.rs`, `main.rs`/`repl`
-- **File-based parent↔child rendezvous** in `$XDG_RUNTIME_DIR` (`0600`, atomic, per-branch, **HMAC-authenticated** by a per-tree secret so forged/injected `CONTINUE` verdicts are rejected). No stdin/stdout coupling; ARGC explicitly dropped.
-- Hesitating child writes an escalation (WHY + enrichment + proposed action) and **stays alive polling**. The invoking agent merges the enrichment, then issues **HALT** (graceful stop) / **REVERT** (child rolls back via its artifact) / **CONTINUE** (child resumes) — executed by the child; unresponsive child → hard-kill.
-- Escalation **propagates upward** (accumulating an evidence trace) to the orchestrator; if still undecided, reaches a **human** — a branch-blocking interactive CLI prompt (siblings keep running) **or** the same record emitted to a **Layer 3** supervisor when headless.
-- **Branch-scoped suspension** — a waiting lineage never blocks sibling parallelism.
+- **mTLS WebSocket inter-agent channel (child dials parent).** Parent binds a loopback WSS listener at spawn and passes address + per-child credentials via env (`AICHAT_AGENT_PARENT_ADDR`, `AICHAT_AGENT_TOKEN`, `AICHAT_TREE_SECRET`); child connects back. **Mutual auth** via ephemeral fingerprint-pinned keys (no CA/PKI) + channel-bound challenge–response — forged/injected verdicts are structurally impossible without completing the handshake. Loopback-only binding. No stdin/stdout coupling; ARGC and the earlier file-rendezvous both dropped.
+- **Typed message protocol:** child→parent `Hello`/`Event`/`Escalation`/`Result`; parent→child `Verdict{Halt|Revert|Continue}`/`Cancel`. Child hits a gated action, sends `Escalation` (WHY + enrichment + proposed action), and **blocks on `recv()`** (no polling). Verbs execute in the child; **REVERT replays a durable on-disk rollback journal entry** (control plane = the ephemeral connection; durability plane = the journal — reversal survives connection drops / child death / re-spawn).
+- Escalation **propagates upward** (child re-escalates up its own connection to its parent), accumulating an evidence trace to the orchestrator; if still undecided, reaches a **human** — a branch-blocking interactive CLI prompt (siblings keep running) **or** the same record emitted to a **Layer 3** supervisor when headless.
+- **Liveness is free** from connection state (EOF on either side's death — replaces `/proc` scanning). **Branch-scoped suspension** — a lineage blocked on a verdict never blocks sibling parallelism.
+- **Forward-compatible with remote agents:** the same message protocol + auth model generalizes to remote sub-agents (WSS on a routable interface, real certs, agent-registry `endpoint:` field) — not built here, but the protocol must not preclude it.
 
 ### Threats (explicit)
 - **Prompt injection** into the evaluator → mitigated by minimal context + stricter-only clamp + non-pardonable policy floor.
-- **Forged control files** → owner-only atomic per-branch files + HMAC keyed by an env-only per-tree secret.
+- **Forged control messages / unauthorized connection** → mutual-TLS WebSocket with ephemeral fingerprint-pinned keys, channel-bound challenge–response (leaked credentials non-replayable), loopback-only binding; connections failing the handshake are rejected before any message is exchanged.
 - **Cost/latency** → `Safe` fast-path + plan-time batch + flagged-only re-check; separate cheap evaluator model.
+
+---
+
+## 14. Per-Machine Consolidated Audit Log (Auditability as a Distinct Goal)
+
+**Priority:** Medium (future enhancement — not yet scoped for implementation)
+**Scope:** ~200-400 lines (new writer module; touches `src/agent_loop.rs` event emission, config); cross-cutting
+**Driver:** Today's observability (Pillar 4) is **live, ephemeral, and single-process**: `/dev/tty` traces, OSC titles, and per-PID status JSON files that vanish when the process exits. There is no **durable, consolidated, historical** record that an external auditor, SRE, or observability platform can use — long after every agent process has exited — to reconstruct *everything aichat did on this host over time*: which agents ran, in what tree, what tools they invoked, at what blast-radius tier, what risk verdicts and escalations occurred, which mutations were actuated and which were reverted, and by whose authority.
+
+> **Auditability is a distinct goal from observability.** Observability serves the *operator watching a live run*; auditability serves an *external party reconstructing history after the fact*. This is the durable superset.
+
+This is a **distinct plane** from the two in the #6 design:
+- **Control + telemetry plane** — the ephemeral inter-agent WebSocket channel (live coordination while the tree runs).
+- **Durability plane** — the #6d rollback journal (for undoing actions).
+- **Audit plane (this item)** — durable, append-only, machine-wide; outlives every process and the whole tree; read by *non-participants*, possibly much later.
+
+### Approach (sketch — needs its own spec when scoped)
+1. **Each agent authors its own records** independently (author = the isolated process, consistent with Pillars 1/2). No central logging daemon required at runtime.
+2. **Consolidated per-machine view** via correlation identifiers — `tree_id` (reuse the per-tree identity minted for escalation/mTLS), `agent_id`/`pid`, `parent_id`, `depth`, `timestamp`, per-agent `sequence` — so an external reader reconstructs the tree (parent chains) and timeline (merge by timestamp) **at read time**, with no runtime coupling.
+3. **Format: JSON Lines**, append-only, one event per line — natively ingestible by `jq`/`tail`/Loki/Vector/Splunk/Fluent Bit. Consider per-process files merged into a machine view (robust, isolation-aligned) vs. one contended `O_APPEND` file (simpler; needs atomic <PIPE_BUF records).
+4. **Records reference, never embed, payloads.** Log *that* a tool ran + safety metadata (tier, verdict, mutation, artifact path/hash) — NOT raw tool outputs / fetched docs / conversation (avoid rebuilding the context monolith on disk and creating a PII/leak surface). Payloads live in output routing (#4) / artifact store (#13); the audit record points at them.
+5. **Rotation + retention** (size/age) — mandatory on small bastions to avoid unbounded growth.
+6. **Optional hardening (later):** append-only semantics + hash-chained records for tamper-evidence.
+
+### Notes
+- **Natural home to fix the `$0.000000` cost-estimator bug** (structured `cost` records instead of scraping stderr).
+- **Relationship to #7 (WAL):** shares the append-only-JSONL instinct and could share a writer, but serves a different reader — the WAL is read by *aichat itself* to resume a session; the audit log is read by *humans/platforms* for forensics. Design to complement, not duplicate.
+- **Delivery model:** prefer write-JSONL-and-let-an-external-shipper-tail-it (pull, zero coupling, keeps Pillar 6 clean) over aichat pushing to an endpoint.
+- **Could subsume** the ad-hoc status files + stderr cost-scraping into one structured durable stream — worth evaluating during scoping.
+- **#6 is a primary producer** (tier classifications, verdicts, escalations, mutations, rollbacks are among the most valuable audit records), which is why this surfaced during #6 design — but the capability stands alone and benefits non-safety flows too. Needs its own spec.
 
 ---
 

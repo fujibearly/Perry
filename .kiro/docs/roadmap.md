@@ -27,7 +27,7 @@ Design intent: the engine (L2) is the fixed constant; L3/L4 sit *around* it and 
 | Provider-agnostic agent loop | L2 | ✅ Shipped | **#3** (Done) | Parallelism, budgets, sub-agents, `_plan`. |
 | Declarative stream routing | L2 | ✅ Shipped | **#4** (Done) | Auto-cap, pipes, file targets. |
 | Deterministic test/coverage hardening | L2 | ✅ Shipped | **#5** (Done) | agent_loop.rs 46.8%→64.7% line. |
-| Tool safety modes / actuation governance | L1/L2 | 🔜 Proposed | **#6** (High) | HITL-adjacent; complements L3 approval gates. |
+| Tool safety modes / actuation governance | L1/L2 | 🔜 In progress | **#6** (High; umbrella #6a–#6d) | #6a (capability mask) implemented on `feat/tool-safety-6a`. #6b–#6d proposed. Escalation uses an mTLS **WebSocket** inter-agent channel (child dials parent) — HITL-adjacent, complements L3 approval gates, and forward-compatible with remote agents. |
 | Session resumption / WAL | L2 | 🔜 Proposed | **#7** (High) | Durable state; survives dropouts/SIGINT. |
 | Context compaction | L2 | 🔜 Proposed | **#8** (Med) | Fallback to the delegation-first hygiene model. |
 | Ephemeral Git worktree isolation | L2 | 🔜 Proposed | **#9** (Med) | Engine-side complement to L3 `bohay`. |
@@ -35,6 +35,7 @@ Design intent: the engine (L2) is the fixed constant; L3/L4 sit *around* it and 
 | Mock-client test seam | L2 | 🔜 Proposed | **#11** (Low) | Deterministic coverage of `run()` orchestration. |
 | **Remote MCP transports (HTTP/WSS)** | L2→L4 | 🔜 Proposed | **#12** (Med) | The concrete engine work that lets L4 control planes drive the engine remotely. |
 | **Scoped shared artifact store** (engine-level cross-agent memory) | L2 | 🔜 Proposed | **#13** (Low) | Structured, root-PID-scoped, read-mostly. The *engine-level* counterpart to the L4 Hive-Mind — NOT a free-form blackboard. |
+| **Per-machine consolidated audit log** (auditability, not just observability) | L2→L4 | 🔜 Proposed | **#14** (Med) | Durable append-only JSONL per agent, consolidated per-machine via correlation IDs; read by external auditors/observability platforms (L4-adjacent). Distinct *audit plane* from #6d's control + rollback planes. Surfaced during #6 design. |
 | Gemini Interactions API | L2 | ⏸ Deferred | **#2** (Low) | Covered via OpenRouter + client loop. |
 | CLI flag parity (`--show-trace/--max-turns/--max-cost`) | L2 | ✅ Largely shipped | *(folded into #3)* | Flags exist; no distinct open item. |
 | **Adopt `dot-agent-deck`** (SRE mission control, HITL cards) | L3 | 🧭 External adoption | *(none — not our code)* | #1 SRE supervisor recommendation. Engine already emits the status-file/`/dev/tty` signals it consumes. |
@@ -74,9 +75,9 @@ The takeaway: #9 (micro) and #10 (staging) are two points on the same containmen
 
 The backlog's own dependency notes still govern ordering. At a strategic level:
 
-1. **High-priority safety/durability next:** #6 (Tool Safety Modes) and #7 (WAL Resumption) — both High, both core to the SRE stress-test.
-2. **#12 Remote MCP** when L4 integration becomes concrete (it's the bridge that makes any L4 control plane useful).
-3. **#13 shared artifact store** and **#11 mock-client seam** are Low — pick up opportunistically or when a dependent feature (#7, #9) makes them cheap.
+1. **High-priority safety/durability next:** #6 (Tool Safety Modes) and #7 (WAL Resumption) — both High, both core to the SRE stress-test. **#6a (capability mask) is done**; continue with #6b (tiers + policy + ceiling) → #6c (LLM risk evaluator) → #6d (mTLS-WebSocket escalation channel + human-in-the-loop).
+2. **#12 Remote MCP** when L4 integration becomes concrete (it's the bridge that makes any L4 control plane useful). Note: #6d's WebSocket channel and #12 share the same WSS/transport muscle — the remote-agent generalization of #6d rides on it.
+3. **#13 shared artifact store**, **#11 mock-client seam**, and **#14 audit log** are opportunistic — pick up when a dependent feature makes them cheap. #14 shares an append-only-JSONL writer with #7 (WAL) and is the natural home to fix the `$0.000000` cost-estimator bug.
 4. **#2 Gemini Interactions** stays deferred unless OpenRouter coverage proves insufficient.
 
 Pillar/Tenet alignment for each item is in [`progress.md`](progress.md) (the backlog table) and detailed in [`backlog.md`](backlog.md).
