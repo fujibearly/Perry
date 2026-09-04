@@ -139,7 +139,7 @@ Rides the existing `AICHAT_AGENT_DEPTH` channel:
 | FR-6b.1/6b.2/6b.3 | `BlastRadius`, `reversible*` fields | `function.rs` | Enum w/ `Ord`; map legacy `mode`; unit tests for ordering + mapping |
 | FR-6b.4 | Protected Policy File loader + matcher | new `src/safety.rs` | Load owner-only file; `policy_tier(action) -> BlastRadius | Forbidden`; can only raise |
 | FR-6b.5/6b.6 | ceiling compare + env propagation | `agent_loop.rs` | `required_authority(action) <= ceiling` else `authority_exceeded`; child ceiling = min(self, granted) |
-| FR-6b.7 | escalation record schema (reserved) | `src/safety.rs` | `struct EscalationRecord { …, nonce, signature }` defined now, unused until #6d |
+| FR-6b.7 | escalation/verdict message schema (reserved) | `src/safety.rs` | `struct EscalationMsg { …, agent_id, tree_id, challenge/nonce }` + `VerdictMsg` defined now (typed WS messages, unused until #6d) |
 | FR-6c.1 | `%assess-risk%` role asset | `assets/roles/%assess-risk%.md` | Terse structured-verdict prompt, `%explain-shell%` shape |
 | FR-6c.2 | evaluator invocation w/ dedicated model | `src/safety.rs` + client | Build a minimal `Input` with `safety.risk_model`; parse JSON verdict |
 | FR-6c.3 | minimal-context builder | `src/safety.rs` | Only {tool, resolved args, static tier, reversibility, this-step intent}; explicitly exclude history |
@@ -161,9 +161,9 @@ Rides the existing `AICHAT_AGENT_DEPTH` channel:
 ## Key Design Decisions
 
 - **New module `src/safety.rs`.** Classification, policy loading, the evaluator invocation +
-  stricter-only clamp, and the escalation record/HMAC live in one cohesive module with a small,
-  pure, heavily-unit-tested core (`required_authority`, `clamp_verdict`, `policy_tier`, record
-  sign/verify). `agent_loop.rs` calls into it; `function.rs` only holds the metadata fields.
+  stricter-only clamp, and the escalation/verdict message types live in one cohesive module with a
+  small, pure, heavily-unit-tested core (`required_authority`, `clamp_verdict`, `policy_tier`).
+  `agent_loop.rs` calls into it; `function.rs` only holds the metadata fields.
 - **Metadata is skip-serialized.** Governance is invisible to the LLM (consistent with `output`),
   so the model can't reason about — or be manipulated through — its own guardrails.
 - **Fail-safe defaults everywhere.** *Unclassified* tool (no `mode`/`risk`, incl. MCP) → reserved
@@ -219,12 +219,11 @@ Rides the existing `AICHAT_AGENT_DEPTH` channel:
 
 - Pure-core unit tests (in `src/safety.rs`): tier ordering; legacy-mode mapping; `required_authority`
   with/without proven reversibility; `policy_tier` raise-only; `clamp_verdict` stricter-only (a
-  permissive verdict is a no-op; a stricter one raises); record sign/verify (valid accepts, tampered
-  rejects, wrong-secret rejects).
+  permissive verdict is a no-op; a stricter one raises).
 - `agent_loop.rs` tests: masked child denies a mutating tool (`capability_denied`); over-ceiling →
   `authority_exceeded`; `Safe` fast-path skips evaluator (assert no evaluator call via a mock seam);
-  escalation record round-trips through the file rendezvous with a mock parent verdict; HALT/REVERT/
-  CONTINUE dispatch; sibling parallelism unaffected by a suspended branch.
+  escalation `Escalation`/`Verdict` messages round-trip over the WebSocket channel with a mock parent
+  verdict; HALT/REVERT/CONTINUE dispatch; sibling parallelism unaffected by a suspended branch.
 - Evaluator tested with a **mock verdict** (deterministic), never a live model.
 - Full `cargo test` green at the end of each phase (NFR-1); `cargo clippy` clean.
 - Because `eval_agent_tool_subprocess` spawns `current_exe()` (the test binary under `cargo test`),
