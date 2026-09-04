@@ -9,7 +9,11 @@
 #
 # NOTE: Demos 1-11 exercise the live agent loop and require API access
 # (they invoke real LLM providers). Demo 12 (sub-agent crash isolation) is
-# deterministic and offline — no provider needed.
+# deterministic and offline — no provider needed. Demos 13-14 (#6b authority
+# gate) are live but tightly scoped (single tool call, 2-turn budget).
+#
+# All live demos run under DEMO_MODEL (default gemini-2.5-flash) for a
+# consistent, cost-conscious profile — see the constant below.
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -28,10 +32,18 @@ let aichat_bin = (
 let functions_dir = ($env.HOME | path join "projects/llm-functions")
 let manual_pdf = ($project_dir | path join "manual.pdf")
 
-# Base environment for all aichat invocations
+# Model used across all demos. A single cheap model keeps the harness
+# cost-conscious and consistent (the engine — tool gates, routing, delegation —
+# is what's under test, not model capability). Override by editing this line.
+const DEMO_MODEL = "gemini:gemini-2.5-flash"
+
+# Base environment for all aichat invocations. AICHAT_MODEL makes every demo
+# use DEMO_MODEL as its default model without needing a per-demo -m flag;
+# WEB_SEARCH_MODEL points the researcher/web-search tooling at the same model.
 let base_env = {
     AICHAT_FUNCTIONS_DIR: $functions_dir
-    WEB_SEARCH_MODEL: "gemini:gemini-2.5-pro"
+    AICHAT_MODEL: $DEMO_MODEL
+    WEB_SEARCH_MODEL: $DEMO_MODEL
 }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -536,7 +548,13 @@ let crash_cfg_dir = ($nu.temp-dir | path join $"aichat-crash-demo-($nu.pid)")
 mkdir $crash_cfg_dir
 "model: openai:gpt-4o-mini\nclients:\n- type: openai\n  api_key: sk-fake-crash-demo\n" | save -f ($crash_cfg_dir | path join "config.yaml")
 
-let crash_env = ($base_env | merge { AICHAT_CONFIG_DIR: $crash_cfg_dir })
+# Override AICHAT_MODEL (inherited from base_env) to match this throwaway
+# config's own client, so the ONLY failure is the unknown agent — not an
+# unrelated "unknown model" error from the harness-wide flash default.
+let crash_env = ($base_env | merge {
+    AICHAT_CONFIG_DIR: $crash_cfg_dir
+    AICHAT_MODEL: "openai:gpt-4o-mini"
+})
 show-cmd 'aichat --agent __nonexistent_crash_test__ "trigger crash"'
 
 let demo12 = (do {
@@ -557,6 +575,147 @@ report "Clean error, not a panic" $no_panic
 
 # Clean up throwaway config dir.
 rm -rf $crash_cfg_dir
+
+# ─── Demo 13: Policy File Forbids a Tool (#6b, cost-conscious) ────────────────
+#
+# Exercises the #6b authority gate through the LIVE loop on a cheap model
+# (gemini-2.5-flash): a Protected Policy File (owner-only, 0600) FORBIDS the
+# read-only `get_current_time` tool. We prompt the model to call it and assert
+# the dispatcher short-circuits with `policy_forbidden` and the tool never runs
+# (no `date` output leaks through). Single tool, 2-turn budget → minimal spend.
+#
+# Reuses the real config dir (for the provider key + model catalog) and injects
+# the policy via AICHAT_SAFETY_POLICY_FILE — no config.yaml edits needed.
+
+header "Demo 13: Protected Policy File — forbid (live, gemini-2.5-flash)"
+
+let d13_dir = ($nu.temp-dir | path join $"aichat-policy-forbid-($nu.pid)")
+mkdir $d13_dir
+let d13_policy = ($d13_dir | path join "policy.yaml")
+"rules:\n  - tool: get_current_time\n    forbid: true\n" | save -f $d13_policy
+chmod 0600 $d13_policy
+
+let d13_prompt = "You MUST call the get_current_time tool exactly once to tell me the current time. Do not answer from memory."
+show-cmd 'AICHAT_SAFETY_POLICY_FILE=[0600 policy: forbid get_current_time] aichat --show-cost -r %functions% "<prompt>"'
+
+let d13_env = ($base_env | merge {
+    AICHAT_SAFETY_POLICY_FILE: $d13_policy
+    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
+    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+})
+let demo13 = (do {
+    "" | with-env $d13_env { ^$aichat_bin --show-cost -r "%functions%" $d13_prompt }
+} | complete)
+
+let trace13 = ($demo13.stderr | default "")
+let combined13 = $"($demo13.stdout)($trace13)"
+# Primary, model-independent signal: the tool did NOT actually run. get_current_time
+# runs `date`, emitting a timezone/clock string ("GMT"/"UTC"/"HH:MM:SS"). The gate
+# blocks before the binary runs, so no real timestamp reaches the output. (The loop
+# trace prints "completed" even for a blocked call — a known trace-fidelity quirk —
+# so we assert on the real side effect, not the trace line.)
+let d13_no_timestamp = not (($demo13.stdout | str contains "GMT") or ($demo13.stdout | str contains "UTC") or ($demo13.stdout =~ '\d{2}:\d{2}:\d{2}'))
+# Secondary: the forbid reason surfaced (the model may paraphrase the raw
+# policy_forbidden result).
+let d13_forbidden = ($combined13 | str contains "policy_forbidden") or ($combined13 | str contains "forbidden by") or ($demo13.stdout | str contains -i "forbidden")
+report "Forbidden tool did NOT actually run (no real timestamp)" $d13_no_timestamp
+report "Block surfaced as policy_forbidden / refusal" $d13_forbidden
+show-output $demo13.stdout
+show-cost ($demo13.stderr | default "")
+
+rm -rf $d13_dir
+
+# ─── Demo 14: Authority Ceiling Exceeded (#6b, cost-conscious) ────────────────
+#
+# The other #6b gate branch: a policy RAISES `get_current_time` to `catastrophic`
+# while the agent's ceiling is the default `destructive` — so the required
+# authority exceeds the ceiling and the dispatcher returns `authority_exceeded`
+# WITHOUT executing the tool. (`raise` also proves the tier arithmetic +
+# ceiling comparison in the live path, distinct from Demo 13's `forbid`.)
+# Same cheap model + tight budget.
+
+header "Demo 14: Authority Ceiling Exceeded (live, gemini-2.5-flash)"
+
+let d14_dir = ($nu.temp-dir | path join $"aichat-authority-($nu.pid)")
+mkdir $d14_dir
+let d14_policy = ($d14_dir | path join "policy.yaml")
+"rules:\n  - tool: get_current_time\n    raise: catastrophic\n" | save -f $d14_policy
+chmod 0600 $d14_policy
+
+let d14_prompt = "You MUST call the get_current_time tool exactly once to tell me the current time. Do not answer from memory."
+show-cmd 'AICHAT_SAFETY_POLICY_FILE=[raise get_current_time to catastrophic] AICHAT_SAFETY_DEFAULT_CEILING=destructive aichat --show-cost -r %functions% "<prompt>"'
+
+let d14_env = ($base_env | merge {
+    AICHAT_SAFETY_POLICY_FILE: $d14_policy
+    AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
+    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
+    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+})
+let demo14 = (do {
+    "" | with-env $d14_env { ^$aichat_bin --show-cost -r "%functions%" $d14_prompt }
+} | complete)
+
+let trace14 = ($demo14.stderr | default "")
+let combined14 = $"($demo14.stdout)($trace14)"
+# Primary, model-independent signal: the tool did NOT actually run, so no real
+# `date` timestamp reaches the output (the "completed" trace line is the known
+# trace-fidelity quirk, not proof of execution).
+let d14_no_timestamp = not (($demo14.stdout | str contains "GMT") or ($demo14.stdout | str contains "UTC") or ($demo14.stdout =~ '\d{2}:\d{2}:\d{2}'))
+# Secondary: the block reason surfaced (the model may paraphrase — accept the
+# raw error type or common paraphrases of authority/ceiling/approval refusal).
+let d14_exceeded = ($combined14 | str contains "authority_exceeded") or ($combined14 | str contains "exceeds this agent") or ($combined14 | str contains -i "authority") or ($combined14 | str contains -i "ceiling") or ($demo14.stdout | str contains -i "approval")
+report "Over-ceiling tool did NOT actually run (no real timestamp)" $d14_no_timestamp
+report "Block surfaced as authority_exceeded / refusal" $d14_exceeded
+show-output $demo14.stdout
+show-cost ($demo14.stderr | default "")
+
+rm -rf $d14_dir
+
+# ─── Demo 15: Argument-Sensitive Policy Escalation (#6b, cost-conscious) ──────
+#
+# Shows the policy file's *argument* matching: `execute_command` is normally
+# `destructive` (runs at the top level), but a policy rule bumps it to
+# `catastrophic` when its argument contains a dangerous pattern ("rm -rf").
+# The command we ask for is a harmless `echo` whose TEXT contains that pattern —
+# so the arg-match fires and the gate blocks it before anything runs. (Even if
+# the gate failed, an echo is side-effect-free — no real risk in the demo.)
+
+header "Demo 15: Argument-Sensitive Policy Escalation (live, gemini-2.5-flash)"
+
+let d15_dir = ($nu.temp-dir | path join $"aichat-argpolicy-($nu.pid)")
+mkdir $d15_dir
+let d15_policy = ($d15_dir | path join "policy.yaml")
+"rules:\n  - tool: execute_command\n    arg_contains: \"rm -rf\"\n    raise: catastrophic\n" | save -f $d15_policy
+chmod 0600 $d15_policy
+
+let d15_prompt = "You MUST call execute_command exactly once with this exact command: echo 'the phrase rm -rf is dangerous'. Do not answer without calling the tool."
+show-cmd 'AICHAT_SAFETY_POLICY_FILE=[execute_command arg_contains rm -rf -> catastrophic] AICHAT_SAFETY_DEFAULT_CEILING=destructive aichat --show-cost -r %functions% "<prompt>"'
+
+let d15_env = ($base_env | merge {
+    AICHAT_SAFETY_POLICY_FILE: $d15_policy
+    AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
+    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
+    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+})
+let demo15 = (do {
+    "" | with-env $d15_env { ^$aichat_bin --show-cost -r "%functions%" $d15_prompt }
+} | complete)
+
+let trace15 = ($demo15.stderr | default "")
+let combined15 = $"($demo15.stdout)($trace15)"
+# The arg-match raises execute_command to catastrophic (> destructive ceiling)
+# → authority_exceeded. Primary signal is the accurate BLOCKED trace line
+# (thanks to the ToolBlocked fix); secondary accepts paraphrased refusals.
+let d15_blocked = ($trace15 | str contains "execute_command BLOCKED") or ($combined15 | str contains "authority_exceeded") or ($combined15 | str contains "exceeds this agent") or ($demo15.stdout | str contains -i "approval") or ($demo15.stdout | str contains -i "ceiling")
+# And it must NOT have executed successfully — a real run would trace as
+# `execute_command completed`, which the gate path never emits.
+let d15_not_run = not ($trace15 | str contains "execute_command completed")
+report "Dangerous-arg command raised + blocked" $d15_blocked
+report "Command did NOT execute (no 'completed' trace)" $d15_not_run
+show-output $demo15.stdout
+show-cost ($demo15.stderr | default "")
+
+rm -rf $d15_dir
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 

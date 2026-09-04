@@ -2918,6 +2918,18 @@ impl Config {
         if let Some(Some(v)) = read_env_value::<f64>(&get_env_name("agent_loop_max_cost")) {
             self.agent_loop.max_cost = v;
         }
+
+        // Safety overrides (backlog #6b)
+        if let Ok(v) = env::var(get_env_name("safety_policy_file")) {
+            if !v.is_empty() {
+                self.safety.policy_file = Some(PathBuf::from(v));
+            }
+        }
+        if let Ok(v) = env::var(get_env_name("safety_default_ceiling")) {
+            if let Some(tier) = BlastRadius::from_str(&v) {
+                self.safety.default_ceiling = tier;
+            }
+        }
     }
 
     fn load_functions(&mut self) -> Result<()> {

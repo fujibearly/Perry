@@ -122,7 +122,9 @@ pub fn proven_reversible(decl: &FunctionDeclaration, artifact_registered: bool) 
 ///   (reserved to humans, for now — sits above every autonomous ceiling).
 /// - Otherwise the base tier is the **more dangerous** of the tool's static
 ///   tier and any policy-imposed floor (`policy_tier`, which can only *raise*).
-/// - Proven reversibility then lowers the required authority by one step.
+/// - Proven reversibility then lowers the required authority by one step —
+///   except at `Catastrophic`, which is a hard human-only floor that
+///   reversibility cannot discount.
 ///
 /// This is the pure heart of #6b. The `#6c` evaluator may later *raise* the base
 /// or *withhold* the reversibility credit, never the reverse (stricter-only).
@@ -153,7 +155,14 @@ pub fn required_authority(
         },
     };
 
-    let effective = if proven_reversible {
+    // Proven reversibility lowers the required authority by one step — EXCEPT at
+    // `Catastrophic`, which is a hard floor: a catastrophic action is reserved to
+    // a human regardless of any reversibility claim. This keeps a policy-imposed
+    // `Catastrophic` raise (or an intrinsically-catastrophic tool) from being
+    // silently discounted into an autonomous ceiling by a `reversible: true` flag
+    // — the flag is set by the tool author and must not be able to undercut the
+    // non-pardonable catastrophic floor.
+    let effective = if proven_reversible && base != BlastRadius::Catastrophic {
         one_step_down(base)
     } else {
         base
@@ -565,6 +574,34 @@ mod tests {
             ),
             RequiredAuthority::Tier(Disruptive)
         );
+    }
+
+    #[test]
+    fn catastrophic_is_a_hard_floor_reversibility_cannot_discount() {
+        // A policy raise to Catastrophic must NOT be discounted by proven
+        // reversibility — catastrophic is human-only regardless. (Regression:
+        // a reversible `safe` tool policy-raised to catastrophic previously
+        // dropped to Destructive and slipped under a Destructive ceiling.)
+        assert_eq!(
+            required_authority(
+                StaticTier::Tier(Safe),
+                Some(PolicyOutcome::Raise(Catastrophic)),
+                true
+            ),
+            RequiredAuthority::Tier(Catastrophic)
+        );
+        // Same for an intrinsically-catastrophic tool that claims reversibility.
+        assert_eq!(
+            required_authority(StaticTier::Tier(Catastrophic), None, true),
+            RequiredAuthority::Tier(Catastrophic)
+        );
+        // And a Destructive ceiling must NOT permit it.
+        let ceiling = AuthorityCeiling::UpTo(Destructive);
+        assert!(!ceiling.permits(required_authority(
+            StaticTier::Tier(Safe),
+            Some(PolicyOutcome::Raise(Catastrophic)),
+            true
+        )));
     }
 
     // --- AuthorityCeiling ---

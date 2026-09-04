@@ -58,6 +58,14 @@ pub enum AgentLoopEvent {
         duration: Duration,
         success: bool,
     },
+    /// A tool call was refused by a safety gate (#6a capability mask, or #6b
+    /// authority ceiling / protected policy) before the tool ran. Distinct from
+    /// `ToolComplete` so the trace does not misleadingly say "completed" for an
+    /// action that never executed.
+    ToolBlocked {
+        name: String,
+        reason: String,
+    },
     SubAgentStart {
         agent_name: String,
         pid: u32,
@@ -237,6 +245,19 @@ pub async fn eval_tool_calls_parallel(
                             }
                         }
 
+                        // A safety gate (#6a/#6b) returns its denial as an Ok
+                        // result *without running the tool*. Emit a distinct
+                        // `ToolBlocked` event (not `ToolComplete`) so the trace
+                        // is truthful, and skip output routing (nothing ran).
+                        if let Some(reason) = safety_block_reason(&value) {
+                            progress.emit(AgentLoopEvent::ToolBlocked {
+                                name: call.name.clone(),
+                                reason,
+                            });
+                            progress.remove_active_tool(&call.name);
+                            return ToolResult::new(call, value);
+                        }
+
                         progress.emit(AgentLoopEvent::ToolComplete {
                             name: call.name.clone(),
                             duration,
@@ -329,6 +350,12 @@ fn capability_denied_result(
 
     // The planning scratchpad is internal and never mutates state.
     if tool_name == "_plan" {
+        return None;
+    }
+    // Decision (B): delegating to a sub-agent is orchestration, not actuation.
+    // A masked agent may still delegate — the grandchild inherits the mask and
+    // its own actions stay gated. So delegation is not blocked by the mask.
+    if call_targets_agent(config, tool_name) {
         return None;
     }
     if !under_readonly_mask() {
@@ -437,6 +464,29 @@ fn string_args_of(call: &ToolCall) -> Vec<String> {
     out
 }
 
+/// Whether a tool call targets a sub-agent (agent-flagged function that names a
+/// real agent), i.e. it is a delegation rather than a direct tool actuation.
+///
+/// Backlog #6b / decision (B): delegating to a sub-agent is *orchestration*, not
+/// actuation — the real actuation risk is what the sub-agent *does*, which is
+/// gated inside the child's own process (its inherited capability mask + authority
+/// ceiling). So the delegation call itself is not subject to the authority gate.
+fn call_targets_agent(config: &GlobalConfig, tool_name: &str) -> bool {
+    let config_read = config.read();
+    let has_agent_flag = if let Some(agent) = &config_read.agent {
+        agent
+            .functions()
+            .find(tool_name)
+            .map_or(false, |f| f.agent)
+    } else {
+        config_read
+            .functions
+            .find(tool_name)
+            .map_or(false, |f| f.agent)
+    };
+    has_agent_flag && crate::config::list_agents().contains(&tool_name.to_string())
+}
+
 /// If the blast-radius authority ceiling (or the Protected Policy File) forbids
 /// this tool call, return the structured denial result (backlog #6b).
 ///
@@ -452,6 +502,13 @@ fn authority_denied_result(config: &GlobalConfig, call: &ToolCall) -> Option<ser
     use crate::safety::{required_authority, PolicyFile, PolicyOutcome, RequiredAuthority};
 
     if call.name == "_plan" {
+        return None;
+    }
+
+    // Decision (B): delegating to a sub-agent is orchestration, not actuation —
+    // do not gate the delegation itself. The sub-agent's own actions are gated
+    // inside its process (capability mask + authority ceiling, propagated via env).
+    if call_targets_agent(config, &call.name) {
         return None;
     }
 
@@ -501,6 +558,22 @@ fn authority_denied_result(config: &GlobalConfig, call: &ToolCall) -> Option<ser
             )
         }
     }))
+}
+
+/// Extract the safety-gate denial reason from a tool result, if it is one.
+///
+/// The #6a capability gate and the #6b authority/policy gate both return their
+/// refusals as structured `Ok` values (so the model sees them verbatim) — they
+/// are NOT executions. This inspects the result's `error.type` for the gate
+/// reasons so the dispatcher can emit `ToolBlocked` instead of `ToolComplete`.
+fn safety_block_reason(value: &serde_json::Value) -> Option<String> {
+    let err_type = value.get("error")?.get("type")?.as_str()?;
+    match err_type {
+        "capability_denied" | "authority_exceeded" | "policy_forbidden" => {
+            Some(err_type.to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Dispatch a single tool call asynchronously.
@@ -571,22 +644,7 @@ async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serd
 
     // Route 2: Agent tools (subprocess delegation)
     {
-        let is_agent = {
-            let config_read = config.read();
-            let has_agent_flag = if let Some(agent) = &config_read.agent {
-                agent
-                    .functions()
-                    .find(&call.name)
-                    .map_or(false, |f| f.agent)
-            } else {
-                config_read
-                    .functions
-                    .find(&call.name)
-                    .map_or(false, |f| f.agent)
-            };
-            has_agent_flag && crate::config::list_agents().contains(&call.name)
-        };
-        if is_agent {
+        if call_targets_agent(config, &call.name) {
             let (result, sub_cost) = eval_agent_tool_subprocess(config, call).await?;
             // Sub-agent cost will be aggregated by the caller via progress.add_cost()
             // We encode it in the result metadata for the parallel dispatcher to pick up.
@@ -1242,6 +1300,9 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
             let status = if *success { "completed" } else { "FAILED" };
             Some(format!("{pid} {name} {status} ({:.1}s)", duration.as_secs_f64()))
         }
+        AgentLoopEvent::ToolBlocked { name, reason } => {
+            Some(format!("{pid} {name} BLOCKED ({reason})"))
+        }
         AgentLoopEvent::SubAgentStart { agent_name, pid: sub_pid } => {
             Some(format!("{pid} sub-agent {agent_name} started (PID {sub_pid})"))
         }
@@ -1491,6 +1552,7 @@ fn state_from_event(event: &AgentLoopEvent) -> &'static str {
         AgentLoopEvent::CostExhausted { .. } => "cost_exhausted",
         AgentLoopEvent::ToolStart { .. } => "working",
         AgentLoopEvent::ToolComplete { .. } => "working",
+        AgentLoopEvent::ToolBlocked { .. } => "working",
         AgentLoopEvent::TurnStart { .. } => "working",
         AgentLoopEvent::SubAgentStart { .. } => "working",
         AgentLoopEvent::SubAgentComplete { .. } => "working",
@@ -1785,6 +1847,17 @@ agent_loop:
         let line = format_trace_event(&event, pid).unwrap();
         assert!(line.contains("FAILED"));
         assert!(line.contains("12345"));
+
+        // A gate-blocked tool traces as BLOCKED (not "completed") with its reason.
+        let event = AgentLoopEvent::ToolBlocked {
+            name: "fs_write".to_string(),
+            reason: "authority_exceeded".to_string(),
+        };
+        let line = format_trace_event(&event, pid).unwrap();
+        assert!(line.contains("fs_write"));
+        assert!(line.contains("BLOCKED"));
+        assert!(line.contains("authority_exceeded"));
+        assert!(!line.contains("completed"));
     }
 
     #[test]
@@ -2422,6 +2495,13 @@ agent_loop:
             "working"
         );
         assert_eq!(
+            state_from_event(&AgentLoopEvent::ToolBlocked {
+                name: "t".into(),
+                reason: "policy_forbidden".into()
+            }),
+            "working"
+        );
+        assert_eq!(
             state_from_event(&AgentLoopEvent::SubAgentStart {
                 agent_name: "a".into(),
                 pid: 1
@@ -2761,5 +2841,21 @@ agent_loop:
             Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
             None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
         }
+    }
+
+    #[test]
+    fn safety_block_reason_recognizes_gate_denials_only() {
+        // The three gate denial types are recognized...
+        for t in ["capability_denied", "authority_exceeded", "policy_forbidden"] {
+            let v = json!({"error": {"type": t, "message": "x"}});
+            assert_eq!(safety_block_reason(&v).as_deref(), Some(t));
+        }
+        // ...but a genuine tool execution error is NOT a "block" (the tool ran
+        // and failed — that must still trace as a real completion/failure).
+        let exec_err = json!({"error": {"type": "tool_execution_error", "message": "boom"}});
+        assert_eq!(safety_block_reason(&exec_err), None);
+        // A normal successful result is not a block.
+        assert_eq!(safety_block_reason(&json!({"output": "ok"})), None);
+        assert_eq!(safety_block_reason(&json!("DONE")), None);
     }
 }
