@@ -59,4 +59,14 @@ This repository maintains continuous, chronological session handoff summaries do
      * **Consolidated** `roadmap.md` + `progress.md` + `backlog.md` into a single `roadmap.md` (Roadmap / Traction+canonical Status Table / Backlog views, anti-drift rule); deleted the two merged files; repointed live nav links.
      * **State:** on branch `feat/tool-safety-6b` @ `a3e8eb6` (unmerged); documentation batch uncommitted; nothing pushed (intentional). **Next: #6c** (`%assess-risk%` LLM evaluator) off `feat/tool-safety-6b`.
 
+6. **Session 6: Backlog #6c Committed & #6d Part 1 — mTLS Escalation Channel Transport + Auth Core**
+   * **Period:** `2026-09-02` (distinct session, same day as Sessions 3–5)
+   * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-02-session6.md`](.kiro/docs/session-summary-2026-09-02-session6.md) · **Continuation guide:** [`.kiro/docs/handover-6d-part2.md`](.kiro/docs/handover-6d-part2.md)
+   * **Focus Areas:**
+     * **Committed Backlog #6c** (`58af926`) — the `%assess-risk%` LLM evaluator overlay (stricter-only, `Safe` fast-path, fail-toward, raise-only `RiskCache`).
+     * **Evaluated the #6d transport/dependency question** with the user → **Path 1′**: build mutual-TLS now over the in-tree `tokio-rustls` with **hand-rolled length-delimited JSON framing — NOT WebSocket** (deferred behind the `EscalationTransport` trait). Dependency audit: fork had added only 1 crate since upstream; declined `tokio-tungstenite`. Only new crate `rcgen` (+ tiny `yasna`); `rustls` stays single-version, no OpenSSL.
+     * **Implemented + committed Backlog #6d part 1** (`d40bccc`) — new `src/escalation.rs`: mTLS transport, ephemeral `rcgen` per-tree cert, fingerprint-pinning rustls verifier (**fail-closed**), **channel-bound HMAC** child auth (no static token), typed `Upstream`/`Downstream` protocol + length-delimited framing. +14 tests incl. **end-to-end localhost mTLS handshake** (legit authenticates; wrong fingerprint rejected by child; wrong tree-secret rejected by parent). Suite **424 unit / 432 workspace, 0 fail**.
+     * **Wrote + committed a #6d part-2 handover doc** (`208f31c`) for the loop-integration half.
+     * **State:** on branch `feat/tool-safety-6d` @ `208f31c` (unmerged); nothing pushed (intentional). **Next: #6d part 2** (loop integration — child escalation handler, verdict verbs, rollback journal, upward propagation, human-in-the-loop) per the handover doc.
+
 
