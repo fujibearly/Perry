@@ -69,6 +69,18 @@ fuzzy-matcher = "0.3.7"
 terminal-colorsaurus = "0.4.8"
 duct = "1.0.0"
 async-stream = "0.3.6"
+# #6d (tool-safety escalation channel): generate ephemeral, in-memory, self-signed
+# per-agent-tree certs for the mutual-TLS control channel. rustls-family crate (reuses
+# our existing `ring` + `rustls-pki-types`); pure-Rust, no OpenSSL. `default-features
+# = false` avoids the PEM/x509-parser extras — we work with DER in memory.
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+# #6d: mutual-TLS loopback control channel. These are ALREADY in the tree transitively
+# (via reqwest's rustls-tls); declaring them directly lets `escalation.rs` use the mTLS
+# stack + custom fingerprint-pinning verifier. Pinned to the in-tree versions so no new
+# crates are pulled. `ring` crypto provider matches reqwest/rcgen (no second backend).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+rustls-pki-types = "1"
 
 [dependencies.reqwest]
 version = "0.12.0"

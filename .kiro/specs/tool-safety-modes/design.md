@@ -279,6 +279,36 @@ authoritative for the #6c as-shipped behavior.
   runs through the same gate but with no shared `RiskCache` (it is a derived call outside the turn
   loop) — still fully gated, just evaluated fresh rather than cache-reused.
 
+## As-Built Notes — #6d transport decision (Path 1′)
+
+Authoritative for the #6d as-shipped transport. The escalation channel's **security model and
+message protocol are exactly as designed above** (mTLS, ephemeral in-memory per-tree keypair,
+fingerprint pinning, channel-bound challenge–response, loopback-only; typed
+`Hello`/`Event`/`Escalation`/`Result`/`Verdict`/`Cancel`). Only the **wire framing** changed.
+
+- **mTLS over a raw loopback TCP stream + hand-rolled length-delimited JSON framing — not
+  WebSocket.** Frames are a 4-byte big-endian length prefix followed by `serde_json` bytes, read/
+  written over `tokio_rustls::TlsStream`. WebSocket framing (masking, opcodes, ping/pong, close
+  handshake) is browser/HTTP-proxy machinery that a parent↔child loopback channel does not need.
+- **Why not `tokio-tungstenite`.** Adding it would double the fork's dependency additions for a
+  framing layer we don't use; the user's explicit dependency-brittleness concern tipped this. TLS —
+  the security-critical and remote-valuable part — is built now and reuses the `tokio-rustls`
+  already in the tree (via reqwest). The only new crate is `rcgen` (+ its tiny `yasna` transitive)
+  for ephemeral self-signed cert generation; `rustls`/`ring`/`rustls-pki-types` are reused with no
+  second TLS backend and no OpenSSL (bastion-friendly).
+- **`EscalationTransport` trait seam preserves the remote goal.** The transport is abstracted behind
+  a trait carrying the typed messages + the auth handshake contract; the loopback-TLS impl is the
+  only concrete impl now. A **WebSocket-over-routable-TLS** transport can be added as a second impl
+  *when a remote deployment (proxy/browser in the path) actually needs it* — no protocol or auth
+  redesign, satisfying FR-6d.12. This is a deliberate deferral, not a drop: the hard part (mutual
+  TLS) ships now; only the (browser-oriented) framing is deferred until it has a real consumer.
+- **Custom rustls verifiers are the security-critical core.** Fingerprint pinning is implemented via
+  `ClientConfig`/`ServerConfig` `.dangerous().with_custom_certificate_verifier(...)`. Getting this
+  right (fail-closed on any error, bind the challenge to the TLS session, reject on fingerprint
+  mismatch or replay) is where the care and the most thorough tests go.
+- Wherever the design/requirements above say "WSS"/"WebSocket", read "mutual-TLS loopback stream
+  (WS framing deferred behind the transport trait)".
+
 ## Threat Model (explicit, per NFR-2/3/4)
 
 1. **Prompt injection into the evaluator** — a tool's arguments or fetched content tries to coerce a

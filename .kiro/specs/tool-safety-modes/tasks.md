@@ -84,13 +84,21 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 
 ## Phase #6d — Escalation & Control Protocol + Human-in-the-Loop (branch `feat/tool-safety-6d`)
 
-- [ ] 6d.1 WSS listener in the parent: bind loopback (`127.0.0.1:<port>`) at spawn; pass
-      `AICHAT_AGENT_PARENT_ADDR` + `AICHAT_AGENT_TOKEN` + `AICHAT_TREE_SECRET` to the child via env. Child dials back. (FR-6d.2)
-- [ ] 6d.2 Mutual auth (mTLS, no CA): parent generates ephemeral per-tree keypair (in-memory); child pins parent
-      fingerprint + presents credential derived from the tree secret; channel-bound challenge–response; reject
-      connections failing the handshake. Unit tests (valid connects / wrong-cred rejected / replay rejected). (FR-6d.3, NFR-3)
+> **Transport (Path 1′):** mutual-TLS over a raw loopback TCP stream + hand-rolled length-delimited
+> JSON framing (via `tokio-rustls`, already in the tree; only `rcgen` added). NOT WebSocket — WS
+> framing is deferred behind an `EscalationTransport` trait until a remote deployment needs it. The
+> auth model and message protocol are unchanged from the design. See design.md "As-Built Notes — #6d".
+
+- [ ] 6d.1 mTLS listener in the parent: bind loopback (`127.0.0.1:<port>`) at spawn via `tokio-rustls`;
+      pass `AICHAT_AGENT_PARENT_ADDR` + `AICHAT_AGENT_TOKEN` + `AICHAT_TREE_SECRET` to the child via env.
+      Child dials back; length-delimited JSON framing over the TLS stream. (FR-6d.2)
+- [ ] 6d.2 Mutual auth (mTLS, no CA): parent generates ephemeral per-tree keypair in-memory (`rcgen`); child
+      pins parent fingerprint + presents credential derived from the tree secret; channel-bound
+      challenge–response; custom rustls verifier fails closed; reject connections failing the handshake.
+      Unit tests (valid connects / wrong-fingerprint rejected / replay rejected). (FR-6d.3, NFR-3)
 - [ ] 6d.3 Typed message protocol in `safety.rs`: Hello / Event / Escalation / Result upstream; Verdict / Cancel
-      downstream. Transport-independent (works over loopback WSS now, routable WSS later). Unit-test (de)serialization. (FR-6d.4)
+      downstream. Transport-independent (works over the loopback TLS stream now, routable TLS/WS later).
+      Unit-test (de)serialization. (FR-6d.4)
 - [ ] 6d.4 Child connection handler: on a pending over-ceiling/hesitant action, send `Escalation`, then **block on
       `recv()`** for a `Verdict` (no polling), up to `verdict_timeout_secs`. (FR-6d.1/6d.4)
 - [ ] 6d.5 Verdict verbs handled **in the child**: HALT (graceful stop before action), REVERT (replay durable
@@ -104,21 +112,24 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 - [ ] 6d.9 Liveness from connection state: child EOFs on parent death, parent errors on child death (replaces
       `/proc` scanning). Graceful Cancel/HALT via connection; signal-kill an unresponsive child on timeout. Test offline. (FR-6d.9/6d.10)
 - [ ] 6d.10 Branch-scoped suspension: verify a lineage blocked on a verdict does not block `join_all` siblings. Async test. (FR-6d.11)
-- [ ] 6d.11 Offline demo in `scripts/run-demos.nu` (à la Demo 12): real parent↔child escalation over a loopback WSS
-      connection between spawned processes — assert mutual-auth rejection of an unauthenticated connection, verdict
+- [ ] 6d.11 Offline demo in `scripts/run-demos.nu` (à la Demo 12): real parent↔child escalation over a loopback mTLS
+      connection between spawned processes — assert mutual-auth rejection of a wrong-fingerprint connection, verdict
       verbs, journal-based REVERT survives a killed child, and branch-only suspension. (Verification, FR-6d.12 hooks)
 - [ ] 6d.12 `cargo test` + `cargo clippy` green; degrade check: disabling #6d ⇒ over-ceiling/hesitant actions block
       exactly as #6b/#6c. (NFR-1/6)
-- [ ] 6d.13 Docs: full funnel diagram, the WebSocket channel (topology, mTLS, message protocol, control-vs-durability
-      planes), human/Layer-3 paths, threat model, and the remote-generalization hook. (FR-6d.12)
+- [ ] 6d.13 Docs: full funnel diagram, the mTLS channel (topology, mutual auth, message protocol, control-vs-durability
+      planes, WS-deferred-behind-trait rationale), human/Layer-3 paths, threat model, and the remote-generalization hook. (FR-6d.12)
 
 ## Cross-cutting / Land
 
-- [ ] X.1 Update `.kiro/docs/backlog.md`: replace the #6 body with the #6a–#6d decomposition (umbrella + sub-items),
-      referencing this spec.
-- [ ] X.2 Update `.kiro/docs/progress.md` #6 row to reflect the staged plan and per-phase status.
-- [ ] X.3 Update architecture docs with the decision-funnel and the new `src/safety.rs` module.
-- [ ] X.4 Session summary entry when the first increment (#6a) lands.
+- [x] X.1 ~~Update `.kiro/docs/backlog.md`~~ — **superseded.** `backlog.md` + `progress.md` were
+      consolidated into a single [`.kiro/docs/roadmap.md`](../../docs/roadmap.md) (Session 5), which
+      carries the #6/#6a–#6d decomposition in its Backlog view + canonical Status Table.
+- [x] X.2 ~~Update `.kiro/docs/progress.md`~~ — **superseded** by the same consolidation; per-phase
+      status now lives once in the roadmap.md Status Table.
+- [x] X.3 Architecture docs updated with the decision-funnel and `src/safety.rs` module (#6a–#6c
+      landed; #6d section added in 6d.13).
+- [x] X.4 Session summary entry added when #6a landed (Session 4); Session 5 covers #6b/#6c.
 
 ## Notes
 

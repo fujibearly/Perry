@@ -668,8 +668,13 @@ impl RiskCache {
 }
 
 // ---------------------------------------------------------------------------
-// Escalation / verdict message schema (reserved for #6d — defined here so the
-// wire format is stable across increments; not yet used by any transport).
+// Escalation / control message protocol (#6d).
+//
+// Transport-independent typed messages exchanged over the mutual-TLS control
+// channel (`src/escalation.rs`). The wire framing (length-delimited JSON over a
+// loopback `tokio_rustls::TlsStream`) and the mutual-auth handshake live in that
+// module; these types define *what* is exchanged, so the protocol is stable and
+// generalizes to a future remote transport (FR-6d.4/6d.12).
 // ---------------------------------------------------------------------------
 
 /// A verdict verb the invoking agent issues in response to an escalation (#6d).
@@ -685,14 +690,26 @@ pub enum VerdictDecision {
     Continue,
 }
 
-/// Escalation request sent **child → parent** over the #6d WebSocket channel when
-/// an action exceeds the agent's ceiling or the evaluator hesitates.
+/// Handshake greeting sent **child → parent** as the first message after the
+/// mutual-TLS handshake completes (#6d, FR-6d.4).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HelloMsg {
+    /// The connecting child's identity within the tree.
+    pub agent_id: String,
+    /// The child's spawn depth (0 = orchestrator's direct child).
+    pub depth: usize,
+    /// Free-form capability advertisement (reserved; e.g. supported verbs).
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+/// Escalation request sent **child → parent** when an action exceeds the agent's
+/// ceiling or the evaluator hesitates. The child then blocks awaiting a
+/// [`VerdictMsg`] on the open connection (no polling).
 ///
-/// Reserved in #6b so the message schema (including the security-relevant
-/// `tree_id` / `challenge` fields for #6d's mutual-auth handshake) is fixed
-/// before the transport is built. Not yet constructed anywhere.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)] // wired up in #6d
+/// The schema (including the security-relevant `tree_id` / `challenge` fields for
+/// the mutual-auth handshake) was reserved in #6b so the wire format is stable.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EscalationMsg {
     /// Correlates this escalation with its verdict.
     pub id: String,
@@ -714,9 +731,24 @@ pub struct EscalationMsg {
     pub challenge: String,
 }
 
+/// Terminal success sent **child → parent** when the child finishes its task.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ResultMsg {
+    /// The child's final output payload.
+    pub output: serde_json::Value,
+    /// Accumulated cost attributed to the child (USD).
+    #[serde(default)]
+    pub cost: f64,
+}
+
+/// Terminal error sent **child → parent** when the child fails.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ErrorMsg {
+    pub message: String,
+}
+
 /// Verdict sent **parent → child** in response to an [`EscalationMsg`] (#6d).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)] // wired up in #6d
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VerdictMsg {
     /// Must match the originating [`EscalationMsg::id`].
     pub escalation_id: String,
@@ -725,6 +757,40 @@ pub struct VerdictMsg {
     /// Optional context the parent adds to guide a `Continue` retry.
     #[serde(default)]
     pub added_context: Option<serde_json::Value>,
+}
+
+/// Cooperative cancellation sent **parent → child** (generalizes HALT beyond an
+/// escalation — e.g. a sibling failed and the whole branch is being torn down).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CancelMsg {
+    /// Human-readable reason (for the child's trace / final output).
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Envelope for messages flowing **child → parent** (upstream).
+///
+/// `#[serde(tag = "type")]` gives a self-describing, forward-compatible wire form
+/// (`{"type":"escalation", ...}`) that is easy to route on and to extend.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UpstreamMsg {
+    Hello(HelloMsg),
+    /// A live agent-loop trace event, forwarded for tree-wide observability.
+    /// Carried as opaque JSON to avoid coupling the protocol to the loop's event
+    /// enum shape (the loop can serialize whatever it emits).
+    Event(serde_json::Value),
+    Escalation(EscalationMsg),
+    Result(ResultMsg),
+    Error(ErrorMsg),
+}
+
+/// Envelope for messages flowing **parent → child** (downstream).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum DownstreamMsg {
+    Verdict(VerdictMsg),
+    Cancel(CancelMsg),
 }
 
 #[cfg(test)]
@@ -1289,5 +1355,70 @@ mod tests {
             let back: VerdictMsg = serde_json::from_str(&s).unwrap();
             assert_eq!(back.decision, verb);
         }
+    }
+
+    // --- #6d: envelope enums route by `type` tag ---
+
+    #[test]
+    fn upstream_envelope_round_trips_all_variants() {
+        let esc = EscalationMsg {
+            id: "e1".into(),
+            agent_id: "a".into(),
+            tree_id: "t".into(),
+            action: serde_json::json!({"tool": "fs_rm"}),
+            reason: "r".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: Destructive,
+            reversible: false,
+            challenge: "n".into(),
+        };
+        let msgs = vec![
+            UpstreamMsg::Hello(HelloMsg {
+                agent_id: "a".into(),
+                depth: 1,
+                capabilities: vec!["revert".into()],
+            }),
+            UpstreamMsg::Event(serde_json::json!({"kind": "ToolStart", "name": "x"})),
+            UpstreamMsg::Escalation(esc),
+            UpstreamMsg::Result(ResultMsg {
+                output: serde_json::json!("done"),
+                cost: 0.01,
+            }),
+            UpstreamMsg::Error(ErrorMsg { message: "boom".into() }),
+        ];
+        for m in msgs {
+            let s = serde_json::to_string(&m).unwrap();
+            // The tag drives routing; assert it is present and lowercased snake_case.
+            assert!(s.contains("\"type\":\""), "envelope carries a type tag: {s}");
+            let back: UpstreamMsg = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, m);
+        }
+    }
+
+    #[test]
+    fn downstream_envelope_round_trips_and_tags() {
+        let verdict = DownstreamMsg::Verdict(VerdictMsg {
+            escalation_id: "e1".into(),
+            decision: VerdictDecision::Revert,
+            added_context: Some(serde_json::json!({"note": "undo it"})),
+        });
+        let cancel = DownstreamMsg::Cancel(CancelMsg {
+            reason: "sibling failed".into(),
+        });
+        for m in [verdict, cancel] {
+            let s = serde_json::to_string(&m).unwrap();
+            let back: DownstreamMsg = serde_json::from_str(&s).unwrap();
+            assert_eq!(back, m);
+        }
+        // Spot-check the tag wire form.
+        let s = serde_json::to_string(&DownstreamMsg::Cancel(CancelMsg::default())).unwrap();
+        assert!(s.contains("\"type\":\"cancel\""), "cancel tag: {s}");
+    }
+
+    #[test]
+    fn unknown_upstream_type_is_rejected_not_panicked() {
+        // A forward/garbage message must be a clean deserialize error, not a panic.
+        let r = serde_json::from_str::<UpstreamMsg>(r#"{"type":"bogus","x":1}"#);
+        assert!(r.is_err());
     }
 }

@@ -8,6 +8,14 @@ pub fn sha256(input: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// SHA-256 of raw bytes, lowercase hex. Used for certificate fingerprints
+/// (backlog #6d escalation channel).
+pub fn sha256_bytes(input: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input);
+    format!("{:x}", hasher.finalize())
+}
+
 pub fn hmac_sha256(key: &[u8], msg: &str) -> Vec<u8> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC can take key of any size");
     mac.update(msg.as_bytes());

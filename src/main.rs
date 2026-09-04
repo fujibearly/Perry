@@ -2,6 +2,7 @@ mod agent_loop;
 mod cli;
 mod client;
 mod config;
+mod escalation;
 mod function;
 #[cfg(feature = "mcp")]
 mod mcp;

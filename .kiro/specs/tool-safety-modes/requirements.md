@@ -180,17 +180,37 @@ can fall back to it.
 
 ### Phase #6d — Escalation & Control Protocol + Human-in-the-Loop
 
+> **As-built transport decision (Path 1′, supersedes the WSS specifics below).** The #6d channel
+> is implemented as **mutual-TLS over a raw loopback TCP stream with hand-rolled length-delimited
+> JSON framing** — *not* WebSocket. The **security model is unchanged** (mTLS, ephemeral in-memory
+> per-tree keypair, fingerprint pinning, channel-bound challenge–response, loopback-only) and the
+> **message protocol is unchanged** (the typed `Escalation`/`Verdict`/`Cancel`/`Hello`/`Event`/
+> `Result` set, FR-6d.4). Only the *wire framing* differs: a 4-byte length prefix + `serde_json`
+> over `tokio_rustls::TlsStream`, instead of the WebSocket framing layer.
+>
+> **Rationale.** For a parent talking to its own child on loopback, WebSocket's value (browser/HTTP-
+> proxy traversal) does not apply; its framing (masking/opcodes/ping-pong/close handshake) is
+> overhead we don't need, and `tokio-tungstenite` is a dependency the fork chose to avoid
+> (dependency-brittleness concern). TLS — the security-critical, remote-valuable part — is built now
+> and reuses the `tokio-rustls` already in the tree (only `rcgen` added, for ephemeral cert
+> generation). **The remote goal (FR-6d.12) is preserved** structurally: the transport sits behind an
+> `EscalationTransport` trait and the message protocol is transport-independent, so a WebSocket-over-
+> routable-TLS transport can be added as a second impl behind the same trait *when a remote
+> deployment (proxy/browser in path) actually needs it* — without a redesign. Wherever the FRs below
+> say "WSS"/"WebSocket", read "mutual-TLS loopback stream (WS deferred behind the transport trait)".
+
 - **FR-6d.1 — Escalation trigger.** When an action exceeds an agent's ceiling, or the evaluator
   fails/hesitates, the agent **escalates to its invoking agent** rather than deciding.
-- **FR-6d.2 — WebSocket-based inter-agent channel (child dials parent).** The parent binds a
-  **loopback WSS listener** at spawn time and passes the address + per-child credentials to the
-  child via its private spawn environment (`AICHAT_AGENT_PARENT_ADDR`, `AICHAT_AGENT_TOKEN`,
-  `AICHAT_TREE_SECRET`). The child **connects back** to the parent after starting. One parent
-  listener accepts connections from all its children (one connection per child, identified by
-  credentials). The connection is **bidirectional**: the child streams events and escalation
-  requests *upstream*; the parent pushes verdicts and cancellation *downstream*.
-  (Replaces the earlier file-rendezvous design — WebSocket eliminates polling latency, gives
-  free liveness detection via connection state, and generalizes to remote agents in the future.)
+- **FR-6d.2 — mTLS inter-agent channel (child dials parent).** The parent binds a
+  **loopback TLS listener** (`tokio-rustls`) at spawn time and passes the address + per-child
+  credentials to the child via its private spawn environment (`AICHAT_AGENT_PARENT_ADDR`,
+  `AICHAT_AGENT_TOKEN`, `AICHAT_TREE_SECRET`). The child **connects back** to the parent after
+  starting. One parent listener accepts connections from all its children (one connection per child,
+  identified by credentials). The connection is **bidirectional**: the child streams events and
+  escalation requests *upstream*; the parent pushes verdicts and cancellation *downstream*.
+  (Replaces the earlier file-rendezvous design — a persistent connection eliminates polling latency,
+  gives free liveness detection via connection state, and — being TLS — generalizes to remote agents.
+  WebSocket framing is deferred behind the transport trait per the as-built note above.)
 - **FR-6d.3 — Mutual authentication (mTLS, no CA/PKI).** Both sides MUST prove identity:
   - The parent generates an **ephemeral keypair per agent tree** at startup (in memory, never
     written to disk). The child receives the parent's **public-key fingerprint** via env to pin
