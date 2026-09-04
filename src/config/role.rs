@@ -11,6 +11,7 @@ pub const SHELL_ROLE: &str = "%shell%";
 pub const EXPLAIN_SHELL_ROLE: &str = "%explain-shell%";
 pub const CODE_ROLE: &str = "%code%";
 pub const CREATE_TITLE_ROLE: &str = "%create-title%";
+pub const ASSESS_RISK_ROLE: &str = "%assess-risk%";
 
 pub const INPUT_PLACEHOLDER: &str = "__INPUT__";
 

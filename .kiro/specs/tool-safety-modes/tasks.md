@@ -59,20 +59,28 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 
 ## Phase #6c — `%assess-risk%` LLM Evaluator (branch `feat/tool-safety-6c`)
 
-- [ ] 6c.1 Add `assets/roles/%assess-risk%.md` — terse, structured-verdict prompt (shape of `%explain-shell%`). (FR-6c.1)
-- [ ] 6c.2 Add `safety.risk_model` config; evaluator invocation builds a minimal `Input` with that model;
+- [x] 6c.1 Add `assets/roles/%assess-risk%.md` — terse, structured-verdict prompt (shape of `%explain-shell%`). (FR-6c.1)
+- [x] 6c.2 Add `safety.risk_model` config; evaluator invocation builds a minimal `Input` with that model;
       absent model → evaluator skipped (degrade to #6b). (FR-6c.2)
-- [ ] 6c.3 Minimal-context builder in `safety.rs`: only {tool, resolved args, static tier, reversibility,
+- [x] 6c.3 Minimal-context builder in `safety.rs`: only {tool, resolved args, static tier, reversibility,
       this-step intent}; explicitly exclude plan/conversation history. Unit-test the payload shape. (FR-6c.3)
-- [ ] 6c.4 `RiskVerdict` parse: tolerate malformed/partial output → `confidence: low` (no panic). Unit tests. (FR-6c.4/6c.8)
-- [ ] 6c.5 **Stricter-only clamp** (pure fn): `effective_tier = max(static_or_policy, verdict.tier)`; proof may be
+- [x] 6c.4 `RiskVerdict` parse: tolerate malformed/partial output → `confidence: low` (no panic). Unit tests. (FR-6c.4/6c.8)
+- [x] 6c.5 **Stricter-only clamp** (pure fn): `effective_tier = max(static_or_policy, verdict.tier)`; proof may be
       withheld, never granted; policy never loosened. Exhaustive unit tests incl. a permissive verdict = no-op. (FR-6c.5)
-- [ ] 6c.6 `Safe` fast-path: assert (via a mock evaluator seam) the evaluator is **not** called for `Safe`/reads. (FR-6c.6)
-- [ ] 6c.7 Two-phase: plan-time pass flags key steps; only flagged steps re-evaluated at act-time (policy floor not
-      re-checked). Unit-test the flag→recheck wiring with a mock verdict. (FR-6c.7)
-- [ ] 6c.8 Fail-toward: evaluator error/timeout/low-confidence does not permit; blocks pre-#6d. Unit test. (FR-6c.8)
-- [ ] 6c.9 `cargo test` + `cargo clippy` green; degrade check: no `risk_model` ⇒ exactly #6b behavior. (NFR-1/6)
-- [ ] 6c.10 Docs + threat note (prompt injection mitigations: minimal context, clamp, policy floor). (NFR-2)
+- [x] 6c.6 `Safe` fast-path: assert (via a mock evaluator seam) the evaluator is **not** called for `Safe`/reads. (FR-6c.6)
+- [x] 6c.7 **[As-built: superseded literal plan-time flagging]** Two-phase intent realized as a **monotonic,
+      raise-only `RiskCache`** (keyed by tool + resolved args) shared across a run: act-time evaluation is the
+      floor; a cache hit reuses the recorded authority *floor* (skips a redundant model call) and can only ever
+      *raise*, never green-light. A future whole-plan red-light pre-pass writes into the same cache. Rationale:
+      the loop is turn-based ReAct (no structured plan to flag), and letting an unflagged step skip its act-time
+      check would be an injection hole. Unit-tested (raise-only, key canonicalization, hit-blocks/hit-proceeds
+      without a model call). See design.md "As-Built Notes — #6c". (FR-6c.7)
+- [x] 6c.8 Fail-toward: evaluator error/timeout/low-confidence does not permit; blocks pre-#6d. Unit test. (FR-6c.8)
+- [x] 6c.9 `cargo test` (418 workspace: 410 unit + 5 + 3, 0 fail) + `cargo clippy` (no new warnings) green;
+      degrade check: no `risk_model` ⇒ exactly #6b behavior (all #6a/#6b gate tests unchanged). (NFR-1/6)
+- [x] 6c.10 Docs + threat note: `.kiro/architecture.md` #6c section + dispatch gate; roadmap.md status; this
+      tasks list; design.md as-built note (prompt-injection mitigations: minimal context, stricter-only clamp,
+      fail-toward, raise-only cache). (NFR-2)
 
 ## Phase #6d — Escalation & Control Protocol + Human-in-the-Loop (branch `feat/tool-safety-6d`)
 

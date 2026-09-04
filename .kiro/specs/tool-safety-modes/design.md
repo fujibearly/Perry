@@ -237,6 +237,48 @@ against the live demo harness. They are authoritative for the #6b as-shipped beh
   (argument-sensitive `raise` to catastrophic on `execute_command` matching `rm -rf`) exercise
   the gate end-to-end on a cheap model; see `scripts/run-demos.nu`.
 
+## As-Built Notes — #6c decisions made during implementation
+
+These refine the #6c design based on decisions taken while implementing it. They are
+authoritative for the #6c as-shipped behavior.
+
+- **The evaluator is act-time, not plan-time; "two-phase" became a raise-only cache.** The spec
+  proposed a plan-time pass that flags key steps, with only flagged steps re-checked at act time
+  (policy floor not re-checked). Implementation revealed two problems: (1) the agent loop is
+  turn-based ReAct — the `_plan` tool is a free-text scratchpad (`{thought: string}`), not a
+  structured list of upcoming steps, so there is nothing concrete to flag against; and (2) more
+  fundamentally, any design where an *unflagged* step skips its act-time check is a hole exactly
+  where prompt-injection attacks aim (get the model to under-declare intent). So the literal
+  two-phase model was **superseded**. Instead:
+  - **Act-time evaluation is the non-negotiable floor.** Every non-`Safe`, in-ceiling action is
+    evaluated by `%assess-risk%` (or served from cache) immediately before it runs.
+  - **A monotonic, raise-only `RiskCache`** (in `safety.rs`, keyed by tool + canonical resolved
+    args, one per `run`, shared across turns) delivers the cost win the two-phase design sought:
+    an identical action assessed once is not re-evaluated. Crucially the cache is **raise-only**
+    (`stricter_of`) — it can reuse a recorded authority *floor* to skip a model call, but can
+    never lower one, so it can pre-raise (stop earlier) but never pre-clear (green-light).
+  - **Assessment is a one-way ratchet toward "stop."** A user-framed principle adopted here: a
+    risk assessment (act-time now, or a future whole-plan pre-pass) is valuable as an *earlier,
+    cheaper red-light* with potentially better context — never as a green-light. The clamp and the
+    raise-only cache enforce this structurally.
+  - **The serious structured `_plan` is deferred to its own backlog item.** A real plan-driven
+    executor (structured steps, plan-driven execution) would enable a genuine whole-plan red-light
+    *pre-pass* — evaluating declared steps with full cross-step context and pre-raising their cache
+    floors before the agent walks toward them. That is a larger change to the loop contract than a
+    safety increment should carry, so it is a separate item; when it lands it writes into the same
+    `RiskCache` and remains strictly raise-only. The act-time floor is unchanged by its presence
+    or absence.
+- **Low confidence caches as `Human`.** A low-confidence / errored verdict fails toward blocking
+  (FR-6c.8). To keep a later identical action consistent without re-calling the model, that
+  outcome is recorded in the cache as a `Human` floor (the strictest), so reuse re-blocks
+  deterministically.
+- **Dedicated model via `set_model`.** The evaluator retrieves the `%assess-risk%` role, then
+  overrides the model with `safety.risk_model` (`Model::retrieve_model` + `role.set_model`) rather
+  than relying on role front-matter, so operators configure the evaluator model in one place.
+- **Pipe-target actuations are gated fresh.** A tool executed as an output-routing pipe target
+  runs through the same gate but with no shared `RiskCache` (it is a derived call outside the turn
+  loop) — still fully gated, just evaluated fresh rather than cache-reused.
+
 ## Threat Model (explicit, per NFR-2/3/4)
 
 1. **Prompt injection into the evaluator** — a tool's arguments or fetched content tries to coerce a

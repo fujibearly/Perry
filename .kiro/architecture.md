@@ -267,6 +267,10 @@ ToolCall arrives from LLM
   │     → return authority_exceeded / policy_forbidden result (no execution)
   │        (emits a ToolBlocked event → trace shows "BLOCKED", not "completed")
   │
+  ├─ risk evaluator (#6c): non-safe + risk_model set? consult %assess-risk%
+  │     (stricter-only clamp; Safe fast-path skips; raise-only cache reuse;
+  │      over-ceiling / low-confidence / error → return risk_blocked, no execution)
+  │
   ├─ MCP match?  → call_mcp_tool_async (await, no blocking)
   │
   ├─ agent: true? → eval_agent_tool_subprocess
@@ -373,6 +377,56 @@ dispatch gates are in `agent_loop.rs::eval_single_tool` (after the #6a capabilit
   human-reserved by default. See the `llm-functions` repo (`feat/tool-safety-classification`).
 - **Reserved for #6d.** The typed `EscalationMsg` / `VerdictMsg` (Halt/Revert/Continue) WebSocket
   message schemas are defined now (unused) so the wire format is stable across increments.
+
+### `%assess-risk%` LLM evaluator — stricter-only overlay (backlog #6c)
+
+#6c layers an *advisory* LLM risk evaluator on top of the deterministic #6b floor. Its verdict
+can only ever make an action **stricter** — never loosen a deterministic decision ("the LLM is
+not a Pardoner"). Pure logic lives in [`src/safety.rs`](../src/safety.rs); the model call and the
+dispatch wiring are in `agent_loop.rs` (after the #6b authority gate).
+
+- **The evaluator is a role, not hardcoded.** `assets/roles/%assess-risk%.md` is a terse,
+  user-editable prompt returning a single-line JSON verdict
+  `{tier, reversible, confidence, rationale, concerns[]}`. Enforcement (the clamp, fail-toward,
+  fast-path, cache) stays in Rust where it must be trustworthy.
+- **Dedicated cheap model.** `safety.risk_model` selects a small/fast model, distinct from the
+  orchestration model. **Absent `risk_model` → the evaluator is skipped entirely** and behavior
+  degrades to exactly #6b (verified by the degrade check).
+- **Minimal context (injection defense).** The evaluator sees *only*
+  `{tool, resolved arguments, static tier, reversibility, this-step intent}` — never the plan or
+  conversation history. Less surface area for an argument-borne prompt-injection to steer the
+  verdict, and the role treats arguments as untrusted data.
+- **Stricter-only clamp.** `clamp_verdict(base, verdict)` takes the *more dangerous* of the
+  deterministic authority and the verdict's tier. A permissive verdict is a no-op; a `Human`
+  base (unclassified / policy-forbid / catastrophic) is never loosened. So a compromised verdict
+  can only raise risk, never unlock.
+- **`Safe` fast-path.** `safe`-tier actions (reads) skip the evaluator entirely — the primary
+  cost/latency bound (no model call for the common case).
+- **Fail toward escalation.** A model error, timeout, or **low-confidence** verdict does *not*
+  authorize the action: it blocks (pre-#6d). An untrustworthy judgment cannot green-light an
+  already non-`Safe` action.
+- **Monotonic, raise-only risk cache (the "two-phase" seam).** A `RiskCache` (keyed by
+  `tool` + canonical resolved args) is created once per `run` and shared across turns. It is
+  **raise-only**: an entry can only ever be raised to a stricter authority, never lowered, so a
+  cache hit reuses the recorded *floor* and skips a redundant model call — **without ever
+  green-lighting**. A low-confidence miss is cached as a `Human` floor so a later identical action
+  re-blocks deterministically. This is the assessment-as-early-red-light model: the cache (and,
+  later, a whole-plan pre-pass) can *pre-raise* an action's floor before the agent reaches it, but
+  can never *pre-clear* it. The act-time evaluation remains the non-negotiable floor.
+  > **As-built note.** The spec's original "plan-time pass flags key steps; only flagged steps
+  > re-checked at act-time" was **superseded**. The loop is turn-based ReAct, not plan-then-execute,
+  > so there is no structured plan to flag against, and — more importantly — letting an unflagged
+  > step skip its act-time check would be a hole exactly where injection attacks aim. Instead every
+  > non-`Safe` action is evaluated (or served from the raise-only cache) at act time; the cache
+  > delivers the cost win the two-phase design sought, and a genuine whole-plan red-light pre-pass
+  > is deferred to a dedicated backlog item (serious structured `_plan`) that will *write into the
+  > same cache*. The plan pass, when it lands, is purely an earlier/cheaper red-light — never a
+  > green-light.
+- **Enforcement.** Over-ceiling / low-confidence → `{"error": {"type": "risk_blocked", ...}}`, a
+  structured result (like the #6a/#6b gates) that emits a `ToolBlocked` event (`safety_block_reason`
+  recognizes `risk_blocked`). The tool binary never runs.
+- **Fallback role.** #6c degrades to #6b (no `risk_model`), which degrades to the #6a mask — the
+  graceful-degradation chain holds.
 
 
 Tool calls are deduplicated and infinite loops are detected (before dispatch).

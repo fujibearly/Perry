@@ -201,6 +201,7 @@ pub async fn eval_tool_calls_parallel(
     calls: Vec<ToolCall>,
     abort_signal: AbortSignal,
     progress: &AgentLoopProgress,
+    risk_cache: Option<std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
 ) -> Result<Vec<ToolResult>> {
     if calls.is_empty() {
         return Ok(vec![]);
@@ -222,6 +223,7 @@ pub async fn eval_tool_calls_parallel(
             let semaphore = semaphore.clone();
             let _abort_signal = abort_signal.clone();
             let progress = progress.clone();
+            let risk_cache = risk_cache.clone();
             async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let start = Instant::now();
@@ -231,7 +233,7 @@ pub async fn eval_tool_calls_parallel(
                 });
                 progress.add_active_tool(&call.name);
 
-                let result = eval_single_tool(&config, &call).await;
+                let result = eval_single_tool(&config, &call, risk_cache.as_ref()).await;
                 let duration = start.elapsed();
 
                 let output = match result {
@@ -569,15 +571,219 @@ fn authority_denied_result(config: &GlobalConfig, call: &ToolCall) -> Option<ser
 fn safety_block_reason(value: &serde_json::Value) -> Option<String> {
     let err_type = value.get("error")?.get("type")?.as_str()?;
     match err_type {
-        "capability_denied" | "authority_exceeded" | "policy_forbidden" => {
+        "capability_denied" | "authority_exceeded" | "policy_forbidden" | "risk_blocked" => {
             Some(err_type.to_string())
         }
         _ => None,
     }
 }
 
+/// Backlog #6c: turn a (clamped) risk decision into a structured denial, if any.
+///
+/// **Pure and deterministic** — this is the unit-testable heart of the #6c
+/// overlay; the live model call ([`run_risk_evaluator`]) is a thin wrapper that
+/// feeds this. Given the deterministic base authority, this agent's ceiling, and
+/// a parsed [`RiskVerdict`], it:
+///   1. applies the stricter-only clamp (verdict may only raise), then
+///   2. **fails toward blocking**: a `Low`-confidence verdict is treated as an
+///      escalation trigger (pre-#6d: a block), even if the clamped tier still
+///      fits the ceiling — an untrustworthy judgment must not green-light an
+///      already-risky (non-`Safe`) action, and
+///   3. blocks when the clamped authority exceeds the ceiling.
+///
+/// Returns `Some(error_json)` with `type: "risk_blocked"` when the action must be
+/// stopped, or `None` when it may proceed. The caller only invokes this for
+/// non-`Safe` actions (the `Safe` fast-path skips the evaluator entirely), so a
+/// low-confidence block here never affects reads.
+fn risk_denied_from_verdict(
+    tool_name: &str,
+    base: crate::safety::RequiredAuthority,
+    ceiling: crate::safety::AuthorityCeiling,
+    verdict: &crate::safety::RiskVerdict,
+) -> Option<serde_json::Value> {
+    use crate::safety::{clamp_verdict, VerdictConfidence};
+
+    let effective = clamp_verdict(base, verdict);
+    let low_confidence = verdict.confidence == VerdictConfidence::Low;
+
+    if ceiling.permits(effective) && !low_confidence {
+        return None;
+    }
+
+    let detail = if low_confidence && ceiling.permits(effective) {
+        format!(
+            "the risk evaluator returned low confidence for tool '{tool_name}', so it \
+             cannot be autonomously authorized"
+        )
+    } else {
+        format!(
+            "the risk evaluator raised tool '{}' to a level exceeding this agent's \
+             authority ceiling ('{}')",
+            tool_name,
+            ceiling.tier().as_str()
+        )
+    };
+    let rationale = if verdict.rationale.is_empty() {
+        String::new()
+    } else {
+        format!(" Evaluator rationale: {}.", verdict.rationale)
+    };
+    Some(json!({
+        "error": {
+            "type": "risk_blocked",
+            "message": format!(
+                "Blocked by the risk evaluator: {detail}.{rationale} \
+                 Return findings to your caller so a higher-authority agent (or a human) can decide."
+            )
+        }
+    }))
+}
+
+/// Backlog #6c: run the `%assess-risk%` evaluator for a single action and return
+/// a structured denial if it must be blocked.
+///
+/// Returns `None` (proceed) when: `safety.risk_model` is unset (degrade to #6b);
+/// the static tier is `Safe` (fast-path); the tool is `_plan` / a delegation; the
+/// base authority is already `Human` (deterministically escalates); or the verdict
+/// clamps within ceiling with adequate confidence. Any model/error is treated as a
+/// low-confidence verdict (fail-toward), NEVER as a pass.
+async fn risk_evaluator_denied_result(
+    config: &GlobalConfig,
+    call: &ToolCall,
+    cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
+) -> Option<serde_json::Value> {
+    use crate::safety::{
+        build_evaluator_context, clamp_verdict, required_authority, PolicyFile, RequiredAuthority,
+        RiskVerdict,
+    };
+
+    let risk_model = config.read().safety.risk_model.clone()?;
+
+    if call.name == "_plan" {
+        return None;
+    }
+    if call_targets_agent(config, &call.name) {
+        return None;
+    }
+
+    let (static_tier, reversible) = tool_tier_and_reversibility(config, &call.name);
+    let base_tier = match static_tier {
+        crate::function::StaticTier::Tier(t) => t,
+        crate::function::StaticTier::Unclassified => return None,
+    };
+
+    // Fast-path (FR-6c.6): Safe actions (reads) never consult the evaluator.
+    if base_tier == crate::function::BlastRadius::Safe {
+        return None;
+    }
+
+    let policy_path = config.read().safety.policy_file.clone();
+    let policy = match policy_path {
+        Some(p) => PolicyFile::load(&p).unwrap_or_default(),
+        None => PolicyFile::default(),
+    };
+    let args: Vec<String> = string_args_of(call);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let policy_outcome = policy.evaluate(&call.name, &arg_refs);
+    let base = required_authority(static_tier, policy_outcome, reversible);
+    if base == RequiredAuthority::Human {
+        return None;
+    }
+    let ceiling = current_authority_ceiling(config);
+
+    // #6c two-phase (FR-6c.7): consult the monotonic, raise-only cache first. A
+    // hit means this exact action was already assessed this run (act-time here,
+    // or — once the structured planner lands — a plan-time pre-pass). The cached
+    // authority is a *floor*: it can only have raised the base, never lowered it,
+    // so reusing it skips a redundant model call without ever weakening the gate.
+    if let Some(cache) = cache {
+        if let Some(cached) = cache.lock().get(&call.name, &call.arguments) {
+            let effective = crate::safety::stricter_of(base, cached);
+            // A cached low-confidence outcome is already folded into `effective`
+            // as a floor (see below), so the ceiling check alone is sufficient here.
+            if ceiling.permits(effective) {
+                return None;
+            }
+            return risk_blocked_result(&call.name, ceiling, None);
+        }
+    }
+
+    // Cache miss → run the evaluator. Any model/parse error → low-confidence
+    // fallback (fail-toward), never a silent pass.
+    let intent = format!("execute tool '{}'", call.name);
+    let context =
+        build_evaluator_context(&call.name, &call.arguments, base_tier, reversible, &intent);
+    let verdict = match run_risk_evaluator(config, &risk_model, &context).await {
+        Ok(raw) => RiskVerdict::parse(&raw, base_tier),
+        Err(_) => RiskVerdict::low_confidence_fallback(base_tier),
+    };
+
+    // Fold the verdict into a cacheable authority *floor*. The clamp is
+    // stricter-only; a low-confidence verdict is escalation-worthy, so we record
+    // it as at least `Human` (the strictest floor) — that way a later reuse of
+    // this action re-blocks without re-calling the model, matching the immediate
+    // fail-toward decision below.
+    let clamped = clamp_verdict(base, &verdict);
+    let cacheable = if verdict.confidence == crate::safety::VerdictConfidence::Low {
+        RequiredAuthority::Human
+    } else {
+        clamped
+    };
+    if let Some(cache) = cache {
+        cache.lock().raise(&call.name, &call.arguments, cacheable);
+    }
+
+    risk_denied_from_verdict(&call.name, base, ceiling, &verdict)
+}
+
+/// Build the structured `risk_blocked` denial for a cache-driven block (no live
+/// verdict rationale available). Kept consistent with [`risk_denied_from_verdict`].
+fn risk_blocked_result(
+    tool_name: &str,
+    ceiling: crate::safety::AuthorityCeiling,
+    rationale: Option<&str>,
+) -> Option<serde_json::Value> {
+    let rationale = rationale
+        .filter(|r| !r.is_empty())
+        .map(|r| format!(" Evaluator rationale: {r}."))
+        .unwrap_or_default();
+    Some(json!({
+        "error": {
+            "type": "risk_blocked",
+            "message": format!(
+                "Blocked by the risk evaluator: tool '{}' was assessed at a level exceeding \
+                 this agent's authority ceiling ('{}').{} \
+                 Return findings to your caller so a higher-authority agent (or a human) can decide.",
+                tool_name, ceiling.tier().as_str(), rationale
+            )
+        }
+    }))
+}
+
+/// Invoke the `%assess-risk%` role with the dedicated evaluator model, returning
+/// the raw model text. Isolated so the surrounding logic stays offline-testable.
+async fn run_risk_evaluator(
+    config: &GlobalConfig,
+    risk_model: &str,
+    context: &str,
+) -> Result<String> {
+    use crate::client::{Model, ModelType};
+    use crate::config::{Input, RoleLike, ASSESS_RISK_ROLE};
+
+    let mut role = config.read().retrieve_role(ASSESS_RISK_ROLE)?;
+    let model = Model::retrieve_model(&config.read(), risk_model, ModelType::Chat)?;
+    role.set_model(model);
+
+    let input = Input::from_str(config, context, Some(role.to_role()));
+    input.fetch_chat_text().await
+}
+
 /// Dispatch a single tool call asynchronously.
-async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serde_json::Value> {
+async fn eval_single_tool(
+    config: &GlobalConfig,
+    call: &ToolCall,
+    risk_cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
+) -> Result<serde_json::Value> {
     // Backlog #6a: capability-mask gate. If this process runs under a read-only
     // mask (i.e. it is a spawned sub-agent) and the requested tool is not
     // explicitly `readonly`, refuse to execute it. The refusal is a structured
@@ -593,6 +799,16 @@ async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serd
     // the Protected Policy File) exceeds this agent's ceiling — or that the policy
     // forbids outright. Pre-#6d these block; #6d turns the block into escalation.
     if let Some(denied) = authority_denied_result(config, call) {
+        return Ok(denied);
+    }
+
+    // Backlog #6c: `%assess-risk%` LLM evaluator overlay (stricter-only). For a
+    // non-Safe, in-ceiling action, consult a dedicated cheap model that may only
+    // *raise* the risk (never loosen the deterministic decision). Disabled unless
+    // `safety.risk_model` is configured; Safe actions and delegations skip it.
+    // A raised verdict over the ceiling, or a low-confidence/errored verdict,
+    // blocks (pre-#6d escalation) with a structured `risk_blocked` result.
+    if let Some(denied) = risk_evaluator_denied_result(config, call, risk_cache).await {
         return Ok(denied);
     }
 
@@ -940,8 +1156,10 @@ async fn route_to_pipe(
         None,
     );
 
-    // Execute the target tool
-    let result = eval_single_tool(config, &pipe_call).await?;
+    // Execute the target tool. No shared risk cache here (this is a derived
+    // pipe-target actuation outside the turn loop) — it is still fully gated,
+    // just evaluated fresh rather than cache-reused.
+    let result = eval_single_tool(config, &pipe_call, None).await?;
 
     // Recursively apply routing to the target's result (handles chained pipes)
     Ok(apply_output_routing(config, target_tool, result, tool_output_limit).await)
@@ -1109,6 +1327,12 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     let mut tool_failure_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut tripped_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
 
+    // #6c: a monotonic, raise-only risk-verdict cache shared across all turns of
+    // this run, so an identical action assessed once is not re-evaluated (and so a
+    // future plan-time pre-pass can pre-raise an action's floor). Raise-only means
+    // it can only ever make the gate stricter — never green-light.
+    let risk_cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
+
     for turn in 1..=max_turns {
         params.progress.set_turn(turn, max_turns);
         params.progress.emit(AgentLoopEvent::TurnStart { turn, max_turns });
@@ -1212,6 +1436,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                 executable_calls,
                 params.abort_signal.clone(),
                 &params.progress,
+                Some(risk_cache.clone()),
             )
             .await?;
 
@@ -2845,8 +3070,8 @@ agent_loop:
 
     #[test]
     fn safety_block_reason_recognizes_gate_denials_only() {
-        // The three gate denial types are recognized...
-        for t in ["capability_denied", "authority_exceeded", "policy_forbidden"] {
+        // The gate denial types are recognized...
+        for t in ["capability_denied", "authority_exceeded", "policy_forbidden", "risk_blocked"] {
             let v = json!({"error": {"type": t, "message": "x"}});
             assert_eq!(safety_block_reason(&v).as_deref(), Some(t));
         }
@@ -2857,5 +3082,170 @@ agent_loop:
         // A normal successful result is not a block.
         assert_eq!(safety_block_reason(&json!({"output": "ok"})), None);
         assert_eq!(safety_block_reason(&json!("DONE")), None);
+    }
+
+    // --- Backlog #6c: risk evaluator decision (pure, mock-verdict) ---
+
+    fn verdict(
+        tier: crate::function::BlastRadius,
+        confidence: crate::safety::VerdictConfidence,
+    ) -> crate::safety::RiskVerdict {
+        crate::safety::RiskVerdict {
+            tier,
+            reversible: false,
+            confidence,
+            rationale: "test".into(),
+            concerns: vec![],
+        }
+    }
+
+    #[test]
+    fn risk_verdict_permissive_high_confidence_within_ceiling_proceeds() {
+        use crate::function::BlastRadius::*;
+        use crate::safety::{AuthorityCeiling, RequiredAuthority, VerdictConfidence};
+        // Base Disruptive, ceiling Destructive, verdict agrees (or lower) with
+        // high confidence → the action proceeds (no denial).
+        let base = RequiredAuthority::Tier(Disruptive);
+        let ceiling = AuthorityCeiling::UpTo(Destructive);
+        assert!(
+            risk_denied_from_verdict("restart_svc", base, ceiling, &verdict(Safe, VerdictConfidence::High))
+                .is_none(),
+            "a permissive high-confidence verdict must not loosen but also must not block within ceiling"
+        );
+        assert!(risk_denied_from_verdict(
+            "restart_svc",
+            base,
+            ceiling,
+            &verdict(Disruptive, VerdictConfidence::High)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn risk_verdict_raise_over_ceiling_blocks() {
+        use crate::function::BlastRadius::*;
+        use crate::safety::{AuthorityCeiling, RequiredAuthority, VerdictConfidence};
+        // Base Disruptive fits a Disruptive ceiling, but the evaluator raises it
+        // to Destructive → now over ceiling → risk_blocked.
+        let base = RequiredAuthority::Tier(Disruptive);
+        let ceiling = AuthorityCeiling::UpTo(Disruptive);
+        let denied = risk_denied_from_verdict(
+            "restart_svc",
+            base,
+            ceiling,
+            &verdict(Destructive, VerdictConfidence::High),
+        )
+        .expect("a raised-over-ceiling verdict must block");
+        assert_eq!(denied["error"]["type"], "risk_blocked");
+    }
+
+    #[test]
+    fn risk_verdict_low_confidence_fails_toward_block_even_within_ceiling() {
+        use crate::function::BlastRadius::*;
+        use crate::safety::{AuthorityCeiling, RequiredAuthority, VerdictConfidence};
+        // Clamped tier still fits the ceiling, but low confidence must not
+        // authorize a non-Safe action (fail-toward, FR-6c.8).
+        let base = RequiredAuthority::Tier(Disruptive);
+        let ceiling = AuthorityCeiling::UpTo(Destructive);
+        let denied = risk_denied_from_verdict(
+            "restart_svc",
+            base,
+            ceiling,
+            &verdict(Disruptive, VerdictConfidence::Low),
+        )
+        .expect("a low-confidence verdict must fail toward blocking");
+        assert_eq!(denied["error"]["type"], "risk_blocked");
+    }
+
+    #[test]
+    fn risk_verdict_cannot_loosen_a_human_base() {
+        use crate::function::BlastRadius::*;
+        use crate::safety::{AuthorityCeiling, RequiredAuthority, VerdictConfidence};
+        // A Human base (unclassified / policy-forbid / catastrophic) can never be
+        // permitted by any verdict; it is over every ceiling.
+        let base = RequiredAuthority::Human;
+        let ceiling = AuthorityCeiling::UpTo(Destructive);
+        let denied = risk_denied_from_verdict(
+            "drop_table",
+            base,
+            ceiling,
+            &verdict(Safe, VerdictConfidence::High),
+        )
+        .expect("Human base must remain blocked regardless of a permissive verdict");
+        assert_eq!(denied["error"]["type"], "risk_blocked");
+    }
+
+    #[tokio::test]
+    async fn risk_evaluator_disabled_without_risk_model_is_noop() {
+        // No safety.risk_model configured → the overlay degrades to #6b (proceeds
+        // here; the #6b gate already ran separately). A disruptive tool within a
+        // Destructive default ceiling must NOT be blocked by the evaluator.
+        let config = config_with_tiers();
+        assert!(config.read().safety.risk_model.is_none());
+        assert!(
+            risk_evaluator_denied_result(&config, &call("restart_svc"), None)
+                .await
+                .is_none(),
+            "with no risk_model the evaluator must be a no-op (degrade to #6b)"
+        );
+    }
+
+    #[tokio::test]
+    async fn risk_evaluator_safe_fastpath_skips_even_when_enabled() {
+        // Even with a risk_model set, a Safe tool must skip the evaluator entirely
+        // (FR-6c.6). We assert no denial AND that no model call is attempted: the
+        // configured model id is bogus, so if it were called it would error — but
+        // the fast-path returns before any call, so this is a clean no-op.
+        let config = config_with_tiers();
+        config.write().safety.risk_model = Some("nonexistent:model".into());
+        assert!(
+            risk_evaluator_denied_result(&config, &call("read_logs"), None)
+                .await
+                .is_none(),
+            "Safe tools must skip the evaluator (fast-path), not error on a bogus model"
+        );
+    }
+
+    #[tokio::test]
+    async fn risk_cache_hit_blocks_without_calling_the_model() {
+        // Pre-seed the cache with a Human floor for a specific action. With a
+        // bogus risk_model configured, a cache MISS would attempt the model and
+        // fail-toward; but a cache HIT must decide from the cached floor alone
+        // (no model call). We assert it blocks via the cached Human floor.
+        let config = config_with_tiers();
+        config.write().safety.risk_model = Some("nonexistent:model".into());
+        let cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
+        let c = call("restart_svc");
+        cache
+            .lock()
+            .raise(&c.name, &c.arguments, crate::safety::RequiredAuthority::Human);
+
+        let denied = risk_evaluator_denied_result(&config, &c, Some(&cache))
+            .await
+            .expect("a cached Human floor must block");
+        assert_eq!(denied["error"]["type"], "risk_blocked");
+    }
+
+    #[tokio::test]
+    async fn risk_cache_hit_within_ceiling_proceeds_without_model() {
+        // A cached floor that still fits the ceiling lets the action proceed —
+        // again without any model call (bogus model would otherwise error).
+        // restart_svc is Disruptive; default ceiling is Destructive.
+        let config = config_with_tiers();
+        config.write().safety.risk_model = Some("nonexistent:model".into());
+        let cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
+        let c = call("restart_svc");
+        cache.lock().raise(
+            &c.name,
+            &c.arguments,
+            crate::safety::RequiredAuthority::Tier(crate::function::BlastRadius::Disruptive),
+        );
+
+        assert!(
+            risk_evaluator_denied_result(&config, &c, Some(&cache))
+                .await
+                .is_none(),
+            "a cached in-ceiling floor should proceed without re-calling the model"
+        );
     }
 }
