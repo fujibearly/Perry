@@ -47,7 +47,7 @@ Earlier in the session, pending documentation from Session 2 was committed and `
 
 ## 4. Backlog State at Handoff
 
-Source of truth: [`.kiro/docs/backlog.md`](backlog.md) and the table in [`.kiro/docs/progress.md`](progress.md).
+Source of truth (now consolidated): [`.kiro/docs/roadmap.md`](roadmap.md) — Status Table + Backlog views. *(Formerly the separate `backlog.md` + `progress.md`.)*
 
 | # | Item | Status | Priority |
 |---|------|--------|----------|
@@ -79,7 +79,7 @@ Source of truth: [`.kiro/docs/backlog.md`](backlog.md) and the table in [`.kiro/
 
 ## 6. Key Files for Continuation
 
-- Backlog & status: [`.kiro/docs/backlog.md`](backlog.md), [`.kiro/docs/progress.md`](progress.md)
+- Backlog & status: [`.kiro/docs/roadmap.md`](roadmap.md) (consolidated — Status Table + Backlog + Roadmap views)
 - Architecture: [`.kiro/architecture.md`](../architecture.md), [`.kiro/docs/fork-philosophy-and-architecture.md`](fork-philosophy-and-architecture.md)
 - Backlog #5 spec (template for new specs): [`.kiro/specs/test-suite-hardening/`](../specs/test-suite-hardening/)
 - Coverage methodology + `argc test-coverage`: [`.kiro/docs/coverage-remeasurement-2026-09-02.md`](coverage-remeasurement-2026-09-02.md)

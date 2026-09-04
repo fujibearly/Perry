@@ -6,14 +6,27 @@
 #   - Release binary built: cargo build --release  (falls back to debug)
 #   - bin/ symlinks point to scripts/run-tool.sh
 #   - manual.pdf present in the project root
+#   - Tools classified with safety tiers (backlog #6b): the llm-functions tools
+#     declare `# @meta risk <tier>` so the authority gate grades them. Without
+#     classification, tools are treated as unclassified → human-reserved and the
+#     top-level agent is blocked from running them. The dev clone
+#     (~/projects/llm-functions, branch feat/tool-safety-classification) is classified.
 #
 # NOTE: Demos 1-11 exercise the live agent loop and require API access
 # (they invoke real LLM providers). Demo 12 (sub-agent crash isolation) is
-# deterministic and offline — no provider needed. Demos 13-14 (#6b authority
-# gate) are live but tightly scoped (single tool call, 2-turn budget).
+# deterministic and offline — no provider needed. Demos 13-15 (#6b safety gate)
+# are live but tightly scoped (single tool call, 2-turn budget):
+#   13 — Protected Policy File `forbid`      → policy_forbidden
+#   14 — authority ceiling exceeded          → authority_exceeded
+#   15 — argument-sensitive `raise`          → catastrophic > ceiling, blocked
 #
 # All live demos run under DEMO_MODEL (default gemini-2.5-flash) for a
 # consistent, cost-conscious profile — see the constant below.
+#
+# Known soft-fails on flash (model-phrasing / environment, NOT engine bugs):
+#   - Demo 3  : flash may format the plan differently or use fs_patch vs fs_write.
+#   - Demo 6  : tmux pane-title update needs a real interactive controlling /dev/tty.
+#   - Demo 9  : flash phrasing may omit the written file path in its summary.
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 

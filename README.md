@@ -290,6 +290,46 @@ Benefits:
 - Reduces token cost for workflows that produce artifacts
 - Pipe chains are acyclic (cycle detection prevents infinite loops)
 
+### Tool Safety Modes & Actuation Governance
+
+A graduated, deterministic safety layer that governs *which* agent may perform *which* action — so autonomous sub-agents operating on real infrastructure can triage in parallel without risking accidental mutations. Fully deterministic (no LLM); the richer LLM-evaluator and human-escalation layers are staged increments (#6c/#6d) that degrade back to this floor.
+
+**Tools declare a blast-radius tier** in `functions.json` via a `# @meta risk <tier>` annotation on the tool script (compiled by `argc build`), ordered `safe < reversible < disruptive < destructive < catastrophic`. A tool may also declare `# @meta reversible true` when its action is trivially undone. Both are governance metadata — never shown to the LLM.
+
+```bash
+# in an llm-functions tool script
+# @describe Remove a file or directory
+# @meta risk destructive
+```
+
+**Capability mask (sub-agents are read-only by default).** Every spawned sub-agent inherits `AICHAT_CAPABILITY_MASK=readonly` — it may only run `safe`/read-only tools. Only the top-level operator (or an agent granted more) actuates state-changing tools. Delegation itself is never blocked (spawning a sub-agent is orchestration; the child's own actions are what get gated).
+
+**Authority ceiling (grows toward the root).** Each agent has a maximum tier it may actuate autonomously (`safety.default_ceiling`, default `destructive` — so `catastrophic` always requires a human). A parent may only *lower* the ceiling it grants a child. An over-ceiling action is refused with a structured `authority_exceeded` result (it never runs); once escalation (#6d) lands, that refusal becomes an escalation instead of a block.
+
+**Protected Policy File (non-pardonable).** An optional owner-only YAML file of deterministic rules that can only *raise* an action's tier or *forbid* it — matched on tool name and/or argument content, so e.g. an `execute_command` containing `rm -rf` can be pushed to `catastrophic`:
+
+```yaml
+# safety.policy_file — rejected if group/world-readable
+rules:
+  - tool: "fs_*"
+    arg_glob: "/etc/**"
+    raise: catastrophic
+  - tool: execute_command
+    arg_contains: "rm -rf"
+    raise: catastrophic
+  - tool: "*"
+    arg_contains: "prod"
+    forbid: true
+```
+
+```yaml
+safety:
+  policy_file: ~/.config/aichat/policy.yaml
+  default_ceiling: destructive   # catastrophic → human
+```
+
+Environment overrides: `AICHAT_SAFETY_POLICY_FILE`, `AICHAT_SAFETY_DEFAULT_CEILING`. Unclassified tools (including MCP tools, which carry no metadata) are conservatively human-reserved by default. Blocked calls trace as `<tool> BLOCKED (<reason>)` — the tool binary never runs.
+
 ### Structured PDF Loading
 
 Default document loader upgraded from `pdftotext` (plain text, no structure) to `pdf2md` ([firecrawl/pdf-inspector](https://github.com/firecrawl/pdf-inspector)) — structured Markdown with headings, tables, lists, code blocks, and formatting preserved.

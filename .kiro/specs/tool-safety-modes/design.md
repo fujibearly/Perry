@@ -198,6 +198,45 @@ Rides the existing `AICHAT_AGENT_DEPTH` channel:
   `%explain-shell%`, keeping prompt logic in the declarative layer and the *enforcement* (clamp,
   fail-toward, fast-path) in Rust where it must be trustworthy.
 
+## As-Built Notes — #6b decisions made during implementation
+
+These refine the spec above based on decisions taken while implementing and validating #6b
+against the live demo harness. They are authoritative for the #6b as-shipped behavior.
+
+- **Tools are classified rather than the engine loosened.** The spec's "unclassified →
+  human-reserved" rule is kept strict. Rather than default unclassified tools to something
+  permissive, all 31 stock `llm-functions` tools were classified via `# @meta risk <tier>`
+  (+ `# @meta reversible true` where trivially undone), and `build-declarations.{sh,js,py}`
+  were extended to emit `risk`/`reversible`/`reversible_via` into `functions.json`
+  (sh: argc `.metadata`; js: JSDoc `@meta`; py: a `Meta:` docstring block). This lives in the
+  **`llm-functions` repo** (branch `feat/tool-safety-classification`), not this repo. Net
+  effect: "unclassified → human" now fires only for genuinely unknown tools (e.g. MCP), which
+  is the intended safety posture.
+- **Decision B — delegation is not gated.** A tool call that targets a sub-agent
+  (`call_targets_agent`: an `agent`-flagged function naming a real agent) skips *both* the #6a
+  capability gate and the #6b authority gate. Delegating is orchestration, not actuation; the
+  sub-agent's *own* actions are gated inside its process via the inherited capability mask +
+  authority ceiling. Without this, unclassified agent-tools would be human-reserved and
+  multi-agent mode would be off by default — double-counting the risk. (Chosen over: classifying
+  agents themselves, or accepting delegation as human-reserved.)
+- **Catastrophic is a hard human-only floor.** `required_authority` does NOT apply the
+  proven-reversibility one-step discount when the base tier is `Catastrophic` (guard:
+  `base != Catastrophic`). This prevents a tool-author-set `reversible: true` from silently
+  undercutting a policy-imposed `catastrophic` raise. Catastrophic always exceeds any
+  autonomous ceiling → human (blocks pre-#6d). Reversibility still discounts the lower tiers.
+- **`ToolBlocked` trace event.** A gate denial returns via the dispatcher's `Ok` path (so the
+  model sees the structured refusal), which previously made the loop trace print
+  `<tool> completed`. A distinct `AgentLoopEvent::ToolBlocked { name, reason }` now fires for
+  the three gate reasons (`capability_denied` / `authority_exceeded` / `policy_forbidden`, via
+  `safety_block_reason`), so the trace reads `<tool> BLOCKED (<reason>)`, output routing is
+  skipped, and the trace never implies the tool ran.
+- **Config env overrides.** `AICHAT_SAFETY_POLICY_FILE` and `AICHAT_SAFETY_DEFAULT_CEILING`
+  were added to `config::load_envs` (matching the `AICHAT_AGENT_LOOP_*` pattern) so policy and
+  ceiling can be set for scripting/ops (and the demo harness) without editing `config.yaml`.
+- **Live validation.** Demos 13 (policy `forbid`), 14 (authority-ceiling over-run), and 15
+  (argument-sensitive `raise` to catastrophic on `execute_command` matching `rm -rf`) exercise
+  the gate end-to-end on a cheap model; see `scripts/run-demos.nu`.
+
 ## Threat Model (explicit, per NFR-2/3/4)
 
 1. **Prompt injection into the evaluator** — a tool's arguments or fetched content tries to coerce a

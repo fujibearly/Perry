@@ -139,6 +139,12 @@ can fall back to it.
 - **FR-6b.6 — Deterministic block on over-ceiling (pre-#6d).** Until the escalation protocol
   (#6d) exists, an over-ceiling or policy-forbidden action returns a structured
   `{"error": {"type": "authority_exceeded" | "policy_forbidden", ...}}` result. No LLM is involved.
+- **FR-6b.6a — Delegation exception (as-built, decision B).** A tool call that targets a
+  sub-agent is NOT subject to the authority gate (nor the #6a mask): delegation is orchestration,
+  not actuation, and the sub-agent's own actions are gated inside its process. See the As-Built
+  Notes in `design.md`.
+- **FR-6b.6b — Catastrophic hard floor (as-built).** Proven reversibility MUST NOT discount a
+  `Catastrophic`-tier action; catastrophic always requires a human regardless of reversibility.
 - **FR-6b.7 — Escalation message schema defined (reserved).** #6b defines the typed escalation
   and verdict message schemas — including the **security-relevant fields** (agent-id, tree-id,
   challenge/nonce) required for the mutual-auth handshake and channel-bound protocol in #6d —

@@ -104,7 +104,7 @@ Full spec (source of truth): [`.kiro/specs/tool-safety-modes/`](../specs/tool-sa
 
 ## 5. Backlog State at Handoff
 
-Source of truth: [`.kiro/docs/backlog.md`](backlog.md) and [`.kiro/docs/progress.md`](progress.md) (progress.md now has #6/#6a/#6b/#6c/#6d rows).
+Source of truth (now consolidated): [`.kiro/docs/roadmap.md`](roadmap.md) — Status Table + Backlog views (has #6/#6a/#6b/#6c/#6d). *(Formerly the separate `backlog.md` + `progress.md`.)*
 
 | # | Item | Status | Priority |
 |---|------|--------|----------|
@@ -151,7 +151,7 @@ Note #6b compatibility rule from the spec: legacy `mode` maps onto the tier scal
 - **Evaluator role template for #6c:** `assets/roles/%explain-shell%.md`.
 - **For #6d (later) — WebSocket stack already available:** the crate already depends on `hyper`/`hyper-util` + `tokio` (see `src/serve.rs`, which runs an OpenAI-compatible HTTP/SSE server with graceful shutdown and `serve_connection_with_upgrades`), and `reqwest`/rustls for TLS. So the WSS listener + mTLS pieces reuse existing deps — likely needs a WebSocket helper crate (e.g. `tokio-tungstenite`) but no new runtime. `src/serve.rs` is the reference for the hyper server + SSE + upgrade patterns.
 - Architecture: [`.kiro/architecture.md`](../architecture.md) (now documents the #6a mask), [`.kiro/docs/fork-philosophy-and-architecture.md`](fork-philosophy-and-architecture.md) (Tenet 4, Pillars 2/5 anchor #6).
-- Backlog & status: [`.kiro/docs/backlog.md`](backlog.md) (#6 rewritten as umbrella), [`.kiro/docs/progress.md`](progress.md).
+- Backlog & status: [`.kiro/docs/roadmap.md`](roadmap.md) (consolidated — Roadmap + Traction/Status Table + Backlog views; #6 detailed there).
 
 ### Environment notes
 - **Nushell environment.** `&&`, `2>&1`, `2>/dev/null` do NOT work directly — wrap shell pipelines/redirects in `bash -c "…"`; use `;` between nu statements; `print` not `echo`.

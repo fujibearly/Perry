@@ -257,11 +257,15 @@ ToolCall arrives from LLM
   │
   ├─ _plan?  → return "acknowledged" (handled in loop, not dispatched)
   │
+  ├─ targets a sub-agent? (decision B) → skip both safety gates
+  │     (delegation is orchestration; the child's own actions are gated)
+  │
   ├─ capability mask (#6a): under readonly mask AND tool not readonly?
   │     → return capability_denied result (no execution)
   │
   ├─ authority gate (#6b): required_authority(tier, reversible, policy) > ceiling?
   │     → return authority_exceeded / policy_forbidden result (no execution)
+  │        (emits a ToolBlocked event → trace shows "BLOCKED", not "completed")
   │
   ├─ MCP match?  → call_mcp_tool_async (await, no blocking)
   │
@@ -315,7 +319,17 @@ dispatch gates are in `agent_loop.rs::eval_single_tool` (after the #6a capabilit
   #9/#10) — is a *separate boolean*, not a tier. Proven reversibility lowers the **authority
   required** by one step (e.g. a provably-reversible `destructive` action needs only
   `disruptive` authority); it never changes the tier itself. Reversibility must be *proven*,
-  never merely asserted.
+  never merely asserted. **Exception — `catastrophic` is a hard human-only floor:** proven
+  reversibility does *not* discount a `catastrophic` action (whether intrinsic or
+  policy-raised). This prevents a tool author's `reversible: true` flag from silently
+  undercutting a policy-imposed catastrophic raise; catastrophic always requires a human.
+- **Delegation is orchestration, not actuation (decision B).** A tool call that targets a
+  sub-agent (an `agent`-flagged function naming a real agent) is **not** subject to either
+  gate — delegating is coordination, and the real actuation risk is what the sub-agent *does*,
+  which is gated inside its own process (its inherited capability mask + authority ceiling).
+  So a masked/limited agent may still delegate; the child stays constrained. Without this,
+  every unclassified agent-tool would be human-reserved and multi-agent mode would be off by
+  default. (`call_targets_agent` guards both gates.)
 - **Root-favoring authority ceiling.** Each agent has a max tier it may actuate autonomously.
   The top-level ceiling is `safety.default_ceiling` (default `destructive`, so `catastrophic`
   always needs a human). The ceiling is propagated to sub-agents via
@@ -342,9 +356,21 @@ dispatch gates are in `agent_loop.rs::eval_single_tool` (after the #6a capabilit
   agent's ceiling. Over-ceiling → `{"error": {"type": "authority_exceeded", ...}}`; a policy
   forbid → `{"error": {"type": "policy_forbidden", ...}}` — both structured results (not
   crashes), like the #6a gate. Pre-#6d these **block**; #6d turns the block into escalation.
+  A gate-blocked call emits a distinct **`ToolBlocked`** loop event, so the trace reads
+  `<tool> BLOCKED (<reason>)` rather than the misleading `completed` — the tool binary never
+  runs (verified by `safety_block_reason`, which recognizes `capability_denied` /
+  `authority_exceeded` / `policy_forbidden` and skips output routing for them).
 - **Config.** A new **top-level `safety:` section** (sibling of `agent_loop:`): `policy_file`,
   `risk_model` (#6c), `default_ceiling`, `escalation_dir` (#6d), `verdict_timeout_secs` (#6d).
-  All `serde(default)` with safe defaults.
+  All `serde(default)` with safe defaults. Two env overrides (matching the `AICHAT_AGENT_LOOP_*`
+  pattern) exist for scripting/ops: **`AICHAT_SAFETY_POLICY_FILE`** and
+  **`AICHAT_SAFETY_DEFAULT_CEILING`**.
+- **Tools must be classified.** The engine treats an *unclassified* tool as human-reserved, so
+  the companion `llm-functions` tools declare their tier via `# @meta risk <tier>` (+
+  `# @meta reversible true` where trivially undone), compiled into `functions.json` by the
+  extended `build-declarations.{sh,js,py}`. All 31 stock tools are classified (safe reads →
+  `execute_*`/`fs_rm` destructive). MCP tools, carrying no metadata, remain unclassified →
+  human-reserved by default. See the `llm-functions` repo (`feat/tool-safety-classification`).
 - **Reserved for #6d.** The typed `EscalationMsg` / `VerdictMsg` (Halt/Revert/Continue) WebSocket
   message schemas are defined now (unused) so the wire format is stable across increments.
 
