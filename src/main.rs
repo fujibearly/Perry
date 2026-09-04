@@ -8,6 +8,7 @@ mod mcp;
 mod rag;
 mod render;
 mod repl;
+mod safety;
 mod serve;
 #[macro_use]
 mod utils;

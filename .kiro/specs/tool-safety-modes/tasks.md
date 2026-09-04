@@ -38,22 +38,24 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 
 ## Phase #6b — Tiers, Reversibility, Protected Policy, Authority Gradient (branch `feat/tool-safety-6b`)
 
-- [ ] 6b.1 Add `BlastRadius { Safe<Reversible<Disruptive<Destructive<Catastrophic }` (`Ord`) and
+- [x] 6b.1 Add `BlastRadius { Safe<Reversible<Disruptive<Destructive<Catastrophic }` (`Ord`) and
       `reversible: Option<bool>` / `reversible_via: Option<String>` to `FunctionDeclaration`. (FR-6b.1/6b.3)
-- [ ] 6b.2 Map legacy `mode` → tier (`readonly`→`Safe`, `mutating`→≥`Disruptive`) for back-compat; unit-test. (FR-6b.1)
-- [ ] 6b.3 Create `src/safety.rs`; implement pure `required_authority(tier, proven_reversible)` and unit-test the
-      orthogonal combination (proof lowers required authority one step; never changes tier). (FR-6b.2)
-- [ ] 6b.4 Protected Policy File: loader (owner-only perm check) + `policy_tier(action) -> Raise(tier)|Forbidden`,
-      raise-only semantics; built-in fail-safe defaults when absent. Unit tests incl. a forbidden rule. (FR-6b.4)
-- [ ] 6b.5 Add a top-level `SafetyConfig` (its own `safety:` section, sibling of `agent_loop:`) with
-      `serde(default)` safe defaults; wire `default_ceiling`. Unit-test defaults + partial override. (FR-6b.5, NFR-7)
-- [ ] 6b.6 Propagate `AICHAT_AUTHORITY_CEILING` to children (parent may only lower); enforce
-      `required_authority(action) <= ceiling` in dispatch, else `authority_exceeded`; `policy_forbidden`
-      for policy hits. Unit tests for over-ceiling block and child-ceiling-lowering. (FR-6b.5/6b.6)
-- [ ] 6b.7 Define `EscalationRecord`/`RiskVerdict` schemas including `nonce`/`signature` fields (unused now). (FR-6b.7)
-- [ ] 6b.8 `cargo test` + `cargo clippy` green; degrade check: with no policy file and no evaluator, behavior is
-      deterministic tiers + block. (NFR-1/6)
-- [ ] 6b.9 Docs: risk/reversibility metadata, policy-file format, ceiling model.
+- [x] 6b.2 Map legacy `mode` → tier (`readonly`→`Safe`, `mutating`→≥`Disruptive`) for back-compat via
+      `StaticTier` + `static_tier()`; unit-tested. (FR-6b.1)
+- [x] 6b.3 Create `src/safety.rs`; pure `required_authority(static_tier, policy, proven_reversible)` +
+      `AuthorityCeiling`; unit-tested the orthogonal combination (proof lowers one step; never changes tier). (FR-6b.2)
+- [x] 6b.4 Protected Policy File: owner-only YAML loader + `evaluate()` (raise-or-forbid, strictest wins,
+      hand-rolled glob, no new deps); built-in empty-default when absent. Tests incl. forbid + owner-perm reject. (FR-6b.4)
+- [x] 6b.5 Top-level `SafetyConfig` (`safety:` section, sibling of `agent_loop:`) with `serde(default)`
+      safe defaults; `default_ceiling`=Destructive. Tests: defaults + partial + full override. (FR-6b.5, NFR-7)
+- [x] 6b.6 Propagate `AICHAT_AUTHORITY_CEILING` to children (parent only lowers); enforce
+      `required_authority <= ceiling` in dispatch → `authority_exceeded`; policy hit → `policy_forbidden`.
+      Tests: over-ceiling block, child-ceiling lowering, proven-reversibility discount, unclassified→human. (FR-6b.5/6b.6)
+- [x] 6b.7 Define reserved `EscalationMsg`/`VerdictMsg` + `VerdictDecision` WS message schemas (unused, round-trip tested). (FR-6b.7)
+- [x] 6b.8 `cargo test` (384 unit, 0 fail; +32) + `cargo clippy` (no new warnings) green; degrade check:
+      default config (no policy/no risk_model) = deterministic tiers + block; #6a mask intact. (NFR-1/6)
+- [x] 6b.9 Docs: tiers/reversibility/policy-format/ceiling documented in `.kiro/architecture.md` (+ dispatch
+      diagram gates); `progress.md` #6b row, test count, branch status updated.
 
 ## Phase #6c — `%assess-risk%` LLM Evaluator (branch `feat/tool-safety-6c`)
 

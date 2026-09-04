@@ -14,7 +14,7 @@ use crate::client::{
     compat_provider_api_base, create_client_config, list_client_types, list_models, ClientConfig,
     MessageContentToolCalls, Model, ModelType, ProviderModels,
 };
-use crate::function::{FunctionDeclaration, Functions, ToolResult};
+use crate::function::{BlastRadius, FunctionDeclaration, Functions, ToolResult};
 use crate::rag::Rag;
 use crate::render::{MarkdownRender, RenderOptions};
 use crate::repl::{run_repl_command, split_args_text};
@@ -314,6 +314,45 @@ impl Default for AgentLoopConfig {
     }
 }
 
+/// Tool safety & actuation governance config (backlog #6). Its **own top-level
+/// `safety:` section** (sibling of `agent_loop:`), since it governs actuation
+/// policy across the whole delegation tree, not one loop's budget/observability.
+///
+/// All fields `serde(default)` with safe defaults (NFR-7): no policy file →
+/// built-in fail-safe classification; no risk model → deterministic-only
+/// (evaluator skipped, #6c); ceiling defaults leave `Catastrophic` to humans.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct SafetyConfig {
+    /// Path to the Protected Policy File (#6b). `None` → built-in fail-safe
+    /// defaults (no extra floors; unclassified tools are already human-reserved).
+    pub policy_file: Option<PathBuf>,
+    /// Dedicated cheap model for the `%assess-risk%` evaluator (#6c). `None` →
+    /// evaluator skipped entirely (degrade to deterministic #6b behavior).
+    pub risk_model: Option<String>,
+    /// The top-level (orchestrator) autonomous authority ceiling: the maximum
+    /// blast-radius tier this process may actuate without escalating. The
+    /// ceiling only *lowers* down the spawn chain. Default: `Destructive`
+    /// (so `Catastrophic` always requires a human).
+    pub default_ceiling: BlastRadius,
+    /// Directory for #6d escalation/rendezvous state. `None` → `$XDG_RUNTIME_DIR`.
+    pub escalation_dir: Option<PathBuf>,
+    /// #6d: seconds to await a verdict before further escalation / hard-kill.
+    pub verdict_timeout_secs: u64,
+}
+
+impl Default for SafetyConfig {
+    fn default() -> Self {
+        Self {
+            policy_file: None,
+            risk_model: None,
+            default_ceiling: BlastRadius::Destructive,
+            escalation_dir: None,
+            verdict_timeout_secs: 300,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct MultiAgentConfig {
@@ -462,6 +501,9 @@ pub struct Config {
 
     pub agent_loop: AgentLoopConfig,
 
+    #[serde(default)]
+    pub safety: SafetyConfig,
+
     pub multi_agent: MultiAgentConfig,
 
     pub repl_prelude: Option<String>,
@@ -553,6 +595,8 @@ impl Default for Config {
             mcp_servers: Default::default(),
 
             agent_loop: Default::default(),
+
+            safety: Default::default(),
 
             multi_agent: Default::default(),
 
@@ -3276,6 +3320,55 @@ mod tests {
         assert_eq!(config.multi_agent.tool_choice, MultiAgentToolChoice::Auto);
         assert_eq!(config.multi_agent.max_output_tokens, None);
         assert_eq!(config.multi_agent.service_tier, OpenAIServiceTier::Auto);
+    }
+
+    // --- Backlog #6b: SafetyConfig ---
+
+    #[test]
+    fn safety_config_defaults_when_absent() {
+        let config: Config = serde_yaml::from_str("{}").unwrap();
+        let s = &config.safety;
+        assert_eq!(s, &SafetyConfig::default());
+        assert_eq!(s.policy_file, None);
+        assert_eq!(s.risk_model, None);
+        assert_eq!(s.default_ceiling, BlastRadius::Destructive);
+        assert_eq!(s.escalation_dir, None);
+        assert_eq!(s.verdict_timeout_secs, 300);
+    }
+
+    #[test]
+    fn safety_config_partial_override_keeps_other_defaults() {
+        let config: Config = serde_yaml::from_str(
+            "safety:\n  risk_model: openai:gpt-4o-mini\n  default_ceiling: reversible\n",
+        )
+        .unwrap();
+        let s = &config.safety;
+        assert_eq!(s.risk_model.as_deref(), Some("openai:gpt-4o-mini"));
+        assert_eq!(s.default_ceiling, BlastRadius::Reversible);
+        // Untouched fields stay at defaults.
+        assert_eq!(s.policy_file, None);
+        assert_eq!(s.verdict_timeout_secs, 300);
+    }
+
+    #[test]
+    fn safety_config_full_override() {
+        let yaml = r#"
+safety:
+  policy_file: /etc/aichat/policy.yaml
+  risk_model: openai:gpt-4o-mini
+  default_ceiling: disruptive
+  escalation_dir: /run/user/1000/aichat
+  verdict_timeout_secs: 60
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let s = &config.safety;
+        assert_eq!(
+            s.policy_file.as_deref(),
+            Some(std::path::Path::new("/etc/aichat/policy.yaml"))
+        );
+        assert_eq!(s.risk_model.as_deref(), Some("openai:gpt-4o-mini"));
+        assert_eq!(s.default_ceiling, BlastRadius::Disruptive);
+        assert_eq!(s.verdict_timeout_secs, 60);
     }
 
     #[test]

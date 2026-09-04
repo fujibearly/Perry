@@ -2,9 +2,9 @@
 
 ## Current State (2026-09-02)
 
-**Branch:** `feat/tool-safety-6a` (off `main`) — backlog #6a in progress  
+**Branch:** `feat/tool-safety-6b` (off `feat/tool-safety-6a`) — backlog #6b implemented  
 **Version:** v0.31.0-fork.9  
-**Tests:** 360 tests pass, 0 fail (352 unit + 5 catalog-override + 3 integration) — +8 from backlog #6a (capability mask); +25 earlier from #5 hardening  
+**Tests:** 392 tests pass, 0 fail (384 unit + 5 catalog-override + 3 integration) — +32 from backlog #6b (tiers/reversibility/policy/ceiling); +8 earlier from #6a; +25 from #5  
 **E2E demos (2026-09-02, live):** 11 scenarios executed, 23/24 assertions pass. The one miss — the OSC tmux pane-title update in Demo 6 — requires an interactive tmux pane as the process's controlling `/dev/tty`; it does not land when run nested inside another CLI. The pipe-proof observability path (status file + `/dev/tty` trace) passes.  
 **Agent Loop Coverage:** unit-test (`cargo test`) line coverage of `src/agent_loop.rs` rose **46.8% → 64.7%** (+17.9 pts) from the backlog #5 tests — see [coverage re-measurement 2026-09-02](file:///home/istari/projects/aichat/.kiro/docs/coverage-remeasurement-2026-09-02.md). NB: not comparable to the older 72.9% figure, which used the live E2E harness (different methodology — [2026-08-31 report](file:///home/istari/projects/aichat/.kiro/docs/coverage-evaluation-2026-08-31.md)).
 
@@ -20,7 +20,7 @@
 | 5 | Test Suite & Coverage Hardening | ✓ Done | Medium | `feat/test-suite-hardening` | Coverage analysis showed strong baseline but untested edge paths in error handling, crash isolation, cyclic pipe aborts, and budget conditions. | **Pillar 5 (Deterministic Safety):** validates the circuit-breaker/budget guarantees the fork claims. Cross-cutting; hardens existing behavior rather than adding capability. | M — done. +25 unit tests (21 agent_loop + 4 mcp) + Demo 12 (offline sub-agent crash isolation). Coverage: agent_loop.rs 46.8%→64.7% line. FR-4 closed via Demo 12; circuit-breaker/cost logic extracted + tested. Merged to main. |
 | 6 | Tool Safety Modes & Actuation Governance (umbrella; specced) | Spec written; #6a in progress | High | `feat/tool-safety-6a…6d` | In system-wide operations, parallel sub-agents must never cause catastrophe; a graduated, safety-governed actuation model gates *which* agent may perform *which* action, with a non-pardonable deterministic floor + LLM risk overlay + escalation to humans. | **Tenet 4 ("triage in parallel, actuate in sequence") + Pillar 5:** the missing enforcement layer for the SRE stress-test. Strong fit. | Umbrella (grew well past the original ~150-250 lines); decomposed into 4 stacked, independently-shippable increments (#6a–#6d) that degrade gracefully. Spec: [`.kiro/specs/tool-safety-modes/`](file:///home/istari/projects/aichat/.kiro/specs/tool-safety-modes/) |
 | 6a | ↳ Deterministic capability mask (floor / fallback) | ✓ Implemented (`feat/tool-safety-6a`, unmerged) | High | `feat/tool-safety-6a` | Binary `readonly`/`mutating` mask; sub-agents read-only by default; **unclassified tools reserved to humans**. The permanent floor everything degrades to. | **Pillar 2 + Pillar 5:** capability mask rides the child-PID env channel (like `AICHAT_AGENT_DEPTH`). | S–M — done. `function.rs` (`ToolMode`/`SafetyClass` + `mode` field), `agent_loop.rs` (mask propagation + `capability_denied` gate), `mcp.rs` (MCP tools → unclassified). +8 unit tests; suite 352→360, 0 fail. |
-| 6b | ↳ Blast-radius tiers + proven reversibility + Protected Policy File + authority gradient | Proposed | High | `feat/tool-safety-6b` | 5-tier radius (`Safe`→`Catastrophic`), orthogonal *proven* reversibility, non-pardonable Protected Policy File, root-favoring authority ceiling. Fully deterministic. | **Tenet 4 + Pillar 5:** deterministic floor before any LLM; authority grows toward the root (more context). | M — new `src/safety.rs`, config `safety:` section, `function.rs` fields |
+| 6b | ↳ Blast-radius tiers + proven reversibility + Protected Policy File + authority gradient | ✓ Implemented (`feat/tool-safety-6b`, unmerged) | High | `feat/tool-safety-6b` | 5-tier radius (`Safe`→`Catastrophic`), orthogonal *proven* reversibility, non-pardonable Protected Policy File, root-favoring authority ceiling. Fully deterministic. | **Tenet 4 + Pillar 5:** deterministic floor before any LLM; authority grows toward the root (more context). | M — done. New `src/safety.rs` (required_authority, PolicyFile YAML loader, AuthorityCeiling); top-level `safety:` config; `function.rs` risk/reversible fields + `BlastRadius`/`StaticTier`; `agent_loop.rs` authority gate + `AICHAT_AUTHORITY_CEILING` propagation. +32 unit tests; suite 352→384 unit, 0 fail. |
 | 6c | ↳ `%assess-risk%` LLM evaluator (stricter-only overlay) | Proposed | High | `feat/tool-safety-6c` | Dedicated cheap model + minimal-context role returns a structured verdict that can only make things *stricter*; plan-time pass flags key steps, act-time re-check. | **Principle: "the LLM is not a Pardoner."** Advisory overlay clamped in Rust. | M — role asset + `safety.rs` evaluator/clamp; ~fast-path skip for `Safe` |
 | 6d | ↳ Escalation & control protocol + human-in-the-loop | Proposed | High | `feat/tool-safety-6d` | mTLS **WebSocket** inter-agent channel (child dials parent, loopback WSS), typed `Escalation`/`Verdict{Halt\|Revert\|Continue}`/`Cancel` protocol, durable rollback journal (REVERT replays it — survives connection/child death), branch-only suspension, upward propagation to orchestrator, then interactive-CLI human prompt or Layer 3. Forward-compatible with remote agents. | **Pillar 2 (process-isolated control) + Pillar 5.** Control plane = ephemeral WSS; durability plane = on-disk journal; audit plane = #14. | L — WSS listener + mutual-auth handshake + message protocol + rollback journal; live parent↔child control |
 | 7 | Session Resumption & WAL Journaling (`--resume`) | Proposed | High | `feat/session-wal-resumption` | Long diagnostic sessions must survive network dropouts, rate-limits, and `SIGINT` without re-running expensive probes. | **Tenet 1 (system-level scope) + Pillar 4 (Observability):** extends out-of-band state (status files → durable WAL). Fits, though it introduces a modest new stateful concept. | L — ~250-350 lines + new `session_wal.rs`; replay/checkpoint correctness is the hard part |
@@ -101,6 +101,16 @@ First increment of the #6 Tool Safety Modes umbrella:
 - +8 unit tests; suite 352→360 unit, 0 fail; clippy clean
 - The permanent safety floor #6b–#6d degrade back to
 
+### Backlog #6b: Blast-Radius Tiers, Reversibility, Policy & Ceiling ✓ (unmerged, `feat/tool-safety-6b`)
+
+Second increment — graduated deterministic governance (no LLM):
+- 5-tier `BlastRadius` (`Safe`<`Reversible`<`Disruptive`<`Destructive`<`Catastrophic`, `Ord`) + `risk`/`reversible`/`reversible_via` skip-serialized fields; `StaticTier` resolver (explicit `risk` wins; legacy `mode` maps `readonly`→`Safe`, `mutating`→`Disruptive`; else Unclassified)
+- New `src/safety.rs`: pure `required_authority(tier, policy, proven_reversible)` (proof lowers one step; unclassified/forbid → Human); `AuthorityCeiling`; `PolicyFile` (owner-only YAML, raise-or-forbid, hand-rolled glob, strictest-match)
+- Top-level `safety:` config (`policy_file`, `risk_model`, `default_ceiling`=Destructive, `escalation_dir`, `verdict_timeout_secs`)
+- Two deterministic dispatch gates in `eval_single_tool`: over-ceiling → `authority_exceeded`, policy → `policy_forbidden`; `AICHAT_AUTHORITY_CEILING` propagated to children (parent may only lower)
+- Reserved `EscalationMsg`/`VerdictMsg` WS schemas for #6d
+- +32 unit tests; suite 360→392, 0 fail; clippy clean (no new warnings)
+
 ### PDF Loader Enhancement
 
 Default `document_loaders.pdf` switched from `pdftotext` to `pdf2md --compact --raw` (firecrawl/pdf-inspector). Structured Markdown for better RAG chunking and token efficiency.
@@ -129,14 +139,15 @@ Default `document_loaders.pdf` switched from `pdftotext` to `pdf2md --compact --
 - `feat/agent-loop-enhancements` — Backlog #3, complete (merged to `main`)
 - `feat/tool-output-routing` — Backlog #4, complete (merged to `main`)
 - `feat/test-suite-hardening` — Backlog #5, complete (merged to `main`)
-- **`feat/tool-safety-6a`** — Backlog #6a, **implemented (active, unmerged; 3 commits ahead of `main`)**
+- **`feat/tool-safety-6a`** — Backlog #6a, complete (merged into `feat/tool-safety-6b`'s history)
+- **`feat/tool-safety-6b`** — Backlog #6b, **implemented (active, unmerged; off `feat/tool-safety-6a`)**
 
 ## Merge Strategy
 
 ```
 main ← feat/rust-mcp-bridge ← feat/agent-loop-enhancements ← feat/tool-output-routing (all merged)
-main ← feat/tool-safety-6a (current, unmerged)
-     ← feat/tool-safety-6b ← …6c ← …6d (future, each off the previous)
+main ← feat/tool-safety-6a ← feat/tool-safety-6b (current, unmerged)
+                                              ← feat/tool-safety-6c ← …6d (future)
 ```
 
 ## Environment Reminders

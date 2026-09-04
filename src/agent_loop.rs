@@ -368,6 +368,141 @@ fn capability_denied_result(
     }))
 }
 
+/// This process's current autonomous authority ceiling (backlog #6b).
+///
+/// A spawned sub-agent reads `AICHAT_AUTHORITY_CEILING` (set by its parent). The
+/// top-level process (no such env var) uses the configured `safety.default_ceiling`.
+/// An unparseable env value fails safe to the minimal ceiling (`Safe`).
+fn current_authority_ceiling(config: &GlobalConfig) -> crate::safety::AuthorityCeiling {
+    use crate::safety::AuthorityCeiling;
+    if let Ok(v) = std::env::var("AICHAT_AUTHORITY_CEILING") {
+        return match crate::function::BlastRadius::from_str(&v) {
+            Some(tier) => AuthorityCeiling::UpTo(tier),
+            None => AuthorityCeiling::MINIMAL, // fail safe on garbage
+        };
+    }
+    AuthorityCeiling::UpTo(config.read().safety.default_ceiling)
+}
+
+/// Look up the tool's static tier and proven-reversibility from config.
+///
+/// Returns `(StaticTier, proven_reversible)`. Unknown tools (e.g. MCP, not in the
+/// function set) resolve to `Unclassified` — the most conservative disposition.
+fn tool_tier_and_reversibility(
+    config: &GlobalConfig,
+    tool_name: &str,
+) -> (crate::function::StaticTier, bool) {
+    use crate::function::StaticTier;
+    let config_read = config.read();
+    let decl = config_read
+        .agent
+        .as_ref()
+        .and_then(|a| a.functions().find(tool_name))
+        .or_else(|| config_read.functions.find(tool_name));
+    match decl {
+        // #6b consumes only *declared* intrinsic reversibility; registered
+        // rollback artifacts (arg `false` here) arrive with #9/#10.
+        Some(d) => (d.static_tier(), crate::safety::proven_reversible(d, false)),
+        None => (StaticTier::Unclassified, false),
+    }
+}
+
+/// Collect the string-valued arguments of a call, for policy matching.
+fn string_args_of(call: &ToolCall) -> Vec<String> {
+    let mut out = vec![];
+    match &call.arguments {
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                if let Some(s) = v.as_str() {
+                    out.push(s.to_string());
+                }
+            }
+        }
+        serde_json::Value::String(s) => {
+            // Arguments may arrive as a JSON string; try to parse and recurse,
+            // else treat the whole string as one arg.
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(s)
+            {
+                for v in map.values() {
+                    if let Some(vs) = v.as_str() {
+                        out.push(vs.to_string());
+                    }
+                }
+            } else {
+                out.push(s.clone());
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// If the blast-radius authority ceiling (or the Protected Policy File) forbids
+/// this tool call, return the structured denial result (backlog #6b).
+///
+/// Deterministic, no LLM. Returns `None` when the action is within the current
+/// ceiling. Returns `Some(error_json)`:
+/// - `policy_forbidden` — the policy file forbids the action outright;
+/// - `authority_exceeded` — the required authority exceeds this agent's ceiling
+///   (includes unclassified/human-reserved actions; pre-#6d these block rather
+///   than escalate).
+///
+/// The `_plan` pseudo-tool is always permitted.
+fn authority_denied_result(config: &GlobalConfig, call: &ToolCall) -> Option<serde_json::Value> {
+    use crate::safety::{required_authority, PolicyFile, PolicyOutcome, RequiredAuthority};
+
+    if call.name == "_plan" {
+        return None;
+    }
+
+    // Load the Protected Policy File (absent → empty; owner-only enforced on load).
+    let policy_path = config.read().safety.policy_file.clone();
+    let policy = match policy_path {
+        Some(p) => PolicyFile::load(&p).unwrap_or_default(),
+        None => PolicyFile::default(),
+    };
+    let args: Vec<String> = string_args_of(call);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let policy_outcome = policy.evaluate(&call.name, &arg_refs);
+
+    let (static_tier, reversible) = tool_tier_and_reversibility(config, &call.name);
+    let required = required_authority(static_tier, policy_outcome, reversible);
+    let ceiling = current_authority_ceiling(config);
+
+    if ceiling.permits(required) {
+        return None;
+    }
+
+    // Distinguish an explicit policy forbid from a plain over-ceiling block.
+    if policy_outcome == Some(PolicyOutcome::Forbid) {
+        return Some(json!({
+            "error": {
+                "type": "policy_forbidden",
+                "message": format!(
+                    "Tool '{}' is forbidden by the protected safety policy. \
+                     This is a non-pardonable deterministic rule and cannot be overridden.",
+                    call.name
+                )
+            }
+        }));
+    }
+
+    let required_desc = match required {
+        RequiredAuthority::Human => "human approval".to_string(),
+        RequiredAuthority::Tier(t) => format!("'{}' authority", t.as_str()),
+    };
+    Some(json!({
+        "error": {
+            "type": "authority_exceeded",
+            "message": format!(
+                "Tool '{}' requires {} which exceeds this agent's authority ceiling ('{}'). \
+                 Return findings to your caller so a higher-authority agent (or a human) can actuate.",
+                call.name, required_desc, ceiling.tier().as_str()
+            )
+        }
+    }))
+}
+
 /// Dispatch a single tool call asynchronously.
 async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serde_json::Value> {
     // Backlog #6a: capability-mask gate. If this process runs under a read-only
@@ -377,6 +512,14 @@ async fn eval_single_tool(config: &GlobalConfig, call: &ToolCall) -> Result<serd
     // circuit-breaker short-circuit — letting the sub-agent choose another
     // approach (and, in later increments, escalate).
     if let Some(denied) = capability_denied_result(config, &call.name) {
+        return Ok(denied);
+    }
+
+    // Backlog #6b: blast-radius authority gate. Deterministically block actions
+    // whose required authority (tier, reduced by proven reversibility, raised by
+    // the Protected Policy File) exceeds this agent's ceiling — or that the policy
+    // forbids outright. Pre-#6d these block; #6d turns the block into escalation.
+    if let Some(denied) = authority_denied_result(config, call) {
         return Ok(denied);
     }
 
@@ -524,6 +667,12 @@ async fn eval_agent_tool_subprocess(
     // The mask is monotonic — once set it is never cleared for descendants — so a
     // sub-sub-agent stays masked regardless of nesting.
     cmd.env("AICHAT_CAPABILITY_MASK", "readonly");
+
+    // Backlog #6b: propagate the authority ceiling down the spawn chain. The child
+    // inherits this agent's current ceiling; a parent may only *lower* it, never
+    // raise it (the child cannot grant itself more authority than its parent has).
+    let child_ceiling = current_authority_ceiling(config);
+    cmd.env("AICHAT_AUTHORITY_CEILING", child_ceiling.tier().as_str());
 
     // Inherit config dir so sub-agent sees same agents/tools/MCP
     if let Ok(config_dir) = std::env::var("AICHAT_CONFIG_DIR") {
@@ -871,6 +1020,10 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
         output: None,
         // The planning scratchpad never touches state — safe under any mask.
         mode: Some(crate::function::ToolMode::Readonly),
+        // #6b: an internal read-only scratchpad is the lowest blast radius.
+        risk: Some(crate::function::BlastRadius::Safe),
+        reversible: Some(true),
+        reversible_via: None,
     }
 }
 
@@ -2490,6 +2643,123 @@ agent_loop:
         match prev {
             Some(v) => std::env::set_var("AICHAT_CAPABILITY_MASK", v),
             None => std::env::remove_var("AICHAT_CAPABILITY_MASK"),
+        }
+    }
+
+    // --- Backlog #6b: authority ceiling gate ---
+
+    fn config_with_tiers() -> GlobalConfig {
+        // default_ceiling defaults to Destructive.
+        let functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "read_logs", "description": "read", "parameters": {"type":"object"}, "risk": "safe"
+            })).unwrap(),
+            serde_json::from_value(json!({
+                "name": "restart_svc", "description": "restart", "parameters": {"type":"object"}, "risk": "disruptive"
+            })).unwrap(),
+            serde_json::from_value(json!({
+                "name": "drop_table", "description": "drop", "parameters": {"type":"object"}, "risk": "catastrophic"
+            })).unwrap(),
+            serde_json::from_value(json!({
+                "name": "wipe_disk", "description": "wipe", "parameters": {"type":"object"}, "risk": "destructive"
+            })).unwrap(),
+            serde_json::from_value(json!({
+                "name": "wipe_disk_reversible", "description": "wipe w/ backup", "parameters": {"type":"object"},
+                "risk": "destructive", "reversible": true
+            })).unwrap(),
+            serde_json::from_value(json!({
+                "name": "mystery", "description": "no classification", "parameters": {"type":"object"}
+            })).unwrap(),
+        ]);
+        Arc::new(RwLock::new(Config { functions, ..Default::default() }))
+    }
+
+    fn call(name: &str) -> ToolCall {
+        ToolCall::new(name.to_string(), json!({}), None)
+    }
+
+    #[test]
+    fn authority_gate_permits_within_ceiling_denies_above() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        // Default top-level ceiling = Destructive (no env var).
+        std::env::remove_var("AICHAT_AUTHORITY_CEILING");
+        let config = config_with_tiers();
+
+        // Within ceiling: Safe and Disruptive permitted.
+        assert!(authority_denied_result(&config, &call("read_logs")).is_none());
+        assert!(authority_denied_result(&config, &call("restart_svc")).is_none());
+        // Destructive == ceiling → permitted.
+        assert!(authority_denied_result(&config, &call("wipe_disk")).is_none());
+        // Catastrophic > Destructive → authority_exceeded.
+        let denied = authority_denied_result(&config, &call("drop_table"))
+            .expect("catastrophic must exceed a destructive ceiling");
+        assert_eq!(denied["error"]["type"], "authority_exceeded");
+        // _plan always permitted.
+        assert!(authority_denied_result(&config, &call("_plan")).is_none());
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
+    }
+
+    #[test]
+    fn authority_gate_unclassified_is_human_reserved_blocked() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        std::env::remove_var("AICHAT_AUTHORITY_CEILING");
+        let config = config_with_tiers();
+
+        // Unclassified → Human → exceeds any autonomous ceiling → blocked (pre-#6d).
+        let denied = authority_denied_result(&config, &call("mystery"))
+            .expect("unclassified tool is human-reserved and must be blocked");
+        assert_eq!(denied["error"]["type"], "authority_exceeded");
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
+    }
+
+    #[test]
+    fn authority_gate_proven_reversibility_lowers_requirement() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        // Lower the ceiling to Disruptive so a plain Destructive action is blocked
+        // but a *proven-reversible* Destructive (needs only Disruptive) is allowed.
+        std::env::set_var("AICHAT_AUTHORITY_CEILING", "disruptive");
+        let config = config_with_tiers();
+
+        // Plain destructive → needs Destructive > Disruptive ceiling → blocked.
+        assert!(authority_denied_result(&config, &call("wipe_disk")).is_some());
+        // Proven-reversible destructive → needs only Disruptive → permitted.
+        assert!(
+            authority_denied_result(&config, &call("wipe_disk_reversible")).is_none(),
+            "proven-reversible destructive should drop to disruptive and fit the ceiling"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
+    }
+
+    #[test]
+    fn authority_gate_child_ceiling_from_env_lowers_authority() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        // Simulate a sub-agent granted only a Safe ceiling.
+        std::env::set_var("AICHAT_AUTHORITY_CEILING", "safe");
+        let config = config_with_tiers();
+
+        // Safe permitted; anything above blocked for this restricted child.
+        assert!(authority_denied_result(&config, &call("read_logs")).is_none());
+        assert!(authority_denied_result(&config, &call("restart_svc")).is_some());
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
         }
     }
 }

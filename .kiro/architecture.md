@@ -260,12 +260,15 @@ ToolCall arrives from LLM
   ├─ capability mask (#6a): under readonly mask AND tool not readonly?
   │     → return capability_denied result (no execution)
   │
+  ├─ authority gate (#6b): required_authority(tier, reversible, policy) > ceiling?
+  │     → return authority_exceeded / policy_forbidden result (no execution)
+  │
   ├─ MCP match?  → call_mcp_tool_async (await, no blocking)
   │
   ├─ agent: true? → eval_agent_tool_subprocess
   │     └─ spawn: aichat --agent <name> "<task>"
   │        (AICHAT_AGENT_DEPTH incremented, AICHAT_CAPABILITY_MASK=readonly,
-  │         own PID/budget/status)
+  │         AICHAT_AUTHORITY_CEILING propagated, own PID/budget/status)
   │
   └─ Shell tool → spawn_blocking + eval_shell
        └─ run_command(bin_name, args, envs)
@@ -295,6 +298,55 @@ for the full #6a–#6d plan).
   always permitted.
 - **Fallback role.** #6a is the permanent safety floor the richer increments (#6b tiers,
   #6c LLM risk evaluator, #6d escalation) degrade to when their machinery is absent.
+
+### Blast-radius tiers, reversibility & authority ceiling (backlog #6b)
+
+#6b generalizes the binary #6a mask into a graduated, still-fully-deterministic model
+(no LLM). Everything lives in the new [`src/safety.rs`](../src/safety.rs) module; the
+dispatch gates are in `agent_loop.rs::eval_single_tool` (after the #6a capability gate).
+
+- **5-tier blast radius (impact axis).** A tool declares `"risk": <tier>` where tier is
+  ordered `safe < reversible < disruptive < destructive < catastrophic`. `safe` = reads /
+  idempotent queries. Legacy `mode` maps onto the scale for back-compat (`readonly`→`safe`,
+  `mutating`→`disruptive`). Absent `risk`/`mode` → *unclassified* → reserved to humans.
+  Like `mode`, `risk` is `skip_serializing` (the LLM never sees it).
+- **Proven reversibility (orthogonal proof axis).** `"reversible": true` (intrinsic) — or a
+  real rollback artifact registered out-of-band (backup/staging/worktree, consumed from
+  #9/#10) — is a *separate boolean*, not a tier. Proven reversibility lowers the **authority
+  required** by one step (e.g. a provably-reversible `destructive` action needs only
+  `disruptive` authority); it never changes the tier itself. Reversibility must be *proven*,
+  never merely asserted.
+- **Root-favoring authority ceiling.** Each agent has a max tier it may actuate autonomously.
+  The top-level ceiling is `safety.default_ceiling` (default `destructive`, so `catastrophic`
+  always needs a human). The ceiling is propagated to sub-agents via
+  `AICHAT_AUTHORITY_CEILING` (alongside the mask and depth); a parent may only *lower*, never
+  raise, what it grants a child. Blast radius is action-intrinsic and does **not** correlate
+  with delegation depth — but the ceiling grows toward the root (more context up top).
+- **Protected Policy File (non-pardonable floor).** An optional owner-only YAML file
+  (`safety.policy_file`) of deterministic rules that can only *raise* an action's tier or
+  *forbid* it — never loosen. Rejected if group/world-readable (a tamperable policy is worse
+  than none). Format:
+  ```yaml
+  rules:
+    - tool: "fs_*"           # glob over tool name (default "*")
+      arg_glob: "/etc/**"    # optional: any string arg matches this glob
+      raise: catastrophic    # OR: forbid: true
+    - tool: "*"
+      arg_contains: "prod"
+      forbid: true
+  ```
+  Strictest match wins (`forbid` beats the highest `raise`). Absent file → empty policy
+  (safe, since unclassified tools are already human-reserved).
+- **Enforcement.** For each call the dispatcher computes
+  `required_authority(static_tier, policy_outcome, proven_reversible)` and compares it to the
+  agent's ceiling. Over-ceiling → `{"error": {"type": "authority_exceeded", ...}}`; a policy
+  forbid → `{"error": {"type": "policy_forbidden", ...}}` — both structured results (not
+  crashes), like the #6a gate. Pre-#6d these **block**; #6d turns the block into escalation.
+- **Config.** A new **top-level `safety:` section** (sibling of `agent_loop:`): `policy_file`,
+  `risk_model` (#6c), `default_ceiling`, `escalation_dir` (#6d), `verdict_timeout_secs` (#6d).
+  All `serde(default)` with safe defaults.
+- **Reserved for #6d.** The typed `EscalationMsg` / `VerdictMsg` (Halt/Revert/Continue) WebSocket
+  message schemas are defined now (unused) so the wire format is stable across increments.
 
 
 Tool calls are deduplicated and infinite loops are detected (before dispatch).

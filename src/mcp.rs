@@ -486,6 +486,10 @@ fn cached_tool_to_entry(server_name: &str, tool: &CachedTool) -> McpToolEntry {
             // MCP tools carry no safety metadata → unclassified (reserved to
             // humans / denied under a read-only mask). See backlog #6a FR-6a.2.
             mode: None,
+            // #6b: no declared blast radius either → unclassified tier.
+            risk: None,
+            reversible: None,
+            reversible_via: None,
         },
     }
 }

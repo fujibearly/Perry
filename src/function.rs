@@ -249,6 +249,22 @@ pub struct FunctionDeclaration {
     /// which is treated as the most conservative disposition.
     #[serde(skip_serializing, default)]
     pub mode: Option<ToolMode>,
+    /// Blast-radius tier (backlog #6b): the *impact* axis of this tool's actions,
+    /// `Safe`..`Catastrophic`. Governance metadata — never serialized to the LLM.
+    /// Absent means unclassified (reserved to humans, like an absent `mode`).
+    #[serde(skip_serializing, default)]
+    pub risk: Option<BlastRadius>,
+    /// Intrinsic reversibility (backlog #6b): `Some(true)` if undoing this tool's
+    /// action is inherent to the tool. The *proof* axis, orthogonal to `risk`.
+    /// Proven reversibility lowers the authority required, never the tier.
+    #[serde(skip_serializing, default)]
+    pub reversible: Option<bool>,
+    /// How reversibility is achieved when not intrinsic (backlog #6b), e.g.
+    /// `"backup"`, `"staging"`, `"worktree"`. Informational; the actual rollback
+    /// artifact is verified out-of-band (consumed from #9/#10).
+    #[serde(skip_serializing, default)]
+    #[allow(dead_code)] // consumed by #6c/#6d (rollback-artifact verification)
+    pub reversible_via: Option<String>,
 }
 
 impl FunctionDeclaration {
@@ -301,6 +317,91 @@ impl SafetyClass {
     /// and `unclassified` are denied to masked (sub-agent) contexts.
     pub fn allowed_under_readonly_mask(&self) -> bool {
         matches!(self, SafetyClass::Readonly)
+    }
+}
+
+/// Blast-radius tier (backlog #6b): the *impact* axis of an action, ordered by
+/// increasing danger. Derives `Ord` so ceiling comparisons and the stricter-only
+/// clamp are trivial `<=` / `max` operations.
+///
+/// Note: `Reversible` is a *tier name* for the low-impact-but-mutating band. It is
+/// distinct from the orthogonal *proven-reversibility* boolean (`FunctionDeclaration::
+/// reversible`) — the tier is the impact axis, the boolean is the proof axis; they
+/// are combined only when computing required authority (see `src/safety.rs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BlastRadius {
+    /// Radius 0: reads, idempotent queries — never changes state.
+    Safe,
+    /// Low-impact mutation.
+    Reversible,
+    /// Impactful but recoverable (e.g. restart a service).
+    Disruptive,
+    /// Irreversible loss if wrong (e.g. delete data without backup).
+    Destructive,
+    /// System- or fleet-level irreversible damage.
+    Catastrophic,
+}
+
+impl BlastRadius {
+    /// Lowercase string form, used for the `AICHAT_AUTHORITY_CEILING` env var
+    /// (and matching the serde `rename_all = "lowercase"` wire form).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BlastRadius::Safe => "safe",
+            BlastRadius::Reversible => "reversible",
+            BlastRadius::Disruptive => "disruptive",
+            BlastRadius::Destructive => "destructive",
+            BlastRadius::Catastrophic => "catastrophic",
+        }
+    }
+
+    /// Parse the lowercase string form (inverse of [`BlastRadius::as_str`]).
+    pub fn from_str(s: &str) -> Option<BlastRadius> {
+        match s {
+            "safe" => Some(BlastRadius::Safe),
+            "reversible" => Some(BlastRadius::Reversible),
+            "disruptive" => Some(BlastRadius::Disruptive),
+            "destructive" => Some(BlastRadius::Destructive),
+            "catastrophic" => Some(BlastRadius::Catastrophic),
+            _ => None,
+        }
+    }
+}
+
+/// The static (deterministic, pre-policy, pre-LLM) blast-radius classification of/// a tool, including the "no declaration" case.
+///
+/// Mirrors [`SafetyClass`] but on the 5-tier axis: an *undeclared* tool
+/// (`Unclassified`) is strictly more conservative than any concrete tier — it is
+/// reserved to humans (for now), sitting above every autonomous ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaticTier {
+    /// The tool declares a concrete blast radius.
+    Tier(BlastRadius),
+    /// No `risk`/`mode` declared (incl. MCP tools) — reserved to humans.
+    Unclassified,
+}
+
+impl FunctionDeclaration {
+    /// Resolve this tool's static blast-radius tier (backlog #6b), combining the
+    /// explicit `risk` field with the legacy #6a `mode` field for back-compat:
+    ///
+    /// - explicit `risk` wins when present;
+    /// - else legacy `mode`: `readonly` → `Safe`, `mutating` → `Disruptive`
+    ///   (the conservative floor for "declared-mutating-but-no-finer-tier");
+    /// - else (nothing declared) → `Unclassified` (reserved to humans).
+    ///
+    /// `readonly`→`Safe` and `mutating`→≥`Disruptive` is the compatibility rule
+    /// from the spec (FR-6b.1) so #6a declarations keep working under #6b.
+    pub fn static_tier(&self) -> StaticTier {
+        if let Some(risk) = self.risk {
+            return StaticTier::Tier(risk);
+        }
+        match self.mode {
+            Some(ToolMode::Readonly) => StaticTier::Tier(BlastRadius::Safe),
+            Some(ToolMode::Mutating) => StaticTier::Tier(BlastRadius::Disruptive),
+            None => StaticTier::Unclassified,
+        }
     }
 }
 
@@ -834,5 +935,101 @@ mod tests {
         assert!(!SafetyClass::Unclassified.allowed_under_readonly_mask());
         assert!(!SafetyClass::Mutating.allowed_under_readonly_mask());
         assert!(SafetyClass::Readonly.allowed_under_readonly_mask());
+    }
+
+    // --- Backlog #6b: blast-radius tiers, ordering, static_tier resolution ---
+
+    #[test]
+    fn blast_radius_is_totally_ordered_by_increasing_danger() {
+        assert!(BlastRadius::Safe < BlastRadius::Reversible);
+        assert!(BlastRadius::Reversible < BlastRadius::Disruptive);
+        assert!(BlastRadius::Disruptive < BlastRadius::Destructive);
+        assert!(BlastRadius::Destructive < BlastRadius::Catastrophic);
+        // max() picks the more dangerous tier — the basis of the stricter-only clamp.
+        assert_eq!(
+            std::cmp::max(BlastRadius::Safe, BlastRadius::Destructive),
+            BlastRadius::Destructive
+        );
+    }
+
+    #[test]
+    fn blast_radius_parses_lowercase() {
+        for (s, want) in [
+            ("safe", BlastRadius::Safe),
+            ("reversible", BlastRadius::Reversible),
+            ("disruptive", BlastRadius::Disruptive),
+            ("destructive", BlastRadius::Destructive),
+            ("catastrophic", BlastRadius::Catastrophic),
+        ] {
+            let decl: FunctionDeclaration = serde_json::from_value(json!({
+                "name": "t",
+                "description": "d",
+                "parameters": {"type": "object"},
+                "risk": s
+            }))
+            .unwrap();
+            assert_eq!(decl.risk, Some(want), "risk {s} should parse to {want:?}");
+        }
+    }
+
+    #[test]
+    fn risk_and_reversibility_not_serialized_to_the_llm() {
+        let decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "fs_delete",
+            "description": "delete a file",
+            "parameters": {"type": "object"},
+            "risk": "destructive",
+            "reversible": false
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(&decl).unwrap();
+        assert!(serialized.get("risk").is_none(), "risk must be skipped");
+        assert!(
+            serialized.get("reversible").is_none(),
+            "reversible must be skipped"
+        );
+    }
+
+    #[test]
+    fn static_tier_prefers_explicit_risk() {
+        let decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "t",
+            "description": "d",
+            "parameters": {"type": "object"},
+            "risk": "catastrophic",
+            "mode": "readonly"
+        }))
+        .unwrap();
+        // Explicit risk wins even over a (contradictory) mode.
+        assert_eq!(
+            decl.static_tier(),
+            StaticTier::Tier(BlastRadius::Catastrophic)
+        );
+    }
+
+    #[test]
+    fn static_tier_maps_legacy_mode_when_no_risk() {
+        // readonly → Safe
+        let ro: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "fs_cat", "description": "d", "parameters": {"type": "object"}, "mode": "readonly"
+        }))
+        .unwrap();
+        assert_eq!(ro.static_tier(), StaticTier::Tier(BlastRadius::Safe));
+
+        // mutating → Disruptive (conservative floor for declared-mutating)
+        let mu: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "fs_write", "description": "d", "parameters": {"type": "object"}, "mode": "mutating"
+        }))
+        .unwrap();
+        assert_eq!(mu.static_tier(), StaticTier::Tier(BlastRadius::Disruptive));
+    }
+
+    #[test]
+    fn static_tier_unclassified_when_nothing_declared() {
+        let decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "mystery", "description": "d", "parameters": {"type": "object"}
+        }))
+        .unwrap();
+        assert_eq!(decl.static_tier(), StaticTier::Unclassified);
     }
 }
