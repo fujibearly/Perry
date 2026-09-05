@@ -117,10 +117,10 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 | 4 | Tool Output Routing | ✓ Done (merged) | Medium | `feat/tool-output-routing` | Every tool result re-enters LLM context, wasteful for large/final outputs; routing to file/pipe makes composition practical without burning context. | **Pillar 3 (Declarative Data Flow):** Unix-style pipes, file targets, auto-capping. | M — done (~200 lines) |
 | 5 | Test Suite & Coverage Hardening | ✓ Done (merged) | Medium | `feat/test-suite-hardening` | Coverage analysis showed strong baseline but untested edges in error handling, crash isolation, cyclic pipe aborts, budget conditions. | **Pillar 5 (Deterministic Safety):** validates circuit-breaker/budget guarantees. | M — done. +25 unit tests + Demo 12 (offline crash isolation). agent_loop.rs 46.8%→64.7% line. Merged to main. |
 | 6 | Tool Safety Modes & Actuation Governance (umbrella) | ✓ Done (unmerged) | High | `feat/tool-safety-6a…6d` | Parallel sub-agents must never cause catastrophe; a graduated, safety-governed model gates *which* agent may perform *which* action: non-pardonable deterministic floor + LLM risk overlay + escalation to humans. | **Tenet 4 ("triage in parallel, actuate in sequence") + Pillar 5:** the missing enforcement layer for the SRE stress-test. | Umbrella; 4 stacked increments (#6a–#6d) that degrade gracefully. Spec: [`.kiro/specs/tool-safety-modes/`](../specs/tool-safety-modes/) |
-| 6a | ↳ Deterministic capability mask (floor / fallback) | ✓ Implemented (`feat/tool-safety-6b`, unmerged) | High | `feat/tool-safety-6a` | Binary `readonly`/`mutating` mask; sub-agents read-only by default; **unclassified tools reserved to humans**. The permanent floor everything degrades to. | **Pillar 2 + Pillar 5:** mask rides the child-PID env channel (like `AICHAT_AGENT_DEPTH`). | S–M — done. `function.rs` (`ToolMode`/`SafetyClass`), `agent_loop.rs` (mask + `capability_denied` gate), `mcp.rs`. +8 tests. |
+| 6a | ↳ Deterministic capability mask (floor / fallback) | ✓ Implemented (`feat/tool-safety-6a`, unmerged) | High | `feat/tool-safety-6a` | Binary `readonly`/`mutating` mask; sub-agents read-only by default; **unclassified tools reserved to humans**. The permanent floor everything degrades to. | **Pillar 2 + Pillar 5:** mask rides the child-PID env channel (like `AICHAT_AGENT_DEPTH`). | S–M — done. `function.rs` (`ToolMode`/`SafetyClass`), `agent_loop.rs` (mask + `capability_denied` gate), `mcp.rs`. +8 tests. |
 | 6b | ↳ Blast-radius tiers + proven reversibility + Protected Policy File + authority gradient | ✓ Implemented + hardened (`feat/tool-safety-6b`, unmerged) | High | `feat/tool-safety-6b` | 5-tier radius (`Safe`→`Catastrophic`), orthogonal *proven* reversibility (catastrophic = hard human-only floor), non-pardonable Protected Policy File, root-favoring authority ceiling. Delegation not gated (decision B). Fully deterministic. | **Tenet 4 + Pillar 5:** deterministic floor before any LLM; authority grows toward the root. | M — done. New `src/safety.rs`; top-level `safety:` config + `AICHAT_SAFETY_*` env; `ToolBlocked` trace; all 31 tools classified (`llm-functions` repo). +33 tests; demos 13–15. |
 | 6c | ↳ `%assess-risk%` LLM evaluator (stricter-only overlay) | ✓ Implemented (`feat/tool-safety-6c`, unmerged) | High | `feat/tool-safety-6c` | Dedicated cheap model (`safety.risk_model`) + minimal-context `%assess-risk%` role returns a structured verdict that can only make things *stricter*. `Safe` fast-path skips it; fail-toward (low-confidence/error → block); monotonic **raise-only `RiskCache`** reuses assessments without ever green-lighting. Absent `risk_model` → degrades to exactly #6b. | **Principle: "the LLM is not a Pardoner."** Advisory overlay clamped in Rust; assessment is an earlier red-light, never a green-light. | M — done. Role asset + `safety.rs` (verdict parse/clamp/cache) + `agent_loop.rs` wiring. +24 tests. Literal plan-time flagging superseded by the raise-only cache (see design.md as-built); serious structured `_plan` split to its own item. |
-| 6d | ↳ Escalation & control protocol + human-in-the-loop | ✓ Done (unmerged) | High | `feat/tool-safety-6d` | mTLS inter-agent channel (child dials parent, **loopback raw-TLS + length-delimited JSON framing — not WebSocket**; WS deferred behind the `EscalationTransport` trait), typed `Escalation`/`Verdict{Halt\|Revert\|Continue}`/`Cancel`, durable rollback journal (REVERT replays it — survives connection/child death), branch-only suspension, upward propagation to orchestrator, then interactive-CLI human prompt or Layer 3. Forward-compatible with remote agents (TLS + transport-independent protocol). | **Pillar 2 (process-isolated control) + Pillar 5.** Control plane = ephemeral mTLS conn; durability plane = on-disk journal; audit plane = #14. Child auth = channel-bound HMAC (no static token). | L — done. `src/escalation.rs` + `src/safety.rs` + `src/agent_loop.rs` integration. mTLS listener + client, RollbackJournal + replay, HITL single-key prompt (`[c]ontinue | [h]alt | [r]evert`), upward propagation, headless mode, Demo 16. +14 tests. |
+| 6d | ↳ Escalation & control protocol + human-in-the-loop | ✓ Done (unmerged) | High | `feat/tool-safety-6d` | Persistent per-process mTLS inter-agent channel (child dials parent, **loopback raw-TLS + length-delimited JSON framing — not WebSocket**; WS deferred behind the `EscalationTransport` trait), actor-serialized single-writer, demuxed oneshot reader, bounded drop-newest event backpressure, immediate socket-drop fail-closed, typed `Escalation`/`Verdict{Halt\|Revert\|Continue}`/`Cancel`, durable rollback journal (REVERT replays it — survives connection/child death), branch-only suspension, upward propagation to orchestrator, interactive single-key HITL CLI prompt (`[c]ontinue \| [h]alt \| [r]evert \| [e]xplain \| [g]uide`), headless Layer 3. | **Pillar 2 (process-isolated control) + Pillar 5.** Control plane = persistent mTLS conn; durability plane = on-disk 0600 journal; audit plane = #14. Child auth = channel-bound HMAC (no static token). | L — done (`f57a7e6`). `src/escalation.rs` + `src/safety.rs` + `src/agent_loop.rs` integration. mTLS listener + persistent client actor, RollbackJournal + replay, HITL prompt, upward propagation, parent trace forwarding, Demo 16. +20 tests. |
 | 7 | Session Resumption & WAL Journaling (`--resume`) | 🔜 Proposed | High | `feat/session-wal-resumption` | Long diagnostic sessions must survive network dropouts, rate-limits, `SIGINT` without re-running expensive probes. | **Tenet 1 (system-level scope) + Pillar 4 (Observability):** status files → durable WAL. | L — ~250-350 lines + new `session_wal.rs`; replay/checkpoint correctness is the hard part. |
 | 8 | Dynamic Multi-Turn Context Compaction | 🔜 Proposed | Medium | `feat/context-compaction` | Extended 15+ turn investigations accumulate context monoliths; rolling micro-summaries keep the working context dense. | **Pillar 1 (Delegation over Context Monoliths):** complementary in-thread fallback to delegation/routing. | M — ~200-300 lines; summarization-quality tuning adds uncertainty. |
 | 9 | Ephemeral Git Worktree Isolation for Coders | 🔜 Proposed | Medium | `feat/ephemeral-git-worktrees` | Concurrent `coder` sub-agents in a Git repo must build/edit/test without file clobbering or build collision. | **Pillar 2 (Process Isolation)** extended to filesystem isolation. Scoped to the coding sub-case ("worktree trap") — opt-in. | M — ~150-250 lines; worktree lifecycle/cleanup edge cases. |
@@ -165,7 +165,7 @@ Legend: ✓ Done · 🔨 in progress · 🔜 proposed & tracked · ⏸ deferred.
 ### `feat/rust-mcp-bridge` (off `main`)
 1. `3e95825` — feat: add native Rust MCP bridge (replaces Node.js bridge)
 
-### `feat/tool-safety-6a` → `feat/tool-safety-6b` (off `main`, #6 umbrella)
+### `feat/tool-safety-6a` → `feat/tool-safety-6b` → `feat/tool-safety-6c` → `feat/tool-safety-6d` (off `main`, #6 umbrella)
 - `c28dfd5` — docs: add spec for backlog #6 (umbrella #6a–#6d)
 - `8994922` — feat: backlog #6a — deterministic tool safety capability mask
 - `e338c8b` / `6b4e703` — docs: Session 4 handoff (+ #6d WebSocket redesign, #14 audit log)
@@ -173,7 +173,14 @@ Legend: ✓ Done · 🔨 in progress · 🔜 proposed & tracked · ⏸ deferred.
 - `d8391af` — docs: fix residual file-rendezvous refs in #6 design
 - `7de3291` — feat: backlog #6b — blast-radius tiers, proven reversibility, protected policy, authority ceiling
 - `a3e8eb6` — feat: #6b follow-ups — delegation-not-gated, catastrophic hard floor, safety env overrides, blocked-trace fix, gate demos
+- `e530f95` — docs: consolidate roadmap/progress/backlog; add Session 5 handoff; sync #6b as-built
+- `58af926` — feat: backlog #6c — %assess-risk% LLM risk evaluator (stricter-only overlay)
+- `d40bccc` — feat: backlog #6d (part 1) — mTLS escalation channel transport + auth core
+- `208f31c` — docs: add #6d part 2 handover (escalation loop integration)
+- `8c57672` — docs: add Session 6 summary; sync roadmap.md + index to #6d part 1
+- `f57a7e6` — feat: backlog #6d (part 2) — persistent per-process mTLS connection & escalation integration
 - Companion (llm-functions repo, branch `feat/tool-safety-classification`): `2989f26` — feat: classify all tools with safety risk tiers
+
 
 ## What's Implemented
 
@@ -204,6 +211,25 @@ Second increment — graduated deterministic governance (no LLM):
 - **All 31 stock tools classified** (companion work in the `llm-functions` repo, branch `feat/tool-safety-classification`): `# @meta risk <tier>` annotations + `build-declarations.{sh,js,py}` extended to emit `risk`/`reversible`. Unclassified tools are human-reserved (why classification was needed for the engine to be usable by default).
 - +33 unit tests (incl. catastrophic clamp, `safety_block_reason`); suite 360→385 unit, 0 fail; clippy no new warnings. Live gate demos 13–15 pass on `gemini-2.5-flash`.
 
+### #6c %assess-risk% LLM Evaluator ✓ (unmerged)
+Third increment — dynamic risk evaluation overlay:
+- Dedicated role `assets/roles/%assess-risk%.md` using cheap model `safety.risk_model` (e.g. `gemini-2.5-flash`).
+- Minimal-context builder: tool, resolved args, static tier, proven reversibility flag, this-step intent (excludes history and scratchpad).
+- **Stricter-only clamp:** Rust clamps evaluator verdict such that it can only *raise* risk or *withhold* reversibility credit; never relaxes static tiers or policy rules ("the LLM is not a Pardoner").
+- **`Safe` fast-path:** Read-only / `Safe` actions bypass the evaluator entirely.
+- **Monotonic raise-only `RiskCache`:** Reuses assessments for identical tool calls within a run without ever green-lighting or downgrading.
+- +24 unit tests; graceful degradation when `risk_model` is unspecified.
+
+### #6d Escalation & Control Protocol + HITL ✓ (unmerged)
+Fourth increment — persistent mTLS control plane, human-in-the-loop, and durable rollback journaling:
+- **Persistent Per-Process mTLS Client (`ChildEscalationClient`):** Sub-agents establish a single persistent connection to parent's loopback mTLS listener, multiplexing `Hello` → `Events` → `Escalations` ↔ `Verdicts` → `Results`/`Errors`.
+- **Actor-Isolated Single Writer:** Dedicated Writer task exclusively owns `WriteHalf`, preventing byte interleaving and framing desync.
+- **Demuxed Oneshot Reader & Immediate Fail-Closed:** Reader task owns `ReadHalf` and routes inbound verdicts to waiting callers via an in-memory `oneshot` registry. If socket drops or parent dies, all pending oneshots immediately drain with a fail-closed error.
+- **Event Backpressure:** Bounded 1024-element MPSC with `try_send` drop-newest on saturation for non-blocking child progress events; parent renders child events live as `[child <agent_id>] ...`.
+- **Durable Rollback Journal (0600):** Append-only on-disk `RollbackJournal` under `$XDG_RUNTIME_DIR/aichat/journals/` with atomic replay on `Revert` verdicts.
+- **Human-in-the-Loop CLI UX:** Interactive single-key terminal prompt (`[c]ontinue | [h]alt | [r]evert | [e]xplain | [g]uide`); headless Layer-3 fail-closed mode.
+- +20 unit/integration tests; Demo 16 offline fail-closed and journal durability verified.
+
 ### PDF Loader Enhancement
 Default `document_loaders.pdf` switched from `pdftotext` to `pdf2md --compact --raw` (firecrawl/pdf-inspector). Structured Markdown for better RAG chunking and token efficiency.
 
@@ -226,6 +252,13 @@ Default `document_loaders.pdf` switched from `pdftotext` to `pdf2md --compact --
 | Delegation is not gated (decision B, #6b) | Spawning a sub-agent is orchestration, not actuation; gating it double-counts and breaks multi-agent mode. The child's own actions are gated inside its process (mask + ceiling). |
 | Catastrophic is a hard human-only floor (#6b) | Proven reversibility must not discount catastrophic, or a tool-author-set `reversible: true` could undercut a policy-imposed catastrophic raise. Catastrophic always → human. |
 | Blocked tools trace as BLOCKED, not completed (#6b) | A gate denial returns via the dispatcher's Ok path; a distinct `ToolBlocked` event keeps the trace truthful (the binary never ran) and skips output routing. |
+| The LLM is not a Pardoner (#6c) | Evaluator verdicts can only raise risk or withhold reversibility; never relax static tiers or policy rules. |
+| Raise-only RiskCache (#6c) | Caching authority requirements across turns prevents redundant model calls without risking permissive bypass. |
+| Path 1′ in-tree mTLS + length-delimited JSON (#6d) | Builds mTLS over in-tree `tokio-rustls` with big-endian framing without adding heavy WebSocket crate dependencies. |
+| Persistent per-process mTLS connection (#6d) | Single handshake per sub-agent lifecycle carrying events, escalations, and results eliminates connection churn. |
+| Single-writer actor serialization (#6d) | Exclusive ownership of `WriteHalf` in a background actor prevents byte interleaving across concurrent events/escalations. |
+| Demuxed oneshot reader + immediate fail-closed (#6d) | Reader task demuxes verdicts by `escalation_id` and instantly fails pending oneshots if the socket closes. |
+| Drop-newest bounded event channel (#6d) | 1024-element MPSC with `try_send` prevents event backpressure from stalling model execution or exhausting memory. |
 
 ## Branch Status
 
@@ -236,15 +269,16 @@ Default `document_loaders.pdf` switched from `pdftotext` to `pdf2md --compact --
 - `feat/tool-output-routing` — #4, complete (merged to `main`)
 - `feat/test-suite-hardening` — #5, complete (merged to `main`)
 - `feat/tool-safety-6a` — #6a, complete (folded into `feat/tool-safety-6b`'s history)
-- **`feat/tool-safety-6b`** — #6b, **implemented (active, unmerged; off `feat/tool-safety-6a`)**
+- `feat/tool-safety-6b` — #6b, complete (folded into `feat/tool-safety-6c`'s history)
+- `feat/tool-safety-6c` — #6c, complete (folded into `feat/tool-safety-6d`'s history)
+- **`feat/tool-safety-6d`** — #6d, **implemented & verified (active, unmerged; commit `f57a7e6`)**
 - Companion: `llm-functions` repo, branch `feat/tool-safety-classification` — all 31 tools classified (unmerged)
 
 ## Merge Strategy
 
 ```
 main ← feat/rust-mcp-bridge ← feat/agent-loop-enhancements ← feat/tool-output-routing (all merged)
-main ← feat/tool-safety-6a ← feat/tool-safety-6b (current, unmerged)
-                                              ← feat/tool-safety-6c ← …6d (future)
+main ← feat/tool-safety-6a ← feat/tool-safety-6b ← feat/tool-safety-6c ← feat/tool-safety-6d (current, unmerged)
 ```
 
 ## Environment Reminders

@@ -67,6 +67,20 @@ This repository maintains continuous, chronological session handoff summaries do
      * **Evaluated the #6d transport/dependency question** with the user → **Path 1′**: build mutual-TLS now over the in-tree `tokio-rustls` with **hand-rolled length-delimited JSON framing — NOT WebSocket** (deferred behind the `EscalationTransport` trait). Dependency audit: fork had added only 1 crate since upstream; declined `tokio-tungstenite`. Only new crate `rcgen` (+ tiny `yasna`); `rustls` stays single-version, no OpenSSL.
      * **Implemented + committed Backlog #6d part 1** (`d40bccc`) — new `src/escalation.rs`: mTLS transport, ephemeral `rcgen` per-tree cert, fingerprint-pinning rustls verifier (**fail-closed**), **channel-bound HMAC** child auth (no static token), typed `Upstream`/`Downstream` protocol + length-delimited framing. +14 tests incl. **end-to-end localhost mTLS handshake** (legit authenticates; wrong fingerprint rejected by child; wrong tree-secret rejected by parent). Suite **424 unit / 432 workspace, 0 fail**.
      * **Wrote + committed a #6d part-2 handover doc** (`208f31c`) for the loop-integration half.
-     * **State:** on branch `feat/tool-safety-6d` @ `208f31c` (unmerged); nothing pushed (intentional). **Next: #6d part 2** (loop integration — child escalation handler, verdict verbs, rollback journal, upward propagation, human-in-the-loop) per the handover doc.
+     * **State:** on branch `feat/tool-safety-6d` @ `208f31c` (unmerged); nothing pushed (intentional).
+
+7. **Session 7: Backlog #6d Part 2 Completed & Committed — Persistent Per-Process mTLS Connection & Escalation Integration**
+   * **Period:** `2026-09-04`
+   * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-04-session7.md`](.kiro/docs/session-summary-2026-09-04-session7.md)
+   * **Focus Areas:**
+     * **Completed & committed Backlog #6d Part 2** (`f57a7e6`), completing the entire Tool Safety Modes & Actuation Governance umbrella (#6a–#6d).
+     * **Persistent Per-Process mTLS Connection:** Transitioned inter-agent transport to a single persistent per-process mTLS connection (`ChildEscalationClient`) multiplexing `Hello` → `Events` → `Escalations` ↔ `Verdicts` → `Results`/`Errors`.
+     * **Actor Serialization & Demux:** Dedicated background single-writer actor exclusively owns `WriteHalf`, preventing frame interleaving; demuxed reader task owns `ReadHalf` and resolves in-flight escalations via an in-memory `oneshot` registry keyed by `escalation_id`.
+     * **Event Backpressure & Fail-Closed:** Non-blocking 1024-bounded MPSC with drop-newest on saturation for events; immediate fail-closed cancellation of all pending oneshots on socket EOF/drop without waiting for timeouts; terminal result delivery with flush-ack before process exit.
+     * **Loop Integration & HITL:** Connected `eval_single_tool` to persistent escalation client, upward parent propagation, interactive single-key HITL CLI prompt (`[c]ontinue | [h]alt | [r]evert | [e]xplain | [g]uide`), headless Layer-3 fail-closed mode, and parent trace rendering (`[child <agent_id>] ...`).
+     * **Durable Rollback Journal:** Append-only on-disk `RollbackJournal` under `$XDG_RUNTIME_DIR/aichat/journals/` with strict `0600` permissions and atomic replay.
+     * **Verification:** Suite **446 pass, 0 fail** (438 unit + 5 catalog + 3 integration, +20 tests from #6d), `cargo clippy --all-targets -- -D warnings` with 0 warnings, **16/16 demos pass** (`scripts/run-demos.nu`, with Demo 16 verifying genuine subprocess offline fail-closed and 0600 journal durability).
+     * **State:** on branch `feat/tool-safety-6d` @ `f57a7e6`; local-only (nothing pushed).
+
 
 
