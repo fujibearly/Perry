@@ -25,6 +25,7 @@
 use crate::function::{BlastRadius, FunctionDeclaration, StaticTier};
 
 use anyhow::{bail, Context, Result};
+use std::path::{Path, PathBuf};
 
 // ---------------------------------------------------------------------------
 // Required authority
@@ -793,6 +794,259 @@ pub enum DownstreamMsg {
     Cancel(CancelMsg),
 }
 
+// ---------------------------------------------------------------------------
+// Durable Rollback Journal (#6d, FR-6d.6)
+// ---------------------------------------------------------------------------
+
+/// A single recorded mutation entry in the durable rollback journal.
+///
+/// Written *before or at* mutation time so that an out-of-band kill or connection
+/// drop leaves a durable, replayable trail on disk. The journal lives in the
+/// filesystem (durability plane), distinct from the ephemeral mTLS control
+/// channel (control plane).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RollbackJournalEntry {
+    /// Unique entry identifier (e.g. timestamp or uuid).
+    pub id: String,
+    /// The agent that performed the mutation.
+    pub agent_id: String,
+    /// The root orchestrator tree identity.
+    pub tree_id: String,
+    /// Unix timestamp (seconds) when recorded.
+    pub timestamp: u64,
+    /// Tool name that performed the mutation.
+    pub tool: String,
+    /// Tool arguments serialized as JSON.
+    pub args: serde_json::Value,
+    /// Absolute working directory at mutation time (avoids guessing execution context).
+    pub working_dir: PathBuf,
+    /// Shell used or preferred for execution (e.g. `/bin/bash`).
+    #[serde(default)]
+    pub shell: Option<String>,
+    /// Target file path if this mutation touched a file.
+    #[serde(default)]
+    pub target_path: Option<PathBuf>,
+    /// Path to a backup file (.bak) created before mutation.
+    #[serde(default)]
+    pub artifact_path: Option<PathBuf>,
+    /// Explicit shell command that rolls back this mutation.
+    #[serde(default)]
+    pub undo_command: Option<String>,
+}
+
+/// Outcome of attempting to replay a journal entry.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RollbackOutcome {
+    pub entry_id: String,
+    pub success: bool,
+    pub details: String,
+}
+
+/// Durable on-disk rollback journal manager.
+pub struct RollbackJournal {
+    journal_path: PathBuf,
+    backups_dir: PathBuf,
+}
+
+impl RollbackJournal {
+    /// Resolve the root journal directory following the 3-tier fallback hierarchy:
+    /// 1. `safety.escalation_dir` (or `AICHAT_SAFETY_ESCALATION_DIR`)
+    /// 2. `$XDG_RUNTIME_DIR/aichat/journals`
+    /// 3. `temp_dir/aichat/journals`
+    pub fn resolve_journal_dir(configured_dir: &Option<PathBuf>) -> PathBuf {
+        if let Some(dir) = configured_dir {
+            return dir.join("journals");
+        }
+        if let Ok(dir) = std::env::var("AICHAT_SAFETY_ESCALATION_DIR") {
+            if !dir.trim().is_empty() {
+                return PathBuf::from(dir).join("journals");
+            }
+        }
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            if !runtime_dir.trim().is_empty() {
+                return PathBuf::from(runtime_dir).join("aichat").join("journals");
+            }
+        }
+        std::env::temp_dir().join("aichat").join("journals")
+    }
+
+    /// Open or create a journal for a specific tree and agent.
+    pub fn open(base_dir: &Path, tree_id: &str, agent_id: &str) -> Result<Self> {
+        let clean_tree_id = sanitize_filename(tree_id);
+        let clean_agent_id = sanitize_filename(agent_id);
+        std::fs::create_dir_all(base_dir)
+            .with_context(|| format!("Failed to create journal dir {}", base_dir.display()))?;
+
+        let backups_dir = base_dir.join("backups").join(&clean_tree_id);
+        std::fs::create_dir_all(&backups_dir)
+            .with_context(|| format!("Failed to create backups dir {}", backups_dir.display()))?;
+
+        let journal_path = base_dir.join(format!("journal-{clean_tree_id}-{clean_agent_id}.jsonl"));
+
+        // Ensure file exists with owner-only (0600) permissions on Unix
+        if !journal_path.exists() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .mode(0o600)
+                    .open(&journal_path)
+                    .with_context(|| format!("Failed to create journal file {}", journal_path.display()))?;
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(true)
+                    .open(&journal_path)
+                    .with_context(|| format!("Failed to create journal file {}", journal_path.display()))?;
+            }
+        }
+
+        Ok(Self {
+            journal_path,
+            backups_dir,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub fn journal_path(&self) -> &Path {
+        &self.journal_path
+    }
+
+    #[allow(dead_code)]
+    pub fn backups_dir(&self) -> &Path {
+        &self.backups_dir
+    }
+
+    /// Append an entry to the journal atomically in POSIX.
+    pub fn record(&self, entry: &RollbackJournalEntry) -> Result<()> {
+        use std::io::Write;
+        let mut line = serde_json::to_string(entry)?;
+        line.push('\n');
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.journal_path)
+            .with_context(|| format!("Failed to open journal for append: {}", self.journal_path.display()))?;
+        file.write_all(line.as_bytes())
+            .with_context(|| format!("Failed to append to journal: {}", self.journal_path.display()))?;
+        file.flush()?;
+        Ok(())
+    }
+
+    /// Read all recorded entries in insertion order.
+    pub fn entries(&self) -> Result<Vec<RollbackJournalEntry>> {
+        if !self.journal_path.exists() {
+            return Ok(vec![]);
+        }
+        let content = std::fs::read_to_string(&self.journal_path)
+            .with_context(|| format!("Failed to read journal: {}", self.journal_path.display()))?;
+        let mut entries = Vec::new();
+        for (line_no, line) in content.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            let entry: RollbackJournalEntry = serde_json::from_str(line)
+                .with_context(|| format!("Malformed journal entry at line {} in {}", line_no + 1, self.journal_path.display()))?;
+            entries.push(entry);
+        }
+        Ok(entries)
+    }
+
+    /// Replay the most recent entry (LIFO).
+    pub async fn replay_last(&self) -> Result<RollbackOutcome> {
+        let entries = self.entries()?;
+        let Some(last) = entries.last() else {
+            return Ok(RollbackOutcome {
+                entry_id: "none".into(),
+                success: true,
+                details: "No journal entries found to replay".into(),
+            });
+        };
+        Self::replay_entry(last).await
+    }
+
+    /// Replay a specific journal entry autonomously.
+    pub async fn replay_entry(entry: &RollbackJournalEntry) -> Result<RollbackOutcome> {
+        // 1. If an explicit undo_command is present, execute it in `working_dir`
+        if let Some(cmd) = &entry.undo_command {
+            let shell = entry.shell.as_deref().unwrap_or("/bin/bash");
+            let mut command = tokio::process::Command::new(shell);
+            command.arg("-c").arg(cmd);
+            command.current_dir(&entry.working_dir);
+            let output = command.output().await.with_context(|| {
+                format!("Failed to execute undo command `{cmd}` in shell `{shell}`")
+            })?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                return Ok(RollbackOutcome {
+                    entry_id: entry.id.clone(),
+                    success: false,
+                    details: format!(
+                        "undo_command failed with status {}: {stderr} {stdout}",
+                        output.status
+                    ),
+                });
+            }
+            return Ok(RollbackOutcome {
+                entry_id: entry.id.clone(),
+                success: true,
+                details: format!("Successfully executed undo command `{cmd}`"),
+            });
+        }
+
+        // 2. If an artifact backup path and target path are present, restore the file
+        if let (Some(backup), Some(target)) = (&entry.artifact_path, &entry.target_path) {
+            if !backup.exists() {
+                return Ok(RollbackOutcome {
+                    entry_id: entry.id.clone(),
+                    success: false,
+                    details: format!("Backup artifact `{}` not found", backup.display()),
+                });
+            }
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(backup, target).with_context(|| {
+                format!(
+                    "Failed to restore backup from {} to {}",
+                    backup.display(),
+                    target.display()
+                )
+            })?;
+            return Ok(RollbackOutcome {
+                entry_id: entry.id.clone(),
+                success: true,
+                details: format!(
+                    "Restored file from backup {} to {}",
+                    backup.display(),
+                    target.display()
+                ),
+            });
+        }
+
+        Ok(RollbackOutcome {
+            entry_id: entry.id.clone(),
+            success: false,
+            details: "Entry lacks both undo_command and artifact_path for autonomous replay".into(),
+        })
+    }
+}
+
+fn sanitize_filename(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1420,5 +1674,149 @@ mod tests {
         // A forward/garbage message must be a clean deserialize error, not a panic.
         let r = serde_json::from_str::<UpstreamMsg>(r#"{"type":"bogus","x":1}"#);
         assert!(r.is_err());
+    }
+
+    // --- #6d: durable rollback journal tests (6d.6) ---
+
+    struct TestDir(PathBuf);
+    impl TestDir {
+        fn new(prefix: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "aichat-test-{prefix}-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir_all(&p).unwrap();
+            Self(p)
+        }
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn journal_records_and_reads_entries_in_order() {
+        let temp = TestDir::new("journal-order");
+        let journal = RollbackJournal::open(temp.path(), "tree-1", "agent-1").unwrap();
+
+        let e1 = RollbackJournalEntry {
+            id: "e1".into(),
+            agent_id: "agent-1".into(),
+            tree_id: "tree-1".into(),
+            timestamp: 100,
+            tool: "fs_write".into(),
+            args: serde_json::json!({"path": "/tmp/a"}),
+            working_dir: temp.path().to_path_buf(),
+            shell: Some("/bin/sh".into()),
+            target_path: Some(temp.path().join("a")),
+            artifact_path: None,
+            undo_command: Some("rm -f /tmp/a".into()),
+        };
+        let e2 = RollbackJournalEntry {
+            id: "e2".into(),
+            agent_id: "agent-1".into(),
+            tree_id: "tree-1".into(),
+            timestamp: 101,
+            tool: "fs_patch".into(),
+            args: serde_json::json!({"path": "/tmp/b"}),
+            working_dir: temp.path().to_path_buf(),
+            shell: None,
+            target_path: Some(temp.path().join("b")),
+            artifact_path: Some(temp.path().join("b.bak")),
+            undo_command: None,
+        };
+
+        journal.record(&e1).unwrap();
+        journal.record(&e2).unwrap();
+
+        let entries = journal.entries().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], e1);
+        assert_eq!(entries[1], e2);
+
+        // Re-opening the same journal preserves all entries.
+        let journal2 = RollbackJournal::open(temp.path(), "tree-1", "agent-1").unwrap();
+        let entries2 = journal2.entries().unwrap();
+        assert_eq!(entries2, entries);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn journal_file_created_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = TestDir::new("journal-perm");
+        let journal = RollbackJournal::open(temp.path(), "tree-perm", "agent-perm").unwrap();
+        let meta = std::fs::metadata(journal.journal_path()).unwrap();
+        let mode = meta.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "journal file must be mode 0600 (owner only)");
+    }
+
+    #[tokio::test]
+    async fn journal_replay_executes_undo_command_with_context() {
+        let temp = TestDir::new("journal-undo");
+        let target_file = temp.path().join("test_revert.txt");
+        std::fs::write(&target_file, "modified content").unwrap();
+
+        let entry = RollbackJournalEntry {
+            id: "e_undo".into(),
+            agent_id: "agent-1".into(),
+            tree_id: "tree-1".into(),
+            timestamp: 100,
+            tool: "fs_write".into(),
+            args: serde_json::json!({"path": target_file.display().to_string()}),
+            working_dir: temp.path().to_path_buf(),
+            shell: Some("/bin/sh".into()),
+            target_path: Some(target_file.clone()),
+            artifact_path: None,
+            undo_command: Some(format!("echo -n 'original content' > {}", target_file.display())),
+        };
+
+        let outcome = RollbackJournal::replay_entry(&entry).await.unwrap();
+        assert!(outcome.success, "replay should succeed: {}", outcome.details);
+        let content = std::fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, "original content");
+    }
+
+    #[tokio::test]
+    async fn journal_replay_restores_artifact_backup() {
+        let temp = TestDir::new("journal-bak");
+        let target_file = temp.path().join("target.txt");
+        let backup_file = temp.path().join("target.bak");
+
+        std::fs::write(&backup_file, "backup original content").unwrap();
+        std::fs::write(&target_file, "mutated content").unwrap();
+
+        let entry = RollbackJournalEntry {
+            id: "e_bak".into(),
+            agent_id: "agent-1".into(),
+            tree_id: "tree-1".into(),
+            timestamp: 100,
+            tool: "fs_write".into(),
+            args: serde_json::json!({}),
+            working_dir: temp.path().to_path_buf(),
+            shell: None,
+            target_path: Some(target_file.clone()),
+            artifact_path: Some(backup_file.clone()),
+            undo_command: None,
+        };
+
+        let outcome = RollbackJournal::replay_entry(&entry).await.unwrap();
+        assert!(outcome.success, "backup restore should succeed: {}", outcome.details);
+        let content = std::fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, "backup original content");
+    }
+
+    #[tokio::test]
+    async fn journal_replay_last_on_empty_returns_clean_success() {
+        let temp = TestDir::new("journal-empty");
+        let journal = RollbackJournal::open(temp.path(), "tree-empty", "agent-empty").unwrap();
+        let outcome = journal.replay_last().await.unwrap();
+        assert!(outcome.success);
+        assert_eq!(outcome.entry_id, "none");
     }
 }

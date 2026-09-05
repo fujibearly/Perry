@@ -27,15 +27,15 @@
 //! exchanged*. The loopback-TLS impl is the only concrete transport today; a
 //! WebSocket-over-routable-TLS transport can be added as a second impl behind the
 //! same trait when a remote deployment (proxy/browser in the path) needs it —
-//! without touching the message protocol or the auth model.
-
-#![allow(dead_code)] // Progressive wiring across the #6d sub-tasks (6d.1–6d.10).
-
 use crate::safety::{DownstreamMsg, UpstreamMsg};
 
 use anyhow::{anyhow, bail, Context, Result};
+use parking_lot::Mutex as ParkingMutex;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, oneshot};
 
 /// Hard cap on a single frame's payload, to bound memory from a malformed or
 /// hostile length prefix. The control channel carries small JSON control
@@ -223,6 +223,7 @@ pub trait EscalationTransport: Send {
     async fn send_upstream(&mut self, msg: &UpstreamMsg) -> Result<()>;
     async fn recv_upstream(&mut self) -> Result<Option<UpstreamMsg>>;
     async fn send_downstream(&mut self, msg: &DownstreamMsg) -> Result<()>;
+    #[allow(dead_code)]
     async fn recv_downstream(&mut self) -> Result<Option<DownstreamMsg>>;
 }
 
@@ -284,6 +285,10 @@ where
 {
     pub fn new(stream: S) -> Self {
         Self { stream }
+    }
+
+    pub fn into_inner(self) -> S {
+        self.stream
     }
 }
 
@@ -362,6 +367,7 @@ impl ParentListener {
     }
 
     /// The parent cert fingerprint a child pins.
+    #[allow(dead_code)]
     pub fn fingerprint(&self) -> &str {
         &self.identity.fingerprint
     }
@@ -442,9 +448,15 @@ pub struct ParentConnInfo {
 impl ParentConnInfo {
     pub fn from_env() -> Option<ParentConnInfo> {
         let addr = std::env::var("AICHAT_AGENT_PARENT_ADDR").ok()?;
-        let fingerprint = std::env::var("AICHAT_AGENT_PARENT_FP").ok()?;
-        let tree_secret = std::env::var("AICHAT_TREE_SECRET").ok()?;
-        let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_default();
+        let fingerprint = std::env::var("AICHAT_AGENT_PARENT_FP")
+            .or_else(|_| std::env::var("AICHAT_AGENT_PARENT_FINGERPRINT"))
+            .ok()?;
+        let tree_secret = std::env::var("AICHAT_TREE_SECRET")
+            .or_else(|_| std::env::var("AICHAT_AGENT_TREE_SECRET"))
+            .ok()?;
+        let tree_id = std::env::var("AICHAT_TREE_ID")
+            .or_else(|_| std::env::var("AICHAT_AGENT_TREE_ID"))
+            .unwrap_or_default();
         Some(ParentConnInfo {
             addr,
             fingerprint,
@@ -503,6 +515,299 @@ pub async fn dial_parent(
         }))
         .await?;
     Ok(transport)
+}
+
+/// Dial the parent with transient retry (up to `max_retries` attempts with exponential backoff)
+/// to tolerate socket handshake flukes while strictly failing closed on permanent failure.
+pub async fn dial_parent_with_retry(
+    info: &ParentConnInfo,
+    agent_id: &str,
+    depth: usize,
+    max_retries: usize,
+) -> Result<TlsTransport<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>> {
+    let mut last_err = None;
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100 * (1 << (attempt - 1)))).await;
+        }
+        match dial_parent(info, agent_id, depth).await {
+            Ok(transport) => return Ok(transport),
+            Err(e) => {
+                // If it's a security rejection (fingerprint mismatch), fail closed immediately without retry.
+                let err_str = e.to_string();
+                if err_str.contains("fingerprint") || err_str.contains("channel-bound") {
+                    return Err(e);
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow!("failed to connect to parent after {max_retries} retries")))
+}
+
+/// An outbound message queued to the dedicated writer task.
+#[derive(Debug)]
+pub enum OutboundMsg {
+    /// Fire-and-forget event message (drop-newest if queue is full).
+    Event(serde_json::Value),
+    /// Request/response escalation message.
+    Escalation(crate::safety::EscalationMsg),
+    /// Terminal result or error with optional flush acknowledgment.
+    Result {
+        msg: UpstreamMsg,
+        flush_ack: Option<oneshot::Sender<()>>,
+    },
+}
+
+/// A persistent, reused mutual-TLS client connection from a child sub-agent
+/// to its parent listener (backlog #6d Part 2).
+///
+/// # Architecture:
+/// - Reuses a single mTLS TCP connection for the entire child lifetime.
+/// - **Sole-Writer Actor:** A dedicated background Writer Task owns `WriteHalf`.
+///   Frames are sent through `writer_tx: mpsc::Sender<OutboundMsg>` to eliminate
+///   any chance of byte interleaving or framing desync.
+type DemuxMap =
+    Arc<ParkingMutex<HashMap<String, oneshot::Sender<Result<crate::safety::VerdictMsg, String>>>>>;
+
+/// A persistent, reused mutual-TLS client connection from a child sub-agent
+/// to its parent listener (backlog #6d Part 2).
+///
+/// # Architecture:
+/// - Reuses a single mTLS TCP connection for the entire child lifetime.
+/// - **Sole-Writer Actor:** A dedicated background Writer Task owns `WriteHalf`.
+///   Frames are sent through `writer_tx: mpsc::Sender<OutboundMsg>` to eliminate
+///   any chance of byte interleaving or framing desync.
+/// - **Drop-Newest Events:** Events use `try_send` on a bounded channel (capacity: 1024),
+///   guaranteeing non-blocking execution for rapid agent loops.
+/// - **Demultiplexed Reader:** A dedicated background Reader Task owns `ReadHalf`,
+///   routing inbound `VerdictMsg` to waiting callers via an in-memory `oneshot` registry.
+/// - **Immediate Fail-Closed:** Socket EOF or error immediately drains all in-flight
+///   escalations and fails them closed.
+pub struct ChildEscalationClient {
+    writer_tx: mpsc::Sender<OutboundMsg>,
+    demux: DemuxMap,
+    is_closed: Arc<AtomicBool>,
+}
+
+impl ChildEscalationClient {
+    /// Establish the persistent authenticated connection to the parent listener,
+    /// perform the mTLS + HMAC handshake, send the initial `Hello`, and spawn
+    /// the dedicated reader and writer tasks.
+    pub async fn connect(
+        info: &ParentConnInfo,
+        agent_id: &str,
+        depth: usize,
+    ) -> Result<Arc<Self>> {
+        let transport = dial_parent_with_retry(info, agent_id, depth, 3).await?;
+        let stream = transport.into_inner();
+        let (mut read_half, mut write_half) = tokio::io::split(stream);
+
+        let (writer_tx, mut writer_rx) = mpsc::channel::<OutboundMsg>(1024);
+        let demux: DemuxMap = Arc::new(ParkingMutex::new(HashMap::new()));
+        let is_closed = Arc::new(AtomicBool::new(false));
+
+        // 1. Dedicated background Writer Task (sole owner of WriteHalf)
+        let is_closed_w = is_closed.clone();
+        tokio::spawn(async move {
+            while let Some(outbound) = writer_rx.recv().await {
+                if is_closed_w.load(Ordering::Relaxed) {
+                    break;
+                }
+                match outbound {
+                    OutboundMsg::Event(ev) => {
+                        let upstream = UpstreamMsg::Event(ev);
+                        if write_frame(&mut write_half, &upstream).await.is_err() {
+                            is_closed_w.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    OutboundMsg::Escalation(esc) => {
+                        let upstream = UpstreamMsg::Escalation(esc);
+                        if write_frame(&mut write_half, &upstream).await.is_err() {
+                            is_closed_w.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                    OutboundMsg::Result { msg, flush_ack } => {
+                        let res = write_frame(&mut write_half, &msg).await;
+                        if let Some(ack) = flush_ack {
+                            let _ = ack.send(());
+                        }
+                        if res.is_err() {
+                            is_closed_w.store(true, Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        // 2. Dedicated background Reader Task (sole owner of ReadHalf)
+        let demux_r = demux.clone();
+        let is_closed_r = is_closed.clone();
+        tokio::spawn(async move {
+            loop {
+                match read_frame::<_, DownstreamMsg>(&mut read_half).await {
+                    Ok(Some(DownstreamMsg::Verdict(v))) => {
+                        let mut map = demux_r.lock();
+                        if let Some(tx) = map.remove(&v.escalation_id) {
+                            let _ = tx.send(Ok(v));
+                        }
+                    }
+                    Ok(Some(DownstreamMsg::Cancel(c))) => {
+                        let mut map = demux_r.lock();
+                        let reason = format!("parent cancelled execution: {}", c.reason);
+                        for (_id, tx) in map.drain() {
+                            let _ = tx.send(Err(reason.clone()));
+                        }
+                    }
+                    Ok(None) => {
+                        // Clean EOF at frame boundary
+                        is_closed_r.store(true, Ordering::Relaxed);
+                        let mut map = demux_r.lock();
+                        for (_id, tx) in map.drain() {
+                            let _ = tx.send(Err("parent closed connection (fail-closed)".to_string()));
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        is_closed_r.store(true, Ordering::Relaxed);
+                        let mut map = demux_r.lock();
+                        let err_msg = format!("parent connection error: {e} (fail-closed)");
+                        for (_id, tx) in map.drain() {
+                            let _ = tx.send(Err(err_msg.clone()));
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Arc::new(Self {
+            writer_tx,
+            demux,
+            is_closed,
+        }))
+    }
+
+    /// Check whether the client connection remains open and active.
+    pub fn is_connected(&self) -> bool {
+        !self.is_closed.load(Ordering::Relaxed) && !self.writer_tx.is_closed()
+    }
+
+    /// Emit an event non-blockingly over the persistent connection.
+    /// Drops the event (drop-newest) if the 1024-element buffer is saturated.
+    pub fn send_event(&self, event: serde_json::Value) {
+        if self.is_closed.load(Ordering::Relaxed) {
+            return;
+        }
+        let _ = self.writer_tx.try_send(OutboundMsg::Event(event));
+    }
+
+    /// Perform a synchronous request/response escalation over the persistent connection.
+    /// Registers a oneshot in the demux table and awaits the verdict with timeout.
+    /// Strictly fails closed on timeout, cancellation, or connection loss.
+    pub async fn escalate(
+        &self,
+        esc: crate::safety::EscalationMsg,
+        timeout_secs: u64,
+    ) -> Result<crate::safety::VerdictMsg> {
+        if self.is_closed.load(Ordering::Relaxed) {
+            bail!("escalation channel: parent connection is closed (fail-closed)");
+        }
+        let escalation_id = esc.id.clone();
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut map = self.demux.lock();
+            map.insert(escalation_id.clone(), tx);
+        }
+
+        if let Err(e) = self.writer_tx.send(OutboundMsg::Escalation(esc)).await {
+            self.demux.lock().remove(&escalation_id);
+            self.is_closed.store(true, Ordering::Relaxed);
+            bail!("escalation channel: failed to transmit escalation: {e}");
+        }
+
+        let timeout_duration = std::time::Duration::from_secs(timeout_secs.max(1));
+        match tokio::time::timeout(timeout_duration, rx).await {
+            Ok(Ok(Ok(verdict))) => Ok(verdict),
+            Ok(Ok(Err(err_msg))) => {
+                bail!("escalation channel: {err_msg}");
+            }
+            Ok(Err(_dropped)) => {
+                bail!("escalation channel: parent reader dropped without sending verdict (fail-closed)");
+            }
+            Err(_timeout) => {
+                self.demux.lock().remove(&escalation_id);
+                bail!("escalation channel: timed out awaiting verdict after {timeout_secs}s (fail-closed)");
+            }
+        }
+    }
+
+    /// Send terminal task outcome (Result or Error) and await acknowledgment of the write flush.
+    pub async fn send_result(
+        &self,
+        result: Result<serde_json::Value, String>,
+        cost: f64,
+    ) -> Result<()> {
+        let msg = match result {
+            Ok(output) => UpstreamMsg::Result(crate::safety::ResultMsg { output, cost }),
+            Err(message) => UpstreamMsg::Error(crate::safety::ErrorMsg { message }),
+        };
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let outbound = OutboundMsg::Result {
+            msg,
+            flush_ack: Some(ack_tx),
+        };
+        self.writer_tx
+            .send(outbound)
+            .await
+            .map_err(|e| anyhow!("failed to enqueue result: {e}"))?;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx).await;
+        Ok(())
+    }
+}
+
+/// Execute a complete, self-contained escalation transaction (FR-6d.4):
+/// Connect to parent, send EscalationMsg, await VerdictMsg within timeout, and close connection.
+/// Strictly fails closed on timeout, disconnect, or denial.
+pub async fn escalate_to_parent(
+    info: &ParentConnInfo,
+    agent_id: &str,
+    depth: usize,
+    escalation: crate::safety::EscalationMsg,
+    timeout_secs: u64,
+) -> Result<crate::safety::VerdictMsg> {
+    let client = ChildEscalationClient::connect(info, agent_id, depth)
+        .await
+        .context("escalation channel: failed to establish authenticated connection to parent")?;
+    client.escalate(escalation, timeout_secs).await
+}
+
+/// Notify the parent of a sub-agent execution event (FR-6d.4).
+#[allow(dead_code)]
+pub async fn notify_parent_event(
+    info: &ParentConnInfo,
+    agent_id: &str,
+    depth: usize,
+    event: serde_json::Value,
+) -> Result<()> {
+    let client = ChildEscalationClient::connect(info, agent_id, depth).await?;
+    client.send_event(event);
+    Ok(())
+}
+
+/// Notify the parent of terminal task completion or error (FR-6d.4).
+pub async fn notify_parent_result(
+    info: &ParentConnInfo,
+    agent_id: &str,
+    depth: usize,
+    result: Result<serde_json::Value, String>,
+    cost: f64,
+) -> Result<()> {
+    let client = ChildEscalationClient::connect(info, agent_id, depth).await?;
+    client.send_result(result, cost).await
 }
 
 // ---------------------------------------------------------------------------
@@ -790,5 +1095,412 @@ mod tests {
             "parent must reject a child that fails the channel-bound credential check"
         );
         let _ = dial.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn escalation_transaction_receives_verdict() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        let parent_task = tokio::spawn(async move {
+            let (mut transport, _hello) = listener.accept_authenticated().await.unwrap();
+            let msg = transport.recv_upstream().await.unwrap();
+            match msg {
+                Some(UpstreamMsg::Escalation(esc)) => {
+                    transport
+                        .send_downstream(&DownstreamMsg::Verdict(VerdictMsg {
+                            escalation_id: esc.id,
+                            decision: VerdictDecision::Continue,
+                            added_context: Some(serde_json::json!({"note": "approved"})),
+                        }))
+                        .await
+                        .unwrap();
+                }
+                other => panic!("expected Escalation, got {other:?}"),
+            }
+        });
+
+        let esc = EscalationMsg {
+            id: "esc-1".into(),
+            agent_id: "child-1".into(),
+            tree_id: "tree-1".into(),
+            action: serde_json::json!({"tool": "fs_write"}),
+            reason: "over-ceiling".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: BlastRadius::Destructive,
+            reversible: false,
+            challenge: "c".into(),
+        };
+
+        let verdict = escalate_to_parent(&info, "child-1", 1, esc, 10).await.unwrap();
+        assert_eq!(verdict.escalation_id, "esc-1");
+        assert_eq!(verdict.decision, VerdictDecision::Continue);
+        assert_eq!(
+            verdict.added_context,
+            Some(serde_json::json!({"note": "approved"}))
+        );
+
+        parent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn escalation_transaction_timeout_fails_closed() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        let _parent_task = tokio::spawn(async move {
+            let (_transport, _hello) = listener.accept_authenticated().await.unwrap();
+            // Sleep longer than timeout without sending verdict
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        });
+
+        let esc = EscalationMsg {
+            id: "esc-timeout".into(),
+            agent_id: "child-1".into(),
+            tree_id: "tree-1".into(),
+            action: serde_json::json!({"tool": "fs_write"}),
+            reason: "over-ceiling".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: BlastRadius::Destructive,
+            reversible: false,
+            challenge: "c".into(),
+        };
+
+        let res = escalate_to_parent(&info, "child-1", 1, esc, 1).await;
+        assert!(res.is_err(), "escalation must time out and fail closed");
+        assert!(
+            res.unwrap_err().to_string().contains("timed out awaiting verdict"),
+            "error should indicate timeout fail-closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn escalation_transaction_parent_eof_fails_closed() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        let parent_task = tokio::spawn(async move {
+            let (transport, _hello) = listener.accept_authenticated().await.unwrap();
+            // Drop transport immediately upon receiving connection
+            drop(transport);
+        });
+
+        let esc = EscalationMsg {
+            id: "esc-eof".into(),
+            agent_id: "child-1".into(),
+            tree_id: "tree-1".into(),
+            action: serde_json::json!({"tool": "fs_write"}),
+            reason: "over-ceiling".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: BlastRadius::Destructive,
+            reversible: false,
+            challenge: "c".into(),
+        };
+
+        let res = escalate_to_parent(&info, "child-1", 1, esc, 5).await;
+        assert!(res.is_err(), "parent closing connection must fail closed");
+        parent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn escalation_transaction_parent_cancel_fails_closed() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        let parent_task = tokio::spawn(async move {
+            let (mut transport, _hello) = listener.accept_authenticated().await.unwrap();
+            let msg = transport.recv_upstream().await.unwrap().unwrap();
+            if let UpstreamMsg::Escalation(_) = msg {
+                transport
+                    .send_downstream(&DownstreamMsg::Cancel(crate::safety::CancelMsg {
+                        reason: "branch tear down".into(),
+                    }))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let esc = EscalationMsg {
+            id: "esc-cancel".into(),
+            agent_id: "child-1".into(),
+            tree_id: "tree-1".into(),
+            action: serde_json::json!({"tool": "fs_write"}),
+            reason: "over-ceiling".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: BlastRadius::Destructive,
+            reversible: false,
+            challenge: "c".into(),
+        };
+
+        let res = escalate_to_parent(&info, "child-1", 1, esc, 5).await;
+        assert!(res.is_err(), "parent cancel must fail closed");
+        assert!(
+            res.unwrap_err().to_string().contains("parent cancelled execution: branch tear down"),
+            "error should contain cancel reason"
+        );
+        parent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn notify_parent_event_and_results_round_trip() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        assert!(!listener.fingerprint().is_empty());
+
+        let parent_task = tokio::spawn(async move {
+            // 1. Accept event
+            let (mut transport, _hello) = listener.accept_authenticated().await.unwrap();
+            let msg1 = transport.recv_upstream().await.unwrap().unwrap();
+            assert_eq!(msg1, UpstreamMsg::Event(serde_json::json!({"turn": 1})));
+
+            // 2. Accept success result
+            let (mut transport, _hello) = listener.accept_authenticated().await.unwrap();
+            let msg2 = transport.recv_upstream().await.unwrap().unwrap();
+            assert_eq!(
+                msg2,
+                UpstreamMsg::Result(crate::safety::ResultMsg {
+                    output: serde_json::json!({"status": "ok"}),
+                    cost: 0.05,
+                })
+            );
+
+            // 3. Accept error result
+            let (mut transport, _hello) = listener.accept_authenticated().await.unwrap();
+            let msg3 = transport.recv_upstream().await.unwrap().unwrap();
+            assert_eq!(
+                msg3,
+                UpstreamMsg::Error(crate::safety::ErrorMsg {
+                    message: "failed step".into(),
+                })
+            );
+        });
+
+        notify_parent_event(&info, "child-1", 1, serde_json::json!({"turn": 1}))
+            .await
+            .unwrap();
+
+        notify_parent_result(
+            &info,
+            "child-1",
+            1,
+            Ok(serde_json::json!({"status": "ok"})),
+            0.05,
+        )
+        .await
+        .unwrap();
+
+        notify_parent_result(&info, "child-1", 1, Err("failed step".into()), 0.0)
+            .await
+            .unwrap();
+
+        parent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persistent_multiplexed_client_lifecycle() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        let parent_task = tokio::spawn(async move {
+            // SINGLE accept for the entire child lifetime
+            let (mut transport, hello) = listener.accept_authenticated().await.unwrap();
+            assert_eq!(hello.agent_id, "child-persist");
+            assert_eq!(hello.depth, 1);
+
+            // 1. Receive 2 Events
+            let ev1 = transport.recv_upstream().await.unwrap().unwrap();
+            assert_eq!(ev1, UpstreamMsg::Event(serde_json::json!({"step": 1})));
+            let ev2 = transport.recv_upstream().await.unwrap().unwrap();
+            assert_eq!(ev2, UpstreamMsg::Event(serde_json::json!({"step": 2})));
+
+            // 2. Receive Escalation and reply with Verdict
+            let esc_msg = transport.recv_upstream().await.unwrap().unwrap();
+            if let UpstreamMsg::Escalation(esc) = esc_msg {
+                transport
+                    .send_downstream(&DownstreamMsg::Verdict(VerdictMsg {
+                        escalation_id: esc.id,
+                        decision: VerdictDecision::Continue,
+                        added_context: Some(serde_json::json!({"ok": true})),
+                    }))
+                    .await
+                    .unwrap();
+            } else {
+                panic!("expected Escalation, got {esc_msg:?}");
+            }
+
+            // 3. Receive Terminal Result
+            let res_msg = transport.recv_upstream().await.unwrap().unwrap();
+            assert_eq!(
+                res_msg,
+                UpstreamMsg::Result(crate::safety::ResultMsg {
+                    output: serde_json::json!({"summary": "done"}),
+                    cost: 0.12,
+                })
+            );
+        });
+
+        let client = ChildEscalationClient::connect(&info, "child-persist", 1)
+            .await
+            .unwrap();
+        assert!(client.is_connected());
+
+        // Emit events
+        client.send_event(serde_json::json!({"step": 1}));
+        client.send_event(serde_json::json!({"step": 2}));
+
+        // Escalate
+        let esc = EscalationMsg {
+            id: "esc-persist-1".into(),
+            agent_id: "child-persist".into(),
+            tree_id: "tree-1".into(),
+            action: serde_json::json!({"tool": "bash", "args": {"cmd": "ls"}}),
+            reason: "over-ceiling".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: BlastRadius::Destructive,
+            reversible: false,
+            challenge: "c".into(),
+        };
+
+        let verdict = client.escalate(esc, 5).await.unwrap();
+        assert_eq!(verdict.escalation_id, "esc-persist-1");
+        assert_eq!(verdict.decision, VerdictDecision::Continue);
+
+        // Send Result
+        client
+            .send_result(Ok(serde_json::json!({"summary": "done"})), 0.12)
+            .await
+            .unwrap();
+
+        parent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persistent_client_concurrent_escalations() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        let parent_task = tokio::spawn(async move {
+            let (mut transport, _hello) = listener.accept_authenticated().await.unwrap();
+            let mut received = Vec::new();
+            for _ in 0..2 {
+                let msg = transport.recv_upstream().await.unwrap().unwrap();
+                if let UpstreamMsg::Escalation(esc) = msg {
+                    received.push(esc);
+                }
+            }
+
+            // Reply in reverse order to ensure demux by escalation_id works
+            for esc in received.into_iter().rev() {
+                transport
+                    .send_downstream(&DownstreamMsg::Verdict(VerdictMsg {
+                        escalation_id: esc.id.clone(),
+                        decision: VerdictDecision::Continue,
+                        added_context: Some(serde_json::json!({"id": esc.id})),
+                    }))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client = ChildEscalationClient::connect(&info, "child-conc", 1)
+            .await
+            .unwrap();
+
+        let esc1 = EscalationMsg {
+            id: "esc-c-1".into(),
+            agent_id: "child-conc".into(),
+            tree_id: "tree-1".into(),
+            action: serde_json::json!({"tool": "t1"}),
+            reason: "r1".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: BlastRadius::Destructive,
+            reversible: false,
+            challenge: "c1".into(),
+        };
+
+        let esc2 = EscalationMsg {
+            id: "esc-c-2".into(),
+            agent_id: "child-conc".into(),
+            tree_id: "tree-1".into(),
+            action: serde_json::json!({"tool": "t2"}),
+            reason: "r2".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: BlastRadius::Destructive,
+            reversible: false,
+            challenge: "c2".into(),
+        };
+
+        let c1 = client.clone();
+        let c2 = client.clone();
+        let t1 = tokio::spawn(async move { c1.escalate(esc1, 5).await.unwrap() });
+        let t2 = tokio::spawn(async move { c2.escalate(esc2, 5).await.unwrap() });
+
+        let (v1, v2) = (t1.await.unwrap(), t2.await.unwrap());
+        assert_eq!(v1.escalation_id, "esc-c-1");
+        assert_eq!(v2.escalation_id, "esc-c-2");
+
+        parent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_persistent_client_socket_drop_immediate_fail_closed() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        let parent_task = tokio::spawn(async move {
+            let (transport, _hello) = listener.accept_authenticated().await.unwrap();
+            // Wait briefly then close connection abruptly
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            drop(transport);
+        });
+
+        let client = ChildEscalationClient::connect(&info, "child-drop", 1)
+            .await
+            .unwrap();
+
+        let esc = EscalationMsg {
+            id: "esc-drop".into(),
+            agent_id: "child-drop".into(),
+            tree_id: "tree-1".into(),
+            action: serde_json::json!({"tool": "t"}),
+            reason: "r".into(),
+            enrichment: serde_json::json!({}),
+            blast_radius: BlastRadius::Destructive,
+            reversible: false,
+            challenge: "c".into(),
+        };
+
+        let res = client.escalate(esc, 30).await;
+        assert!(res.is_err(), "dropped socket must immediately fail closed");
+        assert!(
+            res.unwrap_err().to_string().contains("fail-closed"),
+            "error should indicate fail-closed drop"
+        );
+        parent_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_event_backpressure_drop_newest() {
+        let (listener, env) = spawn_parent().await;
+        let info = conn_info_from(&env);
+
+        let _parent_task = tokio::spawn(async move {
+            let (_transport, _hello) = listener.accept_authenticated().await.unwrap();
+            // Don't drain events immediately
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+
+        let client = ChildEscalationClient::connect(&info, "child-burst", 1)
+            .await
+            .unwrap();
+
+        // Burst 2000 events without blocking
+        for i in 0..2000 {
+            client.send_event(serde_json::json!({"seq": i}));
+        }
+
+        // Client is still active and doesn't panic or block
+        assert!(client.is_connected());
     }
 }

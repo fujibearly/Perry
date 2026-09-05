@@ -1,0 +1,82 @@
+flowchart TD
+    Start(["User Request / Input"]) --> InitLoop["Initialize Agent Loop\n• Budget: max_turns (default 20)\n• Cost Cap: max_cost\n• Depth: max_agent_depth (default 3)"]
+
+    subgraph ITER_LOOP ["Iterative Agent Execution Loop"]
+        InitLoop --> UpdateObs["Update Observability Snapshot\n• OSC Terminal Title (/dev/tty)\n• Status File ($XDG_RUNTIME_DIR/aichat-PID.json)\n• Heartbeat Timer (2s)"]
+        UpdateObs --> CheckBudget{"Turn / Cost Budget OK?"}
+
+        CheckBudget -- "Exceeded" --> BudgetWarning["Emit Budget Warning / Halt Loop"]
+        BudgetWarning --> FinalReturn
+
+        CheckBudget -- "Within Budget" --> LLMCall["Call LLM with Messages + Tool Declarations"]
+        LLMCall --> TrackCost["Accumulate Token Usage & Cost ($)"]
+        TrackCost --> Decision{"Response Type"}
+
+        Decision -- "Final Text (No Tools)" --> NotifyComplete["Emit Done Notification\n• Terminal Bell (BEL)\n• Desktop Push (OSC 777/9/99)"]
+        NotifyComplete --> FinalReturn(["Emit Final Output to User"])
+
+        Decision -- "Tool Calls (1..N)" --> ConcurrencyMgr["Parallel Tool Concurrency Manager\n(tokio::join_all bounded by semaphore: max_concurrency=8)"]
+    end
+
+    ConcurrencyMgr --> Dispatcher{"Tool Call Dispatcher\n(src/agent_loop.rs)"}
+
+    %% ROUTE 1: In-Process Planning Scratchpad
+    subgraph ROUTE1 ["Route 1: Cognitive Scratchpad"]
+        Dispatcher -- "name == '_plan'" --> PlanHandler["In-Process Pseudo-Tool (_plan)\n• No shell/subprocess spawned\n• Emits trace event to /dev/tty\n• Returns 'acknowledged'"]
+    end
+
+    %% ROUTE 2: Cognitive Sub-Agent Delegation
+    subgraph ROUTE2 ["Route 2: Cognitive Sub-Agent Delegation"]
+        Dispatcher -- "is_agent && in list_agents()" --> SubAgentCheck{"Depth < max_agent_depth?"}
+        SubAgentCheck -- "Yes" --> SubAgentSpawn["Spawn Subprocess: aichat --agent name\n• Isolated Child Process with unique PID\n• Private tools (e.g. researcher, coder)\n• Propagates AICHAT_AGENT_DEPTH+1"]
+        SubAgentSpawn --> ChildLoop["Child Agent Loop Runs to Completion"]
+        ChildLoop --> SubAgentResult["Return Synthesized Report + Cost to Parent"]
+        SubAgentCheck -- "Exceeded Depth" --> DepthErr["Return Depth Limit Exceeded Error"]
+    end
+
+    %% ROUTE 3: Deterministic Tools & Output Routing
+    subgraph ROUTE3 ["Route 3: Atomic Tools & MCP Execution"]
+        Dispatcher -- "Atomic Tool / Subcommand / MCP" --> ToolExec{"Tool Execution Backend"}
+        ToolExec -- "MCP Protocol" --> MCPClient["Native Rust In-Process MCP Client"]
+        ToolExec -- "Shell / Argc Tool" --> ShellExec["Execute local tool script (bin/tool)"]
+
+        MCPClient --> RawOutput["Raw Tool Result Generated"]
+        ShellExec --> RawOutput
+
+        %% Output Routing Sub-pipeline
+        subgraph OUTPUT_ROUTING ["Declarative Output Routing Pipeline"]
+            RawOutput --> CheckRouting{"Output Routing Rule"}
+
+            %% Pipe Chaining
+            CheckRouting -- "output.destination == 'pipe'" --> PipeRoute["Pipe Destination Target\n(e.g., summarize_text.sh)\n• Cycle Detection Protection\n• No LLM round-trip"]
+            PipeRoute --> PipeExec["Execute Target Tool with --input"]
+            PipeExec --> PipeResult["Pass summary/digest to LLM context"]
+
+            %% File Destination
+            CheckRouting -- "output.destination == 'file'" --> FileRoute["File Destination Target\n• Render path: /tmp/name-timestamp.ext\n• Write full content directly to disk"]
+            FileRoute --> FileConfirm["Return JSON Receipt to Context\n{ written_to, size_bytes, hint }"]
+
+            %% Auto-Capping / Raw
+            CheckRouting -- "Default (Direct)" --> CapCheck{"Size > tool_output_limit?\n(default: 16 KB)"}
+            CapCheck -- "Yes (Large Output)" --> AutoCap["Auto-Capping Triggered\n• Write full output to /tmp/aichat-tool-*.out\n• Extract preview snippet"]
+            AutoCap --> CapResult["Return JSON Handle to Context\n{ preview, full_output_path, total_bytes, hint }"]
+
+            CapCheck -- "No (Small Output)" --> DirectPass["Return Raw Output directly to Context"]
+        end
+    end
+
+    %% Rejoining the Loop
+    PlanHandler --> CollectResults["Collect & Merge Turn Tool Results"]
+    SubAgentResult --> CollectResults
+    DepthErr --> CollectResults
+    PipeResult --> CollectResults
+    FileConfirm --> CollectResults
+    CapResult --> CollectResults
+    DirectPass --> CollectResults
+
+    CollectResults --> AppendHistory["Append Tool Results to Message History"]
+    AppendHistory --> CheckCircuit{"Circuit Breaker Check\n(3 consecutive failures?)"}
+    CheckCircuit -- "Tripped" --> CircuitHalt["Halt Loop / Return Partial Results"]
+    CircuitHalt --> FinalReturn
+    CheckCircuit -- "OK" --> IncTurn["Increment Turn Counter (turn = turn + 1)"]
+    IncTurn --> UpdateObs

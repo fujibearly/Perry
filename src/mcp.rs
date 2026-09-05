@@ -959,7 +959,7 @@ done
         let cache_dir = std::env::temp_dir().join("aichat_mcp_registry_test");
         let _ = std::fs::remove_dir_all(&cache_dir);
 
-        let registry = load_mcp_tools(&[config.clone()], &cache_dir).unwrap();
+        let registry = load_mcp_tools(std::slice::from_ref(&config), &cache_dir).unwrap();
 
         // Should have one tool with namespaced name
         assert_eq!(registry.len(), 1);

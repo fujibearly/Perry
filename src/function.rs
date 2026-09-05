@@ -18,10 +18,12 @@ const PATH_SEP: &str = ";";
 #[cfg(not(windows))]
 const PATH_SEP: &str = ":";
 
+#[allow(dead_code)]
 pub fn eval_tool_calls(config: &GlobalConfig, calls: Vec<ToolCall>) -> Result<Vec<ToolResult>> {
     eval_tool_calls_with(calls, |call| call.eval(config))
 }
 
+#[allow(dead_code)]
 pub fn eval_tool_calls_preserving_results(
     config: &GlobalConfig,
     calls: Vec<ToolCall>,
@@ -123,6 +125,7 @@ async fn eval_single_tool_async(config: &GlobalConfig, call: &ToolCall) -> Resul
         .map_err(|e| anyhow!("Tool task panicked: {e}"))?
 }
 
+#[allow(dead_code)]
 fn eval_tool_calls_with<F>(calls: Vec<ToolCall>, eval: F) -> Result<Vec<ToolResult>>
 where
     F: FnMut(&ToolCall) -> Result<Value>,
@@ -211,6 +214,7 @@ impl Functions {
     }
 
     /// Create from an explicit list of declarations (for tests and programmatic use).
+    #[allow(dead_code)]
     pub fn init_from_declarations(declarations: Vec<FunctionDeclaration>) -> Self {
         Self { declarations }
     }

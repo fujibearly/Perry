@@ -428,6 +428,55 @@ dispatch wiring are in `agent_loop.rs` (after the #6b authority gate).
 - **Fallback role.** #6c degrades to #6b (no `risk_model`), which degrades to the #6a mask — the
   graceful-degradation chain holds.
 
+### Escalation protocol, mTLS channel, rollback journal & human-in-the-loop (backlog #6d)
+
+#6d completes the actuation governance stack by turning deterministic & evaluator gate denials
+into an active escalation and human-in-the-loop (HITL) control plane.
+
+```
+Sub-Agent (Child)                         Parent Listener / Root Agent
+      │                                                │
+[Gate Tripped: Over-Ceiling / Risk]                    │
+      │                                                │
+      ├─ Record Pre-Mutation Journal Entry             │
+      │  (0600 JSONL under $XDG_RUNTIME_DIR/aichat)    │
+      │                                                │
+      ├─ Dial Parent over Loopback TCP                 │
+      │  (mTLS Handshake + SHA256 Fingerprint Pin)     │
+      │                                                │
+      ├─ Challenge-Response Auth                       │
+      │  (HMAC-SHA256(tree_secret, nonce || cert_fp)) │
+      │                                                │
+      ├─────── UpstreamMsg::Escalation ───────────────>│
+      │                                                ├─ Resolve or Escalate Upward
+      │                                                ├─ Interactive HITL Prompt
+      │                                                │  [c]ontinue | [h]alt | [r]evert
+      │                                                │  (or Headless Layer 3 fail-closed)
+      │<────── DownstreamMsg::Verdict ─────────────────┤
+      │
+      ├─ Continue ──> Execute tool
+      ├─ Halt     ──> Return escalation_halted (clean abort)
+      └─ Revert   ──> Replay RollbackJournal & return escalation_reverted
+```
+
+- **Transport (Path 1′):** Mutual-TLS over loopback TCP with 4-byte big-endian length-delimited
+  JSON framing (implemented in [`src/escalation.rs`](../src/escalation.rs) and abstracted behind
+  `EscalationTransport`). Avoids external WebSocket dependencies while remaining forward-compatible.
+- **Persistent Per-Process mTLS Connection:** Sub-agents establish a single authenticated connection
+  reused across their lifetime (`ChildEscalationClient`), multiplexing `Hello` → `Events` (rendered live in orchestrator trace) → `Escalations` ↔ `Verdicts` → `Results`/`Errors` via a dedicated single-writer actor and demultiplexed reader task.
+- **Mutual Auth without CA:** The root/parent generates an ephemeral in-memory self-signed certificate
+  via `rcgen`. Children pin the parent certificate's SHA-256 fingerprint and authenticate using
+  a channel-bound HMAC-SHA256 signature bound to the connection nonce and parent certificate.
+- **Control Plane vs. Durability Plane vs. Audit Plane:**
+  - *Control Plane (Persistent mTLS):* Fast, per-process mTLS connections with demuxed request/response escalations, non-blocking bounded progress events (drop-newest on full), and strict fail-closed socket-drop semantics.
+  - *Durability Plane (Persistent):* Append-only on-disk `RollbackJournal` (`$XDG_RUNTIME_DIR/aichat/journals/journal-<tree>-<agent>.jsonl` with `0600` permissions and backup directory) surviving connection drops, child exits, or crashes. Note: engine-level pre-mutation journal entries log metadata; inverse rollback commands/artifacts are populated by reversibility-providing tool implementations under Pillars #9/#10.
+  - *Audit Plane (Telemetry):* Layer-3 JSON status files and structured traces.
+- **Verdict Actions in Child:**
+  - `Continue`: Approves tool execution for this turn.
+  - `Halt`: Returns structured `{"error": {"type": "escalation_halted"}}` without mutating host state.
+  - `Revert`: Atomically executes the recorded `undo_command` / file restoration from the journal (or cleans up no-op entries), returning `{"error": {"type": "escalation_reverted"}}`.
+- **Human-in-the-Loop CLI UX:** Interactive single-key terminal prompt (`[c]ontinue | [h]alt | [r]evert | [e]xplain | [g]uide`) displaying the tool, arguments, static tier, evaluator rationale, and lineage depth. In non-interactive/headless mode, writes structured JSON and fails closed deterministically.
+- **Zero-Config Degradation:** When `AICHAT_AGENT_PARENT_ADDR` is absent, over-ceiling actions block deterministically identical to #6b/#6c behavior.
 
 Tool calls are deduplicated and infinite loops are detected (before dispatch).
 

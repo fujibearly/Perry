@@ -2919,7 +2919,7 @@ impl Config {
             self.agent_loop.max_cost = v;
         }
 
-        // Safety overrides (backlog #6b)
+        // Safety overrides (backlog #6b / #6c / #6d)
         if let Ok(v) = env::var(get_env_name("safety_policy_file")) {
             if !v.is_empty() {
                 self.safety.policy_file = Some(PathBuf::from(v));
@@ -2929,6 +2929,19 @@ impl Config {
             if let Some(tier) = BlastRadius::from_str(&v) {
                 self.safety.default_ceiling = tier;
             }
+        }
+        if let Ok(v) = env::var(get_env_name("safety_risk_model")) {
+            if !v.is_empty() {
+                self.safety.risk_model = Some(v);
+            }
+        }
+        if let Ok(v) = env::var(get_env_name("safety_escalation_dir")) {
+            if !v.is_empty() {
+                self.safety.escalation_dir = Some(PathBuf::from(v));
+            }
+        }
+        if let Some(Some(v)) = read_env_value::<u64>(&get_env_name("safety_verdict_timeout_secs")) {
+            self.safety.verdict_timeout_secs = v;
         }
     }
 

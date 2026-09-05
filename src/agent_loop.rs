@@ -11,6 +11,7 @@ use crate::client::{
     TokenUsage,
 };
 use crate::config::{GlobalConfig, Input, RoleLike};
+use crate::escalation::EscalationTransport;
 use crate::function::{FunctionDeclaration, JsonSchema, ToolCall, ToolResult};
 use crate::utils::*;
 
@@ -19,6 +20,7 @@ use futures_util::future::join_all;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::json;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -37,12 +39,14 @@ pub struct AgentLoopParams<'a> {
 }
 
 /// Return value from a completed agent loop.
+#[allow(dead_code)]
 pub struct AgentLoopOutput {
     pub usage: TokenUsage,
     pub final_text: String,
 }
 
 /// Events emitted during the agent loop for observability.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum AgentLoopEvent {
     TurnStart {
@@ -139,7 +143,13 @@ impl AgentLoopProgress {
     pub fn emit(&self, event: AgentLoopEvent) {
         let sender = self.state.lock().event_sender.clone();
         if let Some(sender) = sender {
-            let _ = sender.send(event);
+            let _ = sender.send(event.clone());
+        }
+        if let Some(Some(client)) = CHILD_CLIENT.get() {
+            if client.is_connected() {
+                let event_val = serde_json::json!({ "event": format!("{event:?}") });
+                client.send_event(event_val);
+            }
         }
     }
 
@@ -479,12 +489,12 @@ fn call_targets_agent(config: &GlobalConfig, tool_name: &str) -> bool {
         agent
             .functions()
             .find(tool_name)
-            .map_or(false, |f| f.agent)
+            .is_some_and(|f| f.agent)
     } else {
         config_read
             .functions
             .find(tool_name)
-            .map_or(false, |f| f.agent)
+            .is_some_and(|f| f.agent)
     };
     has_agent_flag && crate::config::list_agents().contains(&tool_name.to_string())
 }
@@ -571,9 +581,13 @@ fn authority_denied_result(config: &GlobalConfig, call: &ToolCall) -> Option<ser
 fn safety_block_reason(value: &serde_json::Value) -> Option<String> {
     let err_type = value.get("error")?.get("type")?.as_str()?;
     match err_type {
-        "capability_denied" | "authority_exceeded" | "policy_forbidden" | "risk_blocked" => {
-            Some(err_type.to_string())
-        }
+        "capability_denied"
+        | "authority_exceeded"
+        | "policy_forbidden"
+        | "risk_blocked"
+        | "escalation_halted"
+        | "escalation_reverted"
+        | "escalation_failed" => Some(err_type.to_string()),
         _ => None,
     }
 }
@@ -778,39 +792,452 @@ async fn run_risk_evaluator(
     input.fetch_chat_text().await
 }
 
+/// Prompt the human operator when an action requiring Human authority reaches the root orchestrator (FR-6d.8).
+fn prompt_human_verdict(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    blast_radius: crate::function::BlastRadius,
+    reason: &str,
+) -> Result<crate::safety::VerdictDecision> {
+    use crate::safety::VerdictDecision;
+
+    if !*IS_STDOUT_TERMINAL {
+        // Headless mode: emit structured JSON and fail-closed
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "event": "escalation_headless_denied",
+                "tool": tool_name,
+                "arguments": arguments,
+                "blast_radius": blast_radius.as_str(),
+                "reason": reason,
+            })
+        );
+        return Ok(VerdictDecision::Halt);
+    }
+
+    let banner = color_text(
+        &format!(
+            "\n[SAFETY ESCALATION] Action requires human authority:\n  Tool: {tool_name}\n  Tier: {}\n  Args: {arguments}\n  Reason: {reason}",
+            blast_radius.as_str()
+        ),
+        nu_ansi_term::Color::Yellow,
+    );
+    println!("{banner}");
+
+    let options = ["continue", "halt", "revert", "explain", "guide"];
+    let first_letter_color = nu_ansi_term::Color::Cyan;
+    let prompt_text = options
+        .iter()
+        .map(|v| format!("{}{}", color_text(&v[0..1], first_letter_color), &v[1..]))
+        .collect::<Vec<String>>()
+        .join(&color_text(" | ", nu_ansi_term::Color::DarkGray));
+
+    loop {
+        let answer_char = crate::utils::read_single_key(
+            &['c', 'h', 'r', 'e', 'g'],
+            'h',
+            &format!("{prompt_text}: "),
+        )?;
+
+        match answer_char {
+            'c' => return Ok(VerdictDecision::Continue),
+            'h' => return Ok(VerdictDecision::Halt),
+            'r' => return Ok(VerdictDecision::Revert),
+            'e' => {
+                println!(
+                    "{}",
+                    color_text(
+                        &format!(
+                            "Action details:\n  Tool: {tool_name}\n  Tier: {}\n  Arguments: {arguments:#}\n  Rationale: {reason}",
+                            blast_radius.as_str()
+                        ),
+                        nu_ansi_term::Color::LightBlue,
+                    )
+                );
+                continue;
+            }
+            'g' => {
+                let guidance = inquire::Text::new("Enter instructions/guidance for the agent:").prompt()?;
+                println!("Guidance recorded: {guidance}");
+                return Ok(VerdictDecision::Halt);
+            }
+            _ => return Ok(VerdictDecision::Halt),
+        }
+    }
+}
+
+/// Transmit an escalation upstream when a gate is tripped (#6d).
+async fn escalate_tool_call(
+    config: &GlobalConfig,
+    call: &ToolCall,
+    parent_info: &crate::escalation::ParentConnInfo,
+    reason: &str,
+) -> Result<crate::safety::VerdictMsg> {
+    let (static_tier, reversible) = tool_tier_and_reversibility(config, &call.name);
+    let blast_radius = match static_tier {
+        crate::function::StaticTier::Tier(t) => t,
+        crate::function::StaticTier::Unclassified => crate::function::BlastRadius::Catastrophic,
+    };
+    let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| format!("agent-d{current_depth}"));
+
+    let esc = crate::safety::EscalationMsg {
+        id: format!("esc-{}", uuid::Uuid::new_v4()),
+        agent_id: agent_id.clone(),
+        tree_id: parent_info.tree_id.clone(),
+        action: serde_json::json!({
+            "tool": call.name.clone(),
+            "arguments": call.arguments.clone(),
+        }),
+        reason: reason.to_string(),
+        enrichment: serde_json::json!({
+            "depth": current_depth,
+            "static_tier": blast_radius.as_str(),
+            "reversible": reversible,
+        }),
+        blast_radius,
+        reversible,
+        challenge: "challenge".into(),
+    };
+
+    let timeout_secs = config.read().safety.verdict_timeout_secs;
+    if let Some(client) = get_or_init_child_client().await {
+        client.escalate(esc, timeout_secs).await
+    } else {
+        crate::escalation::escalate_to_parent(parent_info, &agent_id, current_depth, esc, timeout_secs).await
+    }
+}
+
+/// Handle a verdict outcome received from an escalation (#6d).
+async fn handle_verdict_outcome(
+    config: &GlobalConfig,
+    _call: &ToolCall,
+    verdict: crate::safety::VerdictMsg,
+) -> Result<Option<serde_json::Value>> {
+    match verdict.decision {
+        crate::safety::VerdictDecision::Continue => Ok(None),
+        crate::safety::VerdictDecision::Halt => {
+            let msg = match verdict.added_context {
+                Some(ctx) => format!("Execution halted by parent verdict: {ctx}"),
+                None => "Execution halted by parent verdict".to_string(),
+            };
+            Ok(Some(json!({"error": {"type": "escalation_halted", "message": msg}})))
+        }
+        crate::safety::VerdictDecision::Revert => {
+            let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
+            let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "agent".into());
+            let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
+            if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
+                let outcome = journal.replay_last().await?;
+                return Ok(Some(json!({
+                    "error": {
+                        "type": "escalation_reverted",
+                        "details": outcome.details,
+                    }
+                })));
+            }
+            Ok(Some(json!({"error": {"type": "escalation_reverted", "message": "Rollback journal replayed on parent revert verdict"}})))
+        }
+    }
+}
+
+/// Transmit an escalation upstream, await the verdict, and map the outcome (#6d).
+/// Fails closed to a structured `escalation_failed` block on transport error/timeout.
+async fn escalate_and_handle_verdict(
+    config: &GlobalConfig,
+    call: &ToolCall,
+    parent_info: &crate::escalation::ParentConnInfo,
+    reason: &str,
+) -> Option<serde_json::Value> {
+    match escalate_tool_call(config, call, parent_info, reason).await {
+        Ok(verdict) => match handle_verdict_outcome(config, call, verdict).await {
+            Ok(res) => res, // Some(...) on Halt/Revert, None on Continue
+            Err(err) => Some(json!({
+                "error": {
+                    "type": "escalation_failed",
+                    "message": format!("Handling verdict failed: {err}")
+                }
+            })),
+        },
+        Err(err) => Some(json!({
+            "error": {
+                "type": "escalation_failed",
+                "message": format!("Escalation to parent failed: {err}")
+            }
+        })),
+    }
+}
+
+static CHILD_CLIENT: tokio::sync::OnceCell<Option<Arc<crate::escalation::ChildEscalationClient>>> =
+    tokio::sync::OnceCell::const_new();
+
+pub async fn get_or_init_child_client() -> Option<Arc<crate::escalation::ChildEscalationClient>> {
+    let client = CHILD_CLIENT
+        .get_or_init(|| async {
+            if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
+                let depth = std::env::var("AICHAT_AGENT_DEPTH")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
+                let agent_id = std::env::var("AICHAT_AGENT_NAME")
+                    .unwrap_or_else(|_| format!("agent-d{depth}"));
+                match crate::escalation::ChildEscalationClient::connect(&parent_info, &agent_id, depth).await {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        log::warn!("Failed to initialize persistent child escalation client: {e}");
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        })
+        .await;
+    client.clone()
+}
+
+static TREE_LISTENER: tokio::sync::OnceCell<Arc<crate::escalation::ParentListener>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_or_init_parent_listener(
+    config: &GlobalConfig,
+) -> Result<Option<Arc<crate::escalation::ParentListener>>> {
+    let listener = TREE_LISTENER
+        .get_or_try_init(|| async {
+            let tree_id = std::env::var("AICHAT_TREE_ID")
+                .unwrap_or_else(|_| format!("tree-{}", uuid::Uuid::new_v4()));
+            let tree_secret = std::env::var("AICHAT_TREE_SECRET").unwrap_or_else(|_| {
+                crate::utils::sha256_bytes(format!("{}-{}", std::process::id(), uuid::Uuid::new_v4()).as_bytes())
+            });
+            let identity = Arc::new(crate::escalation::generate_tree_identity()?);
+            let listener = Arc::new(
+                crate::escalation::ParentListener::bind(identity, tree_id, tree_secret).await?,
+            );
+
+            // Spawn background accept loop for handling child escalations
+            let listener_clone = listener.clone();
+            let config_clone = config.clone();
+            tokio::spawn(async move {
+                while let Ok((mut transport, hello)) = listener_clone.accept_authenticated().await {
+                    let config = config_clone.clone();
+                    tokio::spawn(async move {
+                        while let Ok(Some(msg)) = transport.recv_upstream().await {
+                            match msg {
+                                crate::safety::UpstreamMsg::Event(val) => {
+                                    let show_trace = config.read().agent_loop.show_trace
+                                        || config.read().multi_agent.show_trace;
+                                    if show_trace {
+                                        let summary = if let Some(ev) = val.get("event").and_then(|v| v.as_str()) {
+                                            ev.to_string()
+                                        } else {
+                                            val.to_string()
+                                        };
+                                        eprintln!("  [child {}] {}", hello.agent_id, summary);
+                                    }
+                                }
+                                crate::safety::UpstreamMsg::Escalation(esc) => {
+                                    let verdict = handle_escalation_request(&config, &hello, esc).await;
+                                    let _ = transport.send_downstream(&crate::safety::DownstreamMsg::Verdict(verdict)).await;
+                                }
+                                crate::safety::UpstreamMsg::Result(res) => {
+                                    log::debug!("Child agent {} completed task with cost {}", hello.agent_id, res.cost);
+                                    break;
+                                }
+                                crate::safety::UpstreamMsg::Error(err) => {
+                                    log::debug!("Child agent {} failed task: {}", hello.agent_id, err.message);
+                                    break;
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                }
+            });
+
+            Ok::<_, anyhow::Error>(listener)
+        })
+        .await?;
+    Ok(Some(listener.clone()))
+}
+
+async fn handle_escalation_request(
+    config: &GlobalConfig,
+    hello: &crate::safety::HelloMsg,
+    esc: crate::safety::EscalationMsg,
+) -> crate::safety::VerdictMsg {
+    let escalation_id = esc.id.clone();
+    let current_ceiling = current_authority_ceiling(config);
+    let static_tier = crate::function::StaticTier::Tier(esc.blast_radius);
+    let required = crate::safety::required_authority(static_tier, None, esc.reversible);
+
+    // If within parent's ceiling, parent decides autonomously
+    if current_ceiling.permits(required) {
+        return crate::safety::VerdictMsg {
+            escalation_id,
+            decision: crate::safety::VerdictDecision::Continue,
+            added_context: None,
+        };
+    }
+
+    // If over ceiling, check if parent has its own parent (depth > 0) to re-escalate upward
+    if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
+        let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
+        let timeout_secs = config.read().safety.verdict_timeout_secs;
+        if let Some(client) = get_or_init_child_client().await {
+            match client.escalate(esc, timeout_secs).await {
+                Ok(v) => return v,
+                Err(e) => {
+                    return crate::safety::VerdictMsg {
+                        escalation_id,
+                        decision: crate::safety::VerdictDecision::Halt,
+                        added_context: Some(serde_json::json!({"error": format!("Re-escalation to parent failed: {e}")})),
+                    };
+                }
+            }
+        } else {
+            match crate::escalation::escalate_to_parent(
+                &parent_info,
+                &hello.agent_id,
+                current_depth,
+                esc,
+                timeout_secs,
+            )
+            .await
+            {
+                Ok(v) => return v,
+                Err(_) => {
+                    return crate::safety::VerdictMsg {
+                        escalation_id,
+                        decision: crate::safety::VerdictDecision::Halt,
+                        added_context: None,
+                    };
+                }
+            }
+        }
+    }
+
+    // We are at root orchestrator (Depth 0) — consult Human in the loop!
+    let tool_name = esc.action.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let args = esc.action.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
+    let decision = prompt_human_verdict(tool_name, &args, esc.blast_radius, &esc.reason)
+        .unwrap_or(crate::safety::VerdictDecision::Halt);
+
+    crate::safety::VerdictMsg {
+        escalation_id,
+        decision,
+        added_context: None,
+    }
+}
+
+fn record_pre_mutation_journal_entry(config: &GlobalConfig, call: &ToolCall) {
+    let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
+    if static_tier != crate::function::StaticTier::Tier(crate::function::BlastRadius::Safe) {
+        let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
+        let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "agent".into());
+        let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
+        if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
+            let entry = crate::safety::RollbackJournalEntry {
+                id: format!("entry-{}", uuid::Uuid::new_v4()),
+                agent_id,
+                tree_id,
+                timestamp: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+                tool: call.name.clone(),
+                args: call.arguments.clone(),
+                working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+                shell: Some("/bin/bash".into()),
+                target_path: None,
+                artifact_path: None,
+                undo_command: None,
+            };
+            let _ = journal.record(&entry);
+        }
+    }
+}
+
 /// Dispatch a single tool call asynchronously.
 async fn eval_single_tool(
     config: &GlobalConfig,
     call: &ToolCall,
     risk_cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
 ) -> Result<serde_json::Value> {
-    // Backlog #6a: capability-mask gate. If this process runs under a read-only
-    // mask (i.e. it is a spawned sub-agent) and the requested tool is not
-    // explicitly `readonly`, refuse to execute it. The refusal is a structured
-    // result (not an Err) so it reaches the model verbatim — mirroring the
-    // circuit-breaker short-circuit — letting the sub-agent choose another
-    // approach (and, in later increments, escalate).
+    // Backlog #6a: capability-mask gate.
     if let Some(denied) = capability_denied_result(config, &call.name) {
-        return Ok(denied);
+        if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
+            if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, "capability_denied").await {
+                return Ok(res);
+            }
+        } else {
+            return Ok(denied);
+        }
     }
 
-    // Backlog #6b: blast-radius authority gate. Deterministically block actions
-    // whose required authority (tier, reduced by proven reversibility, raised by
-    // the Protected Policy File) exceeds this agent's ceiling — or that the policy
-    // forbids outright. Pre-#6d these block; #6d turns the block into escalation.
+    // Backlog #6b: blast-radius authority gate.
     if let Some(denied) = authority_denied_result(config, call) {
-        return Ok(denied);
+        let err_type = denied
+            .get("error")
+            .and_then(|e| e.get("type"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("authority_exceeded");
+        if err_type == "policy_forbidden" {
+            return Ok(denied);
+        }
+        if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
+            if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, err_type).await {
+                return Ok(res);
+            }
+        } else {
+            let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
+            let blast_radius = match static_tier {
+                crate::function::StaticTier::Tier(t) => t,
+                crate::function::StaticTier::Unclassified => crate::function::BlastRadius::Catastrophic,
+            };
+            if *IS_STDOUT_TERMINAL {
+                let decision = prompt_human_verdict(&call.name, &call.arguments, blast_radius, "authority_exceeded")?;
+                match decision {
+                    crate::safety::VerdictDecision::Continue => {}
+                    crate::safety::VerdictDecision::Halt => {
+                        return Ok(json!({"error": {"type": "escalation_halted", "message": "Action halted by human operator"}}));
+                    }
+                    crate::safety::VerdictDecision::Revert => {
+                        let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
+                        let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "orchestrator".into());
+                        let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
+                        if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
+                            let outcome = journal.replay_last().await?;
+                            return Ok(json!({"error": {"type": "escalation_reverted", "details": outcome.details}}));
+                        }
+                        return Ok(json!({"error": {"type": "escalation_reverted", "message": "No journal found to replay"}}));
+                    }
+                }
+            } else {
+                return Ok(denied);
+            }
+        }
     }
 
-    // Backlog #6c: `%assess-risk%` LLM evaluator overlay (stricter-only). For a
-    // non-Safe, in-ceiling action, consult a dedicated cheap model that may only
-    // *raise* the risk (never loosen the deterministic decision). Disabled unless
-    // `safety.risk_model` is configured; Safe actions and delegations skip it.
-    // A raised verdict over the ceiling, or a low-confidence/errored verdict,
-    // blocks (pre-#6d escalation) with a structured `risk_blocked` result.
+    // Backlog #6c: `%assess-risk%` LLM evaluator overlay.
     if let Some(denied) = risk_evaluator_denied_result(config, call, risk_cache).await {
-        return Ok(denied);
+        if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
+            if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, "risk_blocked").await {
+                return Ok(res);
+            }
+        } else {
+            return Ok(denied);
+        }
     }
+
+    // Record pre-mutation entry in durable journal (FR-6d.6)
+    record_pre_mutation_journal_entry(config, call);
 
     // Route 1: MCP tools (async native)
     #[cfg(feature = "mcp")]
@@ -934,6 +1361,7 @@ async fn eval_agent_tool_subprocess(
 
     // Pass depth to child
     cmd.env("AICHAT_AGENT_DEPTH", (current_depth + 1).to_string());
+    cmd.env("AICHAT_AGENT_NAME", &agent_name);
 
     // Backlog #6a: every spawned sub-agent inherits a read-only capability mask.
     // Sub-agents perform triage in parallel; only the unmasked top-level process
@@ -947,6 +1375,15 @@ async fn eval_agent_tool_subprocess(
     // raise it (the child cannot grant itself more authority than its parent has).
     let child_ceiling = current_authority_ceiling(config);
     cmd.env("AICHAT_AUTHORITY_CEILING", child_ceiling.tier().as_str());
+
+    // Backlog #6d: pass escalation listener connection parameters to child
+    if let Ok(Some(listener)) = get_or_init_parent_listener(config).await {
+        if let Ok(envs) = listener.child_env() {
+            for (k, v) in envs {
+                cmd.env(k, v);
+            }
+        }
+    }
 
     // Inherit config dir so sub-agent sees same agents/tools/MCP
     if let Ok(config_dir) = std::env::var("AICHAT_CONFIG_DIR") {
@@ -1110,7 +1547,7 @@ fn route_to_file(
 ) -> serde_json::Value {
     // Unwrap the {"output": "..."} wrapper that run_llm_function adds for non-JSON tool output
     let content = match output.get("output").and_then(|v| v.as_str()) {
-        Some(raw) if output.as_object().map_or(false, |o| o.len() == 1) => raw.to_string(),
+        Some(raw) if output.as_object().is_some_and(|o| o.len() == 1) => raw.to_string(),
         _ => value_to_string(output),
     };
     let path = match &routing.path {
@@ -1237,13 +1674,11 @@ fn update_circuit_breaker(
         if is_error {
             let count = failure_counts.entry(name.clone()).or_insert(0);
             *count += 1;
-            if *count >= CIRCUIT_BREAKER_THRESHOLD {
-                if tripped.insert(name.clone()) {
-                    warn!(
-                        "Circuit breaker tripped for tool '{}' after {} consecutive failures",
-                        name, count
-                    );
-                }
+            if *count >= CIRCUIT_BREAKER_THRESHOLD && tripped.insert(name.clone()) {
+                warn!(
+                    "Circuit breaker tripped for tool '{}' after {} consecutive failures",
+                    name, count
+                );
             }
         } else {
             failure_counts.remove(name);
@@ -1314,6 +1749,9 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
 /// `#[async_recursion]` pattern with an iterative loop that enforces a turn
 /// budget, emits progress events, and supports the full async tool dispatch.
 pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopOutput> {
+    // Eagerly initialize persistent child client if running under parent listener (#6d)
+    let _ = get_or_init_child_client().await;
+
     let max_turns = params.config.read().agent_loop.max_turns;
     let max_cost = params.config.read().agent_loop.max_cost;
     let model = input.role().model().clone();
@@ -1364,6 +1802,14 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                  Increase with `agent_loop.max_cost` in config.yaml or AICHAT_AGENT_LOOP_MAX_COST=N.",
                 max_cost, params.progress.cost()
             );
+            if let Some(client) = get_or_init_child_client().await {
+                let _ = client
+                    .send_result(
+                        Ok(serde_json::json!({ "final_text": last_text, "cost_exhausted": true })),
+                        params.progress.cost(),
+                    )
+                    .await;
+            }
             return Ok(AgentLoopOutput {
                 usage: total_usage,
                 final_text: last_text,
@@ -1377,6 +1823,27 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                 .write()
                 .after_chat_completion(&current_input, &output.text, &[])?;
             params.progress.emit(AgentLoopEvent::LoopComplete);
+
+            if let Some(client) = get_or_init_child_client().await {
+                let _ = client
+                    .send_result(
+                        Ok(serde_json::json!({ "final_text": output.text })),
+                        params.progress.cost(),
+                    )
+                    .await;
+            } else if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
+                let depth = std::env::var("AICHAT_AGENT_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| format!("agent-d{depth}"));
+                let _ = crate::escalation::notify_parent_result(
+                    &parent_info,
+                    &agent_id,
+                    depth,
+                    Ok(serde_json::json!({ "final_text": output.text })),
+                    params.progress.cost(),
+                )
+                .await;
+            }
+
             return Ok(AgentLoopOutput {
                 usage: total_usage,
                 final_text: output.text,
@@ -1471,6 +1938,15 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
          Increase with `agent_loop.max_turns` in config.yaml or AICHAT_AGENT_LOOP_MAX_TURNS=N.",
         max_turns
     );
+
+    if let Some(client) = get_or_init_child_client().await {
+        let _ = client
+            .send_result(
+                Ok(serde_json::json!({ "final_text": last_text, "budget_exhausted": true })),
+                params.progress.cost(),
+            )
+            .await;
+    }
 
     Ok(AgentLoopOutput {
         usage: total_usage,
@@ -1871,6 +2347,7 @@ mod tests {
     /// env var, so they don't race each other under the parallel test runner.
     static MASK_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+    #[allow(dead_code)]
     fn default_config() -> GlobalConfig {
         Arc::new(RwLock::new(Config::default()))
     }
@@ -2259,16 +2736,18 @@ agent_loop:
 
     #[test]
     fn pipe_cycle_detection_catches_self_reference() {
-        let mut config_inner = Config::default();
-        config_inner.functions = crate::function::Functions::init_from_declarations(vec![
-            serde_json::from_value(json!({
-                "name": "loop_tool",
-                "description": "loops to itself",
-                "parameters": {"type": "object"},
-                "output": {"destination": "pipe", "target": "loop_tool"}
-            }))
-            .unwrap(),
-        ]);
+        let config_inner = Config {
+            functions: crate::function::Functions::init_from_declarations(vec![
+                serde_json::from_value(json!({
+                    "name": "loop_tool",
+                    "description": "loops to itself",
+                    "parameters": {"type": "object"},
+                    "output": {"destination": "pipe", "target": "loop_tool"}
+                }))
+                .unwrap(),
+            ]),
+            ..Default::default()
+        };
         let config: GlobalConfig = Arc::new(RwLock::new(config_inner));
 
         let result = detect_pipe_cycle(&config, "loop_tool");
@@ -2277,22 +2756,24 @@ agent_loop:
 
     #[test]
     fn pipe_cycle_detection_allows_linear_chain() {
-        let mut config_inner = Config::default();
-        config_inner.functions = crate::function::Functions::init_from_declarations(vec![
-            serde_json::from_value(json!({
-                "name": "tool_a",
-                "description": "pipes to b",
-                "parameters": {"type": "object"},
-                "output": {"destination": "pipe", "target": "tool_b"}
-            }))
-            .unwrap(),
-            serde_json::from_value(json!({
-                "name": "tool_b",
-                "description": "no pipe",
-                "parameters": {"type": "object"}
-            }))
-            .unwrap(),
-        ]);
+        let config_inner = Config {
+            functions: crate::function::Functions::init_from_declarations(vec![
+                serde_json::from_value(json!({
+                    "name": "tool_a",
+                    "description": "pipes to b",
+                    "parameters": {"type": "object"},
+                    "output": {"destination": "pipe", "target": "tool_b"}
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "name": "tool_b",
+                    "description": "no pipe",
+                    "parameters": {"type": "object"}
+                }))
+                .unwrap(),
+            ]),
+            ..Default::default()
+        };
         let config: GlobalConfig = Arc::new(RwLock::new(config_inner));
 
         let result = detect_pipe_cycle(&config, "tool_a");
@@ -3071,7 +3552,15 @@ agent_loop:
     #[test]
     fn safety_block_reason_recognizes_gate_denials_only() {
         // The gate denial types are recognized...
-        for t in ["capability_denied", "authority_exceeded", "policy_forbidden", "risk_blocked"] {
+        for t in [
+            "capability_denied",
+            "authority_exceeded",
+            "policy_forbidden",
+            "risk_blocked",
+            "escalation_halted",
+            "escalation_reverted",
+            "escalation_failed",
+        ] {
             let v = json!({"error": {"type": t, "message": "x"}});
             assert_eq!(safety_block_reason(&v).as_deref(), Some(t));
         }

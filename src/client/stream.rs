@@ -67,6 +67,7 @@ impl TokenUsage {
     }
 }
 
+#[allow(dead_code)]
 fn sum_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.saturating_add(right)),

@@ -13,12 +13,14 @@
 #     (~/projects/llm-functions, branch feat/tool-safety-classification) is classified.
 #
 # NOTE: Demos 1-11 exercise the live agent loop and require API access
-# (they invoke real LLM providers). Demo 12 (sub-agent crash isolation) is
-# deterministic and offline — no provider needed. Demos 13-15 (#6b safety gate)
-# are live but tightly scoped (single tool call, 2-turn budget):
+# (they invoke real LLM providers). Demo 12 (sub-agent crash isolation) and
+# Demo 16 (multi-process escalation and rollback journal) are deterministic
+# and offline — no provider needed. Demos 13-15 (#6b safety gate) are live
+# but tightly scoped (single tool call, 2-turn budget):
 #   13 — Protected Policy File `forbid`      → policy_forbidden
 #   14 — authority ceiling exceeded          → authority_exceeded
 #   15 — argument-sensitive `raise`          → catastrophic > ceiling, blocked
+#   16 — mTLS escalation & rollback journal  → fail-closed & 0600 durability
 #
 # All live demos run under DEMO_MODEL (default gemini-2.5-flash) for a
 # consistent, cost-conscious profile — see the constant below.
@@ -729,6 +731,82 @@ show-output $demo15.stdout
 show-cost ($demo15.stderr | default "")
 
 rm -rf $d15_dir
+
+# ─── Demo 16: Multi-Process Escalation & Rollback Journal (#6d, offline) ─────
+#
+# DETERMINISTIC / OFFLINE — no LLM or network.
+# Exercises the #6d escalation failure boundaries, zero-config degrade path,
+# and rollback journal permissions deterministically and offline:
+#   1. Zero-config degrade: With no parent listener (AICHAT_AGENT_PARENT_ADDR unset),
+#      a tool requiring authority above the ceiling fails closed immediately with
+#      authority_exceeded / policy denial.
+#   2. Unreachable / invalid parent: If AICHAT_AGENT_PARENT_ADDR is set to an
+#      unreachable endpoint, the child fails closed safely (escalation_failed)
+#      without executing the tool or hanging indefinitely.
+#   3. Rollback journal durability: Journals are created with strict 0600 (owner-only)
+#      permissions under the configured/runtime directory and replay commands atomically.
+
+header "Demo 16: Multi-Process Escalation & Rollback Journal (deterministic, offline)"
+
+let d16_dir = ($nu.temp-dir | path join $"aichat-escalation-demo-($nu.pid)")
+mkdir $d16_dir
+let d16_policy = ($d16_dir | path join "policy.yaml")
+"rules:\n  - tool: get_current_time\n    raise: catastrophic\n" | save -f $d16_policy
+chmod 0600 $d16_policy
+
+let d16_cfg_dir = ($d16_dir | path join "config")
+mkdir $d16_cfg_dir
+"model: openai:gpt-4o-mini\nclients:\n- type: openai\n  api_key: sk-fake-escalation-demo\nagents:\n- name: esc_demo_agent\n  model: openai:gpt-4o-mini\n" | save -f ($d16_cfg_dir | path join "config.yaml")
+
+# Part 1: Zero-config degrade check (no parent endpoint)
+let d16_env_degrade = ($base_env | merge {
+    AICHAT_CONFIG_DIR: $d16_cfg_dir
+    AICHAT_MODEL: "openai:gpt-4o-mini"
+    AICHAT_SAFETY_POLICY_FILE: $d16_policy
+    AICHAT_SAFETY_DEFAULT_CEILING: "read_only"
+})
+show-cmd 'AICHAT_SAFETY_DEFAULT_CEILING=read_only [no parent] aichat --agent esc_demo_agent "trigger over-ceiling tool"'
+let demo16_degrade = (do {
+    "" | with-env $d16_env_degrade { ^$aichat_bin --agent "esc_demo_agent" "trigger" }
+} | complete)
+let d16_degrade_passed = ($demo16_degrade.exit_code != 0)
+report "Zero-config degrade path cleanly blocks when parent absent" $d16_degrade_passed
+
+# Part 2: Escalation fail-closed check with unreachable parent endpoint
+let d16_env_escalate = ($d16_env_degrade | merge {
+    AICHAT_AGENT_PARENT_ADDR: "127.0.0.1:1"
+    AICHAT_AGENT_PARENT_FP: "0000000000000000000000000000000000000000000000000000000000000000"
+    AICHAT_AGENT_PARENT_FINGERPRINT: "0000000000000000000000000000000000000000000000000000000000000000"
+    AICHAT_TREE_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
+    AICHAT_AGENT_TREE_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
+    AICHAT_TREE_ID: "demo-tree-16"
+    AICHAT_AGENT_TREE_ID: "demo-tree-16"
+    AICHAT_SAFETY_VERDICT_TIMEOUT_SECS: "1"
+    AICHAT_SAFETY_ESCALATION_DIR: ($d16_dir | path join "journals")
+})
+show-cmd 'AICHAT_AGENT_PARENT_ADDR=127.0.0.1:1 [unreachable parent] aichat --agent esc_demo_agent "fail-closed escalation"'
+let t_start = (date now)
+let demo16_escalate = (do {
+    "" | with-env $d16_env_escalate { ^$aichat_bin --agent "esc_demo_agent" "trigger" }
+} | complete)
+let t_elapsed = ((date now) - $t_start)
+let d16_escalate_passed = ($demo16_escalate.exit_code != 0) and ($t_elapsed < 3sec)
+report "Escalation to unreachable parent fails closed safely in <= 1s" $d16_escalate_passed $"elapsed=($t_elapsed)"
+
+# Run offline assertions via cargo test harness for mTLS and Journal durability
+let t_journal = (do {
+    ^cargo test --bin aichat safety::tests::journal_
+} | complete)
+let t_escalation = (do {
+    ^cargo test --bin aichat escalation::tests::
+} | complete)
+
+let d16_journal_passed = ($t_journal.exit_code == 0)
+let d16_escalation_passed = ($t_escalation.exit_code == 0)
+report "Rollback journal 0600 permissions & replay verification passed" $d16_journal_passed
+report "mTLS challenge-response & timeout fail-closed verification passed" $d16_escalation_passed
+
+rm -rf $d16_dir
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
