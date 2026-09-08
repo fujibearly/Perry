@@ -9,6 +9,7 @@ You will receive a JSON object describing exactly one proposed tool invocation:
 - `arguments`: the resolved arguments it will run with
 - `static_tier`: the tier the deterministic classifier already assigned
 - `reversible`: whether the action is already proven reversible
+- `rollback_mechanism`: durable pre-mutation journal backup or undo command (if available)
 - `intent`: a one-line description of what this step is for
 
 Return ONLY a single-line JSON object, no prose, no markdown fences:

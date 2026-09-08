@@ -20,7 +20,7 @@ use futures_util::future::join_all;
 use indexmap::IndexMap;
 use parking_lot::Mutex;
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
@@ -145,6 +145,11 @@ pub enum AgentLoopEvent {
     RollbackJournalRecorded {
         name: String,
         entry_id: String,
+    },
+    PreflightReversibilityApplied {
+        name: String,
+        mechanism: String,
+        stepped_down_to: String,
     },
 }
 
@@ -754,6 +759,7 @@ fn authority_denied_result(
     config: &GlobalConfig,
     call: &ToolCall,
     progress: Option<&AgentLoopProgress>,
+    proven_reversible_applied: Option<&mut bool>,
 ) -> Option<serde_json::Value> {
     use crate::safety::{required_authority, PolicyFile, PolicyOutcome, RequiredAuthority};
 
@@ -791,8 +797,11 @@ fn authority_denied_result(
         }
     }
 
-    let (static_tier, reversible) = tool_tier_and_reversibility(config, &call.name);
-    let required = required_authority(static_tier, policy_outcome, reversible);
+    let (static_tier, mut reversible) = tool_tier_and_reversibility(config, &call.name);
+    if proven_reversible_applied.as_ref().map(|b| **b).unwrap_or(false) {
+        reversible = true;
+    }
+    let mut required = required_authority(static_tier, policy_outcome, reversible);
     let ceiling = current_authority_ceiling(config);
 
     if ceiling.permits(required) {
@@ -813,6 +822,57 @@ fn authority_denied_result(
             });
         }
         return None;
+    }
+
+    // Opportunistic Remediation (Option B):
+    // If the tool tripped the ceiling solely because it is not yet proven reversible,
+    // check if it declares support for reversibility (e.g. `reversible-via backup`).
+    // If taking an atomic backup drops required authority within ceiling, perform
+    // the preflight backup right now to remediate and pass the gate!
+    if !reversible && policy_outcome != Some(PolicyOutcome::Forbid) {
+        let decl = find_tool_declaration(config, &call.name);
+        let can_be_reversible = decl.as_ref().map(|d| {
+            d.reversible_via.as_deref() == Some("backup") || d.reversible == Some(true)
+        }).unwrap_or(false);
+
+        if can_be_reversible {
+            let remediated_required = required_authority(static_tier, policy_outcome, true);
+            if ceiling.permits(remediated_required) {
+                if let Some(_entry_id) = record_pre_mutation_journal_entry(config, call, progress) {
+                    if let Some(flag) = proven_reversible_applied {
+                        *flag = true;
+                    }
+                    required = remediated_required;
+
+                    if let Some(p) = progress {
+                        let step_str = match required {
+                            RequiredAuthority::Tier(t) => t.as_str().to_string(),
+                            RequiredAuthority::Human => "human".to_string(),
+                        };
+                        p.emit(AgentLoopEvent::PreflightReversibilityApplied {
+                            name: call.name.clone(),
+                            mechanism: "backup".to_string(),
+                            stepped_down_to: step_str,
+                        });
+                        let tier_str = match static_tier {
+                            crate::function::StaticTier::Tier(t) => t.as_str().to_string(),
+                            crate::function::StaticTier::Unclassified => "unclassified".to_string(),
+                        };
+                        let required_str = match required {
+                            RequiredAuthority::Human => "human".to_string(),
+                            RequiredAuthority::Tier(t) => t.as_str().to_string(),
+                        };
+                        p.emit(AgentLoopEvent::SafetyGatePassed {
+                            name: call.name.clone(),
+                            tier: tier_str,
+                            required: required_str,
+                            ceiling: ceiling.tier().as_str().to_string(),
+                        });
+                    }
+                    return None;
+                }
+            }
+        }
     }
 
     // Distinguish an explicit policy forbid from a plain over-ceiling block.
@@ -887,10 +947,11 @@ fn risk_denied_from_verdict(
     base: crate::safety::RequiredAuthority,
     ceiling: crate::safety::AuthorityCeiling,
     verdict: &crate::safety::RiskVerdict,
+    reversible: bool,
 ) -> Option<serde_json::Value> {
     use crate::safety::{clamp_verdict, VerdictConfidence};
 
-    let effective = clamp_verdict(base, verdict);
+    let effective = clamp_verdict(base, verdict, reversible);
     let low_confidence = verdict.confidence == VerdictConfidence::Low;
 
     if ceiling.permits(effective) && !low_confidence {
@@ -937,6 +998,7 @@ fn risk_denied_from_verdict(
 async fn risk_evaluator_denied_result(
     config: &GlobalConfig,
     call: &ToolCall,
+    proven_reversible: bool,
     cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
     progress: Option<&AgentLoopProgress>,
 ) -> Option<serde_json::Value> {
@@ -963,7 +1025,8 @@ async fn risk_evaluator_denied_result(
         return None;
     }
 
-    let (static_tier, reversible) = tool_tier_and_reversibility(config, &call.name);
+    let (static_tier, static_reversible) = tool_tier_and_reversibility(config, &call.name);
+    let reversible = static_reversible || proven_reversible;
     let base_tier = match static_tier {
         crate::function::StaticTier::Tier(t) => t,
         crate::function::StaticTier::Unclassified => return None,
@@ -1069,7 +1132,7 @@ async fn risk_evaluator_denied_result(
     // it as at least `Human` (the strictest floor) — that way a later reuse of
     // this action re-blocks without re-calling the model, matching the immediate
     // fail-toward decision below.
-    let clamped = clamp_verdict(base, &verdict);
+    let clamped = clamp_verdict(base, &verdict, reversible);
     let cacheable = if verdict.confidence == crate::safety::VerdictConfidence::Low {
         RequiredAuthority::Human
     } else {
@@ -1079,7 +1142,7 @@ async fn risk_evaluator_denied_result(
         cache.lock().raise(&call.name, &call.arguments, cacheable);
     }
 
-    risk_denied_from_verdict(&call.name, base, ceiling, &verdict)
+    risk_denied_from_verdict(&call.name, base, ceiling, &verdict, reversible)
 }
 
 /// Build the structured `risk_blocked` denial for a cache-driven block (no live
@@ -1513,7 +1576,7 @@ fn record_pre_mutation_journal_entry(
     config: &GlobalConfig,
     call: &ToolCall,
     progress: Option<&AgentLoopProgress>,
-) {
+) -> Option<String> {
     let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
     if static_tier != crate::function::StaticTier::Tier(crate::function::BlastRadius::Safe) {
         let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
@@ -1521,6 +1584,31 @@ fn record_pre_mutation_journal_entry(
         let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
         if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
             let entry_id = format!("entry-{}", uuid::Uuid::new_v4());
+
+            let mut target_path = None;
+            let mut artifact_path = None;
+            let mut undo_command = None;
+
+            if let Some(obj) = call.arguments.as_object() {
+                if let Some(path_str) = obj.get("path").or_else(|| obj.get("file")).and_then(|v| v.as_str()) {
+                    let target = if Path::new(path_str).is_absolute() {
+                        PathBuf::from(path_str)
+                    } else {
+                        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path_str)
+                    };
+                    target_path = Some(target.clone());
+                    if target.exists() {
+                        let backup_name = format!("{}-{}.bak", target.file_name().and_then(|n| n.to_str()).unwrap_or("file"), entry_id);
+                        let backup_file = journal.backups_dir().join(backup_name);
+                        if std::fs::copy(&target, &backup_file).is_ok() {
+                            artifact_path = Some(backup_file);
+                        }
+                    } else {
+                        undo_command = Some(format!("rm -f '{}'", target.display()));
+                    }
+                }
+            }
+
             let entry = crate::safety::RollbackJournalEntry {
                 id: entry_id.clone(),
                 agent_id,
@@ -1533,20 +1621,22 @@ fn record_pre_mutation_journal_entry(
                 args: call.arguments.clone(),
                 working_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
                 shell: Some("/bin/bash".into()),
-                target_path: None,
-                artifact_path: None,
-                undo_command: None,
+                target_path,
+                artifact_path,
+                undo_command,
             };
             if journal.record(&entry).is_ok() {
                 if let Some(p) = progress {
                     p.emit(AgentLoopEvent::RollbackJournalRecorded {
                         name: call.name.clone(),
-                        entry_id,
+                        entry_id: entry_id.clone(),
                     });
                 }
+                return Some(entry_id);
             }
         }
     }
+    None
 }
 
 /// Dispatch a single tool call asynchronously.
@@ -1567,8 +1657,9 @@ async fn eval_single_tool(
         }
     }
 
+    let mut proven_reversible_applied = false;
     // Backlog #6b: blast-radius authority gate.
-    if let Some(denied) = authority_denied_result(config, call, progress) {
+    if let Some(denied) = authority_denied_result(config, call, progress, Some(&mut proven_reversible_applied)) {
         let err_type = denied
             .get("error")
             .and_then(|e| e.get("type"))
@@ -1612,7 +1703,7 @@ async fn eval_single_tool(
     }
 
     // Backlog #6c: `%assess-risk%` LLM evaluator overlay.
-    if let Some(denied) = risk_evaluator_denied_result(config, call, risk_cache, progress).await {
+    if let Some(denied) = risk_evaluator_denied_result(config, call, proven_reversible_applied, risk_cache, progress).await {
         if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
             if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, "risk_blocked", progress).await {
                 return Ok(res);
@@ -1623,7 +1714,9 @@ async fn eval_single_tool(
     }
 
     // Record pre-mutation entry in durable journal (FR-6d.6)
-    record_pre_mutation_journal_entry(config, call, progress);
+    if !proven_reversible_applied {
+        record_pre_mutation_journal_entry(config, call, progress);
+    }
 
     // Route 1: MCP tools (async native)
     #[cfg(feature = "mcp")]
@@ -2481,6 +2574,15 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
         }
         AgentLoopEvent::RollbackJournalRecorded { name, entry_id } => {
             Some(format!("{pid} rollback journal: recorded {name} ({entry_id})"))
+        }
+        AgentLoopEvent::PreflightReversibilityApplied {
+            name,
+            mechanism,
+            stepped_down_to,
+        } => {
+            Some(format!(
+                "{pid} preflight remediation: {name} (via {mechanism} -> stepped down to {stepped_down_to})"
+            ))
         }
     }
 }
@@ -3976,6 +4078,10 @@ agent_loop:
                 "risk": "destructive", "reversible": true
             })).unwrap(),
             serde_json::from_value(json!({
+                "name": "write_file", "description": "write w/ backup", "parameters": {"type":"object"},
+                "risk": "disruptive", "reversible_via": "backup"
+            })).unwrap(),
+            serde_json::from_value(json!({
                 "name": "mystery", "description": "no classification", "parameters": {"type":"object"}
             })).unwrap(),
         ]);
@@ -3995,16 +4101,16 @@ agent_loop:
         let config = config_with_tiers();
 
         // Within ceiling: Safe and Disruptive permitted.
-        assert!(authority_denied_result(&config, &call("read_logs"), None).is_none());
-        assert!(authority_denied_result(&config, &call("restart_svc"), None).is_none());
+        assert!(authority_denied_result(&config, &call("read_logs"), None, None).is_none());
+        assert!(authority_denied_result(&config, &call("restart_svc"), None, None).is_none());
         // Destructive == ceiling → permitted.
-        assert!(authority_denied_result(&config, &call("wipe_disk"), None).is_none());
+        assert!(authority_denied_result(&config, &call("wipe_disk"), None, None).is_none());
         // Catastrophic > Destructive → authority_exceeded.
-        let denied = authority_denied_result(&config, &call("drop_table"), None)
+        let denied = authority_denied_result(&config, &call("drop_table"), None, None)
             .expect("catastrophic must exceed a destructive ceiling");
         assert_eq!(denied["error"]["type"], "authority_exceeded");
         // _plan always permitted.
-        assert!(authority_denied_result(&config, &call("_plan"), None).is_none());
+        assert!(authority_denied_result(&config, &call("_plan"), None, None).is_none());
 
         match prev {
             Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
@@ -4020,7 +4126,7 @@ agent_loop:
         let config = config_with_tiers();
 
         // Unclassified → Human → exceeds any autonomous ceiling → blocked (pre-#6d).
-        let denied = authority_denied_result(&config, &call("mystery"), None)
+        let denied = authority_denied_result(&config, &call("mystery"), None, None)
             .expect("unclassified tool is human-reserved and must be blocked");
         assert_eq!(denied["error"]["type"], "authority_exceeded");
 
@@ -4040,10 +4146,10 @@ agent_loop:
         let config = config_with_tiers();
 
         // Plain destructive → needs Destructive > Disruptive ceiling → blocked.
-        assert!(authority_denied_result(&config, &call("wipe_disk"), None).is_some());
+        assert!(authority_denied_result(&config, &call("wipe_disk"), None, None).is_some());
         // Proven-reversible destructive → needs only Disruptive → permitted.
         assert!(
-            authority_denied_result(&config, &call("wipe_disk_reversible"), None).is_none(),
+            authority_denied_result(&config, &call("wipe_disk_reversible"), None, None).is_none(),
             "proven-reversible destructive should drop to disruptive and fit the ceiling"
         );
 
@@ -4062,8 +4168,8 @@ agent_loop:
         let config = config_with_tiers();
 
         // Safe permitted; anything above blocked for this restricted child.
-        assert!(authority_denied_result(&config, &call("read_logs"), None).is_none());
-        assert!(authority_denied_result(&config, &call("restart_svc"), None).is_some());
+        assert!(authority_denied_result(&config, &call("read_logs"), None, None).is_none());
+        assert!(authority_denied_result(&config, &call("restart_svc"), None, None).is_some());
 
         match prev {
             Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
@@ -4119,7 +4225,7 @@ agent_loop:
         let base = RequiredAuthority::Tier(Disruptive);
         let ceiling = AuthorityCeiling::UpTo(Destructive);
         assert!(
-            risk_denied_from_verdict("restart_svc", base, ceiling, &verdict(Safe, VerdictConfidence::High))
+            risk_denied_from_verdict("restart_svc", base, ceiling, &verdict(Safe, VerdictConfidence::High), false)
                 .is_none(),
             "a permissive high-confidence verdict must not loosen but also must not block within ceiling"
         );
@@ -4127,7 +4233,8 @@ agent_loop:
             "restart_svc",
             base,
             ceiling,
-            &verdict(Disruptive, VerdictConfidence::High)
+            &verdict(Disruptive, VerdictConfidence::High),
+            false,
         )
         .is_none());
     }
@@ -4145,6 +4252,7 @@ agent_loop:
             base,
             ceiling,
             &verdict(Destructive, VerdictConfidence::High),
+            false,
         )
         .expect("a raised-over-ceiling verdict must block");
         assert_eq!(denied["error"]["type"], "risk_blocked");
@@ -4163,6 +4271,7 @@ agent_loop:
             base,
             ceiling,
             &verdict(Disruptive, VerdictConfidence::Low),
+            false,
         )
         .expect("a low-confidence verdict must fail toward blocking");
         assert_eq!(denied["error"]["type"], "risk_blocked");
@@ -4181,6 +4290,7 @@ agent_loop:
             base,
             ceiling,
             &verdict(Safe, VerdictConfidence::High),
+            false,
         )
         .expect("Human base must remain blocked regardless of a permissive verdict");
         assert_eq!(denied["error"]["type"], "risk_blocked");
@@ -4188,21 +4298,35 @@ agent_loop:
 
     #[tokio::test]
     async fn risk_evaluator_disabled_without_risk_model_is_noop() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_ROLES_DIR").ok();
+        let empty_dir = crate::utils::temp_file("-test-empty-roles-", "");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        std::env::set_var("AICHAT_ROLES_DIR", &empty_dir);
+
         // No safety.risk_model configured → the overlay degrades to #6b (proceeds
         // here; the #6b gate already ran separately). A disruptive tool within a
         // Destructive default ceiling must NOT be blocked by the evaluator.
         let config = config_with_tiers();
         assert!(config.read().safety.risk_model.is_none());
         assert!(
-            risk_evaluator_denied_result(&config, &call("restart_svc"), None, None)
+            risk_evaluator_denied_result(&config, &call("restart_svc"), false, None, None)
                 .await
                 .is_none(),
             "with no risk_model the evaluator must be a no-op (degrade to #6b)"
         );
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_ROLES_DIR", v),
+            None => std::env::remove_var("AICHAT_ROLES_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&empty_dir);
     }
 
     #[tokio::test]
     async fn risk_evaluator_uses_role_model_when_safety_risk_model_unset() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_ROLES_DIR").ok();
         let roles_dir = crate::utils::temp_file("-test-roles-", "");
         std::fs::create_dir_all(&roles_dir).unwrap();
         let role_content = "---\nmodel: custom:evaluator-model\n---\nPrompt";
@@ -4213,7 +4337,7 @@ agent_loop:
         assert!(config.read().safety.risk_model.is_none());
 
         let (progress, mut rx) = AgentLoopProgress::live();
-        let _ = risk_evaluator_denied_result(&config, &call("restart_svc"), None, Some(&progress)).await;
+        let _ = risk_evaluator_denied_result(&config, &call("restart_svc"), false, None, Some(&progress)).await;
         
         let mut start_ev = None;
         while let Ok(event) = rx.try_recv() {
@@ -4222,7 +4346,10 @@ agent_loop:
                 break;
             }
         }
-        std::env::remove_var("AICHAT_ROLES_DIR");
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_ROLES_DIR", v),
+            None => std::env::remove_var("AICHAT_ROLES_DIR"),
+        }
         let _ = std::fs::remove_dir_all(&roles_dir);
 
         assert_eq!(
@@ -4241,7 +4368,7 @@ agent_loop:
         let config = config_with_tiers();
         config.write().safety.risk_model = Some("nonexistent:model".into());
         assert!(
-            risk_evaluator_denied_result(&config, &call("read_logs"), None, None)
+            risk_evaluator_denied_result(&config, &call("read_logs"), false, None, None)
                 .await
                 .is_none(),
             "Safe tools must skip the evaluator (fast-path), not error on a bogus model"
@@ -4262,7 +4389,7 @@ agent_loop:
             .lock()
             .raise(&c.name, &c.arguments, crate::safety::RequiredAuthority::Human);
 
-        let denied = risk_evaluator_denied_result(&config, &c, Some(&cache), None)
+        let denied = risk_evaluator_denied_result(&config, &c, false, Some(&cache), None)
             .await
             .expect("a cached Human floor must block");
         assert_eq!(denied["error"]["type"], "risk_blocked");
@@ -4284,7 +4411,7 @@ agent_loop:
         );
 
         assert!(
-            risk_evaluator_denied_result(&config, &c, Some(&cache), None)
+            risk_evaluator_denied_result(&config, &c, false, Some(&cache), None)
                 .await
                 .is_none(),
             "a cached in-ceiling floor should proceed without re-calling the model"
@@ -4370,7 +4497,7 @@ agent_loop:
         config.write().safety.policy_file = Some(policy_file);
 
         let c = call("restart_svc");
-        let result = authority_denied_result(&config, &c, Some(&progress));
+        let result = authority_denied_result(&config, &c, Some(&progress), None);
         assert!(result.is_none());
 
         let ev1 = rx.try_recv().expect("must emit PolicyRuleMatched");
@@ -4393,10 +4520,107 @@ agent_loop:
             crate::safety::RequiredAuthority::Tier(crate::function::BlastRadius::Disruptive),
         );
 
-        let result = risk_evaluator_denied_result(&config, &c, Some(&cache), Some(&progress)).await;
+        let result = risk_evaluator_denied_result(&config, &c, false, Some(&cache), Some(&progress)).await;
         assert!(result.is_none());
 
         let ev = rx.try_recv().expect("must emit RiskAssessmentCacheHit");
         assert!(matches!(ev, AgentLoopEvent::RiskAssessmentCacheHit { ref name, ref cached_floor } if name == "restart_svc" && cached_floor == "disruptive"));
+    }
+
+    #[tokio::test]
+    async fn test_preflight_reversibility_allows_disruptive_tool_under_reversible_ceiling() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        std::env::set_var("AICHAT_AUTHORITY_CEILING", "reversible");
+        let config = config_with_tiers();
+
+        let (progress, mut rx) = AgentLoopProgress::live();
+        let c = ToolCall::new("write_file".to_string(), json!({"path": "/tmp/test_preflight.txt"}), None);
+        let mut proven_applied = false;
+        let denied = authority_denied_result(&config, &c, Some(&progress), Some(&mut proven_applied));
+
+        assert!(denied.is_none(), "preflight remediation should permit write_file under reversible ceiling");
+        assert!(proven_applied, "proven_reversible_applied flag should be set to true");
+
+        let mut emitted_preflight = false;
+        let mut emitted_passed = false;
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AgentLoopEvent::PreflightReversibilityApplied { name, stepped_down_to, .. } => {
+                    assert_eq!(name, "write_file");
+                    assert_eq!(stepped_down_to, "reversible");
+                    emitted_preflight = true;
+                }
+                AgentLoopEvent::SafetyGatePassed { name, required, ceiling, .. } => {
+                    assert_eq!(name, "write_file");
+                    assert_eq!(required, "reversible");
+                    assert_eq!(ceiling, "reversible");
+                    emitted_passed = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(emitted_preflight, "must emit PreflightReversibilityApplied");
+        assert!(emitted_passed, "must emit SafetyGatePassed");
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
+    }
+
+    #[test]
+    fn test_preflight_reversibility_fails_closed_when_stepped_down_still_exceeds_ceiling() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        // Ceiling is Safe. write_file is Disruptive -> stepped down to Reversible.
+        // Reversible still exceeds Safe!
+        std::env::set_var("AICHAT_AUTHORITY_CEILING", "safe");
+        let config = config_with_tiers();
+
+        let c = ToolCall::new("write_file".to_string(), json!({"path": "/tmp/test_preflight.txt"}), None);
+        let mut proven_applied = false;
+        let denied = authority_denied_result(&config, &c, None, Some(&mut proven_applied));
+
+        assert!(denied.is_some(), "stepped down authority still exceeding ceiling must fail closed");
+        assert_eq!(denied.unwrap()["error"]["type"], "authority_exceeded");
+        assert!(!proven_applied, "proven_reversible_applied flag must remain false when remediation does not suffice");
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
+    }
+
+    #[test]
+    fn test_preflight_reversibility_cannot_bypass_policy_forbid() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev_ceiling = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        std::env::set_var("AICHAT_AUTHORITY_CEILING", "destructive");
+
+        let config = config_with_tiers();
+        let temp_dir = crate::utils::temp_file("-test-policy-", "");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let policy_file = temp_dir.join("policy.yaml");
+        std::fs::write(&policy_file, "rules:\n  - tool: write_file\n    forbid: true\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&policy_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        config.write().safety.policy_file = Some(policy_file);
+
+        let c = ToolCall::new("write_file".to_string(), json!({"path": "/tmp/test_preflight.txt"}), None);
+        let mut proven_applied = false;
+        let denied = authority_denied_result(&config, &c, None, Some(&mut proven_applied));
+
+        assert!(denied.is_some(), "policy forbid must never be bypassed by preflight remediation");
+        assert_eq!(denied.unwrap()["error"]["type"], "policy_forbidden");
+        assert!(!proven_applied);
+
+        match prev_ceiling {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
     }
 }
