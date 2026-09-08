@@ -2945,7 +2945,86 @@ pub enum DialogDirection {
     Response,
 }
 
+/// Helper to get current agent nesting depth (0 for root/orchestrator).
+pub fn current_agent_depth() -> usize {
+    std::env::var("AICHAT_AGENT_DEPTH")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+
+/// Helper to get distinct ANSI color for an agent name.
+pub fn agent_color(name: &str) -> nu_ansi_term::Color {
+    match name.to_lowercase().as_str() {
+        "orchestrator" => nu_ansi_term::Color::Purple,
+        "coder" => nu_ansi_term::Color::Green,
+        "researcher" => nu_ansi_term::Color::Yellow,
+        "sql" => nu_ansi_term::Color::Blue,
+        "todo" => nu_ansi_term::Color::Cyan,
+        "json-viewer" => nu_ansi_term::Color::LightBlue,
+        "%assess-risk%" | "assess-risk" => nu_ansi_term::Color::Red,
+        "%functions%" => nu_ansi_term::Color::LightCyan,
+        _ => {
+            let palette = [
+                nu_ansi_term::Color::Cyan,
+                nu_ansi_term::Color::Green,
+                nu_ansi_term::Color::Yellow,
+                nu_ansi_term::Color::Purple,
+                nu_ansi_term::Color::LightBlue,
+                nu_ansi_term::Color::LightCyan,
+            ];
+            let hash = name.bytes().fold(0usize, |acc, b| acc.wrapping_add(b as usize));
+            palette[hash % palette.len()]
+        }
+    }
+}
+
+/// Truncate long lines horizontally to avoid terminal blowout.
+fn truncate_line_width(line: &str, max_len: usize) -> String {
+    if line.len() > max_len {
+        let keep = max_len / 2;
+        format!(
+            "{}... (truncated {} bytes) ...{}",
+            &line[..keep],
+            line.len() - max_len,
+            &line[line.len() - keep..]
+        )
+    } else {
+        line.to_string()
+    }
+}
+
+/// Truncates payload text for dialog observability trace to at most top N lines and bottom N lines.
+/// Preserves full content if lines <= top + bottom.
+pub fn truncate_payload_dialog(text: &str, top: usize, bottom: usize) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() > top + bottom {
+        let omitted = lines.len() - top - bottom;
+        let top_lines = lines[..top]
+            .iter()
+            .map(|l| truncate_line_width(l, 2000))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let bottom_lines = lines[lines.len() - bottom..]
+            .iter()
+            .map(|l| truncate_line_width(l, 2000))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{top_lines}\n... (payload truncated: {omitted} lines omitted) ...\n{bottom_lines}")
+    } else if lines.iter().any(|l| l.len() > 2000) {
+        lines
+            .iter()
+            .map(|l| truncate_line_width(l, 2000))
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        text.to_string()
+    }
+}
+
 /// Format messages submitted to LLM for dialog observability trace.
+/// The instruction portion (system prompt) is shown in full.
+/// Payloads (user messages, assistant messages, tool results) are truncated to at most top 20 and last 20 lines.
 pub fn format_messages_dialog(messages: &[crate::client::Message]) -> String {
     use crate::client::{MessageContent, MessageContentPart, MessageRole};
     let mut out = String::new();
@@ -2957,22 +3036,45 @@ pub fn format_messages_dialog(messages: &[crate::client::Message]) -> String {
             MessageRole::Tool => "tool",
         };
         let content_str = match &msg.content {
-            MessageContent::Text(t) => t.clone(),
-            MessageContent::Array(parts) => parts
-                .iter()
-                .map(|p| match p {
-                    MessageContentPart::Text { text } => text.as_str(),
-                    MessageContentPart::ImageUrl { .. } => "[image]",
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
+            MessageContent::Text(t) => {
+                if msg.role == MessageRole::System {
+                    t.clone()
+                } else {
+                    truncate_payload_dialog(t, 20, 20)
+                }
+            }
+            MessageContent::Array(parts) => {
+                let text = parts
+                    .iter()
+                    .map(|p| match p {
+                        MessageContentPart::Text { text } => text.as_str(),
+                        MessageContentPart::ImageUrl { .. } => "[image]",
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if msg.role == MessageRole::System {
+                    text
+                } else {
+                    truncate_payload_dialog(&text, 20, 20)
+                }
+            }
             MessageContent::ToolCalls(tc) => {
                 let mut parts = Vec::new();
                 if !tc.text.is_empty() {
-                    parts.push(tc.text.clone());
+                    parts.push(truncate_payload_dialog(&tc.text, 20, 20));
                 }
                 for res in &tc.tool_results {
-                    parts.push(format!("tool_result: {} -> {}", res.call.name, res.output));
+                    let output_str = if let Some(s) = res.output.as_str() {
+                        s.to_string()
+                    } else if let Some(s) = res.output.get("output").and_then(|v| v.as_str()) {
+                        s.to_string()
+                    } else if let Ok(s) = serde_json::to_string_pretty(&res.output) {
+                        s
+                    } else {
+                        res.output.to_string()
+                    };
+                    let truncated_output = truncate_payload_dialog(&output_str, 20, 20);
+                    parts.push(format!("tool_result: {} -> {}", res.call.name, truncated_output));
                 }
                 parts.join("\n")
             }
@@ -2992,7 +3094,7 @@ pub fn format_llm_response(
 ) -> String {
     let mut parts = Vec::new();
     if !output.text.trim().is_empty() {
-        parts.push(output.text.trim().to_string());
+        parts.push(truncate_payload_dialog(output.text.trim(), 20, 20));
     }
     if !tool_calls.is_empty() {
         let calls_val: Vec<_> = tool_calls
@@ -3005,7 +3107,7 @@ pub fn format_llm_response(
             })
             .collect();
         if let Ok(calls_str) = serde_json::to_string_pretty(&calls_val) {
-            parts.push(format!("tool_calls:\n{calls_str}"));
+            parts.push(format!("tool_calls:\n{}", truncate_payload_dialog(&calls_str, 20, 20)));
         } else {
             parts.push(format!("tool_calls: {:?}", tool_calls));
         }
@@ -3026,15 +3128,19 @@ pub fn emit_dialog_block(
     direction: DialogDirection,
     content: &str,
 ) {
+    let depth = current_agent_depth();
+    let indent = "    ".repeat(depth);
+    let color = agent_color(agent);
+    let colored_agent = color.bold().paint(agent).to_string();
     let (arrow, dir_str) = match direction {
         DialogDirection::Request => (">>>", "PROMPT SUBMITTED TO LLM"),
         DialogDirection::Response => ("<<<", "RESPONSE FROM LLM"),
     };
-    let header = format!("[{pid} {agent} [turn {turn}/{max_turns}] {arrow} {dir_str}:]");
-    let bar = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄";
+    let header = format!("{indent}[{pid} {colored_agent} [turn {turn}/{max_turns}] {arrow} {dir_str}:]");
+    let bar = format!("{indent}  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
     let indented_content: Vec<String> = content
         .lines()
-        .map(|line| format!("  {line}"))
+        .map(|line| format!("{indent}  {line}"))
         .collect();
     let block = format!(
         "\n  {header}\n{bar}\n{}\n{bar}",
@@ -3420,11 +3526,15 @@ pub fn render_event(
     //    When stdout IS a terminal, uses spinner.print_line for clean rendering.
     if config.show_trace {
         if let Some(line) = format_trace_event(event, pid) {
+            let depth = current_agent_depth();
+            let indent = "    ".repeat(depth);
+            let color = agent_color(agent_label);
+            let colored_label = color.bold().paint(agent_label).to_string();
             let output = if *trace_header_printed {
-                format!("  [{line}]")
+                format!("{indent}  [{line}]")
             } else {
                 *trace_header_printed = true;
-                format!("Agent {agent_label} ({pid}) loop trace:\n  [{line}]")
+                format!("{indent}Agent {colored_label} ({pid}) loop trace:\n{indent}  [{line}]")
             };
             if *IS_STDOUT_TERMINAL {
                 spinner.print_line(output)?;
@@ -5393,6 +5503,82 @@ agent_loop:
         assert!(verdict.added_context.is_some());
         let err_obj = verdict.added_context.unwrap();
         assert_eq!(err_obj["error"]["type"], "capability_denied");
+    }
+
+    #[test]
+    fn test_truncate_payload_dialog_under_limit() {
+        let text = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let result = truncate_payload_dialog(&text, 20, 20);
+        assert_eq!(result, text);
+    }
+
+    #[test]
+    fn test_truncate_payload_dialog_over_limit() {
+        let text = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let result = truncate_payload_dialog(&text, 20, 20);
+        assert!(result.starts_with("line 1\nline 2\n"));
+        assert!(result.ends_with("\nline 99\nline 100"));
+        assert!(result.contains("... (payload truncated: 60 lines omitted) ..."));
+        let lines: Vec<&str> = result.lines().collect();
+        // 20 top + 1 truncation line + 20 bottom = 41 lines
+        assert_eq!(lines.len(), 41);
+        assert_eq!(lines[0], "line 1");
+        assert_eq!(lines[19], "line 20");
+        assert_eq!(lines[20], "... (payload truncated: 60 lines omitted) ...");
+        assert_eq!(lines[21], "line 81");
+        assert_eq!(lines[40], "line 100");
+    }
+
+    #[test]
+    fn test_format_messages_dialog_preserves_system_instructions() {
+        use crate::client::{Message, MessageContent, MessageRole};
+        // 60 lines of system instructions
+        let sys_text = (1..=60).map(|i| format!("instruction {i}")).collect::<Vec<_>>().join("\n");
+        // 60 lines of user payload
+        let user_text = (1..=60).map(|i| format!("data {i}")).collect::<Vec<_>>().join("\n");
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text(sys_text.clone())),
+            Message::new(MessageRole::User, MessageContent::Text(user_text)),
+        ];
+        let dialog = format_messages_dialog(&msgs);
+        // System instructions must be preserved in full
+        assert!(dialog.contains(&format!("[system]\n{sys_text}")));
+        // User payload must be truncated
+        assert!(dialog.contains("... (payload truncated: 20 lines omitted) ..."));
+        assert!(dialog.contains("data 1"));
+        assert!(dialog.contains("data 20"));
+        assert!(dialog.contains("data 41"));
+        assert!(dialog.contains("data 60"));
+        assert!(!dialog.contains("data 25"));
+    }
+
+    #[test]
+    fn test_agent_color_assignment() {
+        assert_eq!(agent_color("orchestrator"), nu_ansi_term::Color::Purple);
+        assert_eq!(agent_color("coder"), nu_ansi_term::Color::Green);
+        assert_eq!(agent_color("researcher"), nu_ansi_term::Color::Yellow);
+        assert_eq!(agent_color("sql"), nu_ansi_term::Color::Blue);
+        assert_eq!(agent_color("todo"), nu_ansi_term::Color::Cyan);
+        assert_eq!(agent_color("%assess-risk%"), nu_ansi_term::Color::Red);
+        assert_eq!(agent_color("%functions%"), nu_ansi_term::Color::LightCyan);
+    }
+
+    #[test]
+    fn test_agent_depth_parsing() {
+        let prev = std::env::var("AICHAT_AGENT_DEPTH").ok();
+        std::env::remove_var("AICHAT_AGENT_DEPTH");
+        assert_eq!(current_agent_depth(), 0);
+
+        std::env::set_var("AICHAT_AGENT_DEPTH", "1");
+        assert_eq!(current_agent_depth(), 1);
+
+        std::env::set_var("AICHAT_AGENT_DEPTH", "3");
+        assert_eq!(current_agent_depth(), 3);
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_AGENT_DEPTH", v),
+            None => std::env::remove_var("AICHAT_AGENT_DEPTH"),
+        }
     }
 }
 
