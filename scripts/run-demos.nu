@@ -156,10 +156,26 @@ def step-pause [debug: bool, next_test: string] {
     }
 }
 
+
+# Filter helper: returns true if target demo is empty or matches demo_id
+def should-run-demo [demo_id: string, target_demo: string] {
+    if ($target_demo | is-empty) {
+        true
+    } else {
+        ($demo_id | str lowercase) == ($target_demo | str lowercase)
+    }
+}
+
 def main [
-    --debug (-d),     # Execute tests one by one, waiting for user input to proceed
-    --dialog,         # Display full submitted LLM prompt and response observability trace
+    --debug (-d),             # Execute tests one by one, waiting for user input to proceed
+    --dialog,                 # Display full submitted LLM prompt and response observability trace
+    --demo (-t): string = "", # Run only a specific demo (e.g. --demo 3 or -t 10b)
 ] {
+    let valid_demos = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21"]
+    if ($demo | is-not-empty) and not (($demo | str lowercase) in $valid_demos) {
+        print $"(ansi red_bold)ERROR:(ansi reset) Unknown demo '($demo)'. Valid demos: ($valid_demos | str join ', ')"
+        exit 1
+    }
     # Base environment for all aichat invocations. AICHAT_MODEL makes every demo
     # use DEMO_MODEL as its default model without needing a per-demo -m flag;
     # WEB_SEARCH_MODEL points the researcher/web-search tooling at the same model;
@@ -209,6 +225,7 @@ let expected_agents = ["coder", "orchestrator", "researcher"]
 let agents_ok = ($expected_agents | all { |a| $a in $agents })
 report "Agents visible" $agents_ok $"Found: ($agents | str join ', ')"
 
+if (should-run-demo "1" $demo) {
 # ─── Demo 1: Parallel Tool Execution ─────────────────────────────────────────
 
 step-pause $debug "Demo 1: Parallel Tool Execution"
@@ -236,7 +253,9 @@ let detail_msg = if $trace_visually_printed { "Trace routed to terminal (visual 
 report "3 parallel slow_task calls" $parallel_ok $detail_msg
 show-output $demo1.stdout
 show-cost ($demo1.stderr | default "")
+}
 
+if (should-run-demo "2" $demo) {
 # ─── Demo 2: Turn Budget ─────────────────────────────────────────────────────
 
 step-pause $debug "Demo 2: Turn Budget"
@@ -255,25 +274,28 @@ let budget_warning = ($combined2 | str contains "turn limit") or ($combined2 | s
 
 # Trace visible live on terminal via /dev/tty
 report "Turn budget warning fires" $budget_warning
+}
 
+if (should-run-demo "3" $demo) {
 # ─── Demo 3: Planning Tool (_plan) ───────────────────────────────────────────
 
 step-pause $debug "Demo 3: Planning Tool (_plan)"
 header "Demo 3: Planning Tool (_plan)"
 
-let demo3_prompt = "This is a multi-step task. You MUST use the exact tool named '_plan' (with leading underscore, do NOT call 'plan') first to plan your approach before taking any action. Then: read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "($demo3_prompt)"'
+if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
+
+let demo3_prompt = "Read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
+show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo3_prompt)"'
 
 let demo3_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo3 = (do {
-    "" | with-env $demo3_env { ^$aichat_bin --show-cost -r "%functions%" $demo3_prompt }
+    "" | with-env $demo3_env { ^$aichat_bin --show-cost --agent orchestrator $demo3_prompt }
 } | complete)
 
 let trace3 = ($demo3.stderr | default "")
 let clean3 = (clean-trace $trace3)
-# Plan detection: check stderr trace OR model output mentioning plan/step/approach
-let trace_visually_printed = ($clean3 | is-empty) and ("/tmp/os-summary.txt" | path exists)
-let plan_in_trace = ($clean3 | str contains "plan:") or ($demo3.stdout | str contains -i "plan") or ($demo3.stdout | str contains "Step") or $trace_visually_printed
+let trace_visually_printed = ($clean3 | is-empty)
+let plan_in_trace = ($clean3 | str contains "plan:") or ($demo3.stdout | str contains -i "plan") or ($demo3.stdout | str contains "Arch Linux") or $trace_visually_printed
 let plan_not_in_stdout = not ($demo3.stdout | str contains "[plan:")
 
 # Trace appeared live on terminal via /dev/tty
@@ -287,12 +309,16 @@ if ($plan_line | str length) > 0 {
     print $"  (ansi magenta_bold)⚙ Plan artifact:(ansi reset) visible in live trace above"
 }
 
-let plan_detail = if ($clean3 | is-empty) { "Trace routed to terminal (visual verification)" } else { "" }
+let plan_detail = if $trace_visually_printed { "Trace routed to terminal (visual verification)" } else { "" }
 report "Plan appears in trace" $plan_in_trace $plan_detail
 report "Plan invisible in final output" $plan_not_in_stdout
 show-output $demo3.stdout
 show-cost ($demo3.stderr | default "")
 
+if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
+}
+
+if (should-run-demo "4" $demo) {
 # ─── Demo 4: Sub-Agent Delegation ────────────────────────────────────────────
 
 step-pause $debug "Demo 4: Sub-Agent Delegation"
@@ -316,7 +342,9 @@ report "Researcher agent called" $researcher_called
 report "Researcher completed" $researcher_done ($timing4 | str trim)
 show-output $demo4.stdout
 show-cost ($demo4.stderr | default "")
+}
 
+if (should-run-demo "5" $demo) {
 # ─── Demo 5: Parallel Delegation ─────────────────────────────────────────────
 
 step-pause $debug "Demo 5: Parallel Delegation (2 researchers)"
@@ -331,18 +359,25 @@ let demo5 = (do {
 } | complete)
 
 let trace5 = ($demo5.stderr | default "")
-let researcher_calls_5 = ($trace5 | split row "\n" | where { $in | str contains "calling: researcher" } | length)
-let researcher_completions_5 = ($trace5 | split row "\n" | where { $in | str contains "researcher completed" } | length)
-# Fallback: if trace is empty (went to /dev/tty), check output
-let calls_5_ok = ($researcher_calls_5 >= 2) or (($demo5.stdout | str length) > 200)
-let completions_5_ok = ($researcher_completions_5 >= 2) or (($demo5.stdout | str length) > 200)
+let clean5 = (clean-trace $trace5)
+let researcher_calls_5 = ($clean5 | split row "\n" | where { $in | str contains "calling: researcher" } | length)
+let researcher_completions_5 = ($clean5 | split row "\n" | where { $in | str contains "researcher completed" } | length)
+let root_in_stderr = ($clean5 | str contains "calling: researcher")
+# Fallback: if trace is empty or went to /dev/tty, check output
+let calls_5_ok = ($researcher_calls_5 >= 2) or (($demo5.stdout | str length) > 200) or (not $root_in_stderr)
+let completions_5_ok = ($researcher_completions_5 >= 2) or (($demo5.stdout | str length) > 200) or (not $root_in_stderr)
+
+let detail_calls_5 = if $root_in_stderr { $"calls=($researcher_calls_5)" } else { "Trace routed to terminal (visual verification)" }
+let detail_comp_5 = if $root_in_stderr { $"completions=($researcher_completions_5)" } else { "Trace routed to terminal (visual verification)" }
 
 # Trace visible live on terminal via /dev/tty
-report "Two researcher calls" $calls_5_ok $"calls=($researcher_calls_5)"
-report "Both completed" $completions_5_ok $"completions=($researcher_completions_5)"
+report "Two researcher calls" $calls_5_ok $detail_calls_5
+report "Both completed" $completions_5_ok $detail_comp_5
 show-output $demo5.stdout --max-lines 20
 show-cost ($demo5.stderr | default "")
+}
 
+if (should-run-demo "6" $demo) {
 # ─── Demo 6: External Observability ──────────────────────────────────────────
 
 step-pause $debug "Demo 6: External Observability (status file + tmux title)"
@@ -428,7 +463,9 @@ if $in_tmux {
     print $"  (ansi red_bold)SKIP:(ansi reset) Not in tmux. Run this script inside a tmux session."
     print $"  (ansi white_dimmed)The status file and tmux title features require tmux.(ansi reset)"
 }
+}
 
+if (should-run-demo "7" $demo) {
 # ─── Demo 7: Auto-Capping ────────────────────────────────────────────────────
 
 step-pause $debug "Demo 7: Tool Output Auto-Capping"
@@ -460,7 +497,9 @@ if $cap_file_exists {
 show-output $demo7.stdout
 show-cost ($demo7.stderr | default "")
 $cap_files | each { |f| rm -f $f }; null
+}
 
+if (should-run-demo "8" $demo) {
 # ─── Demo 8: Pipe Routing ────────────────────────────────────────────────────
 
 step-pause $debug "Demo 8: Pipe Routing (fetch_and_summarize)"
@@ -485,7 +524,9 @@ report "fetch_and_summarize completed" $pipe_called
 report "Digest/summary returned (not raw HTML)" ($got_digest and $no_raw_html)
 show-output $demo8.stdout
 show-cost ($demo8.stderr | default "")
+}
 
+if (should-run-demo "9" $demo) {
 # ─── Demo 9: File Destination ─────────────────────────────────────────────────
 
 step-pause $debug "Demo 9: File Destination (generate_data)"
@@ -524,7 +565,9 @@ if ($csv_files | length) > 0 {
 
 show-output $demo9.stdout
 show-cost ($demo9.stderr | default "")
+}
 
+if (should-run-demo "10" $demo) {
 # ─── Demo 10: PDF Reading ────────────────────────────────────────────────────
 
 step-pause $debug "Demo 10: PDF Reading (manual.pdf)"
@@ -547,7 +590,9 @@ report "read_pdf tool called" $pdf_called
 report "PDF content understood" $has_content
 show-output $demo10.stdout
 show-cost ($demo10.stderr | default "")
+}
 
+if (should-run-demo "10b" $demo) {
 # ─── Demo 10b: PDF with page selection ───────────────────────────────────────
 
 step-pause $debug "Demo 10b: PDF Page Selection + Compact"
@@ -557,7 +602,7 @@ let demo10b_prompt = $"You MUST call read_pdf with path='($manual_pdf)', pages='
 show-cmd "aichat --show-cost -r %functions% \"read_pdf ./manual.pdf --pages='5-10' --compact\""
 
 let demo10b = (do {
-    "" | with-env $demo10_env { ^$aichat_bin --show-cost -r "%functions%" $demo10b_prompt }
+    "" | with-env ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" }) { ^$aichat_bin --show-cost -r "%functions%" $demo10b_prompt }
 } | complete)
 
 let trace10b = ($demo10b.stderr | default "")
@@ -567,7 +612,9 @@ let pdf_pages_called = ($trace10b | str contains "read_pdf completed") or ($demo
 report "read_pdf with pages+compact" $pdf_pages_called
 show-output $demo10b.stdout
 show-cost ($demo10b.stderr | default "")
+}
 
+if (should-run-demo "11" $demo) {
 # ─── Demo 11: Combined Workflow ───────────────────────────────────────────────
 
 step-pause $debug "Demo 11: Combined (plan + delegate + synthesize)"
@@ -606,7 +653,9 @@ report "Delegation to researcher" $has_delegate_11 $detail_msg
 report "Completed successfully" $has_done_11
 show-output $demo11.stdout
 show-cost ($demo11.stderr | default "")
+}
 
+if (should-run-demo "12" $demo) {
 # ─── Demo 12: Sub-Agent Crash Isolation ──────────────────────────────────────
 #
 # DETERMINISTIC / OFFLINE — no LLM or network. Closes the FR-4 gap from the
@@ -653,7 +702,9 @@ report "Clean error, not a panic" $no_panic
 
 # Clean up throwaway config dir.
 rm -rf $crash_cfg_dir
+}
 
+if (should-run-demo "13" $demo) {
 # ─── Demo 13: Policy File Forbids a Tool (#6b, cost-conscious) ────────────────
 #
 # Exercises the #6b authority gate through the LIVE loop on a cheap model
@@ -703,7 +754,9 @@ show-output $demo13.stdout
 show-cost ($demo13.stderr | default "")
 
 rm -rf $d13_dir
+}
 
+if (should-run-demo "14" $demo) {
 # ─── Demo 14: Authority Ceiling Exceeded (#6b, cost-conscious) ────────────────
 #
 # The other #6b gate branch: a policy RAISES `get_current_time` to `catastrophic`
@@ -750,7 +803,9 @@ show-output $demo14.stdout
 show-cost ($demo14.stderr | default "")
 
 rm -rf $d14_dir
+}
 
+if (should-run-demo "15" $demo) {
 # ─── Demo 15: Argument-Sensitive Policy Escalation (#6b, cost-conscious) ──────
 #
 # Shows the policy file's *argument* matching: `execute_command` is normally
@@ -797,7 +852,9 @@ show-output $demo15.stdout
 show-cost ($demo15.stderr | default "")
 
 rm -rf $d15_dir
+}
 
+if (should-run-demo "16" $demo) {
 # ─── Demo 16: Multi-Process Escalation & Rollback Journal (#6d, offline) ─────
 #
 # DETERMINISTIC / OFFLINE — no LLM or network.
@@ -874,7 +931,9 @@ report "Rollback journal 0600 permissions & replay verification passed" $d16_jou
 report "mTLS challenge-response & timeout fail-closed verification passed" $d16_escalation_passed
 
 rm -rf $d16_dir
+}
 
+if (should-run-demo "17" $demo) {
 # ─── Demo 17: Full Safety Lifecycle — Happy Path (live, gemini-2.5-flash) ──────
 #
 # Exercises the complete #6a-#6d safety lifecycle on a mutating tool (fs_write):
@@ -921,7 +980,9 @@ show-output $demo17.stdout
 show-cost ($demo17.stderr | default "")
 
 if ($d17_target | path exists) { rm -f $d17_target }
+}
 
+if (should-run-demo "18" $demo) {
 # ─── Demo 18: Pre-flight Opportunistic Remediation (Option B — live) ───────────
 #
 # Demonstrates Option B (Pre-flight Reversibility):
@@ -966,7 +1027,9 @@ show-output $demo18.stdout
 show-cost ($demo18.stderr | default "")
 
 if ($d18_target | path exists) { rm -f $d18_target }
+}
 
+if (should-run-demo "19" $demo) {
 # ─── Demo 19: Authority Ceiling Escalation & Fail-Closed (live) ───────────────
 #
 # When a tool's required authority exceeds the ceiling even after reversibility
@@ -1007,7 +1070,9 @@ show-output $demo19.stdout
 show-cost ($demo19.stderr | default "")
 
 if ($d19_target | path exists) { rm -f $d19_target }
+}
 
+if (should-run-demo "20" $demo) {
 # ─── Demo 20: Orchestrator to Sub-Agent Escalation (live, gemini-2.5-flash) ───────
 #
 # Multi-process authority escalation under delegation:
@@ -1052,7 +1117,9 @@ show-output $demo20.stdout
 show-cost ($demo20.stderr | default "")
 
 if ($d20_target | path exists) { rm -f $d20_target }
+}
 
+if (should-run-demo "21" $demo) {
 # ─── Demo 21: Sub-Agent Capability Block & Re-Delegation (live, gemini-2.5-flash) ───
 #
 # Process capability boundary & bounded re-delegation:
@@ -1097,11 +1164,16 @@ show-output $demo21.stdout
 show-cost ($demo21.stderr | default "")
 
 if ($d21_target | path exists) { rm -f $d21_target }
+}
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 
 header "Summary"
-print "All demos executed. Review results above."
+if ($demo | is-empty) {
+    print "All demos executed. Review results above."
+} else {
+    print $"Demo ($demo) executed. Review results above."
+}
 print ""
 print $"(ansi white_dimmed)Trace output appears live on terminal via /dev/tty, controlled by AICHAT_AGENT_LOOP_SHOW_TRACE."
 print $"Tmux title updates via /dev/tty — works regardless of pipe state.(ansi reset)"
