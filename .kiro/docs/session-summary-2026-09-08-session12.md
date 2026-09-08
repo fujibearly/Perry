@@ -37,40 +37,39 @@ This session delivered interactive stepping, full LLM dialog observability with 
    - Enables running a single targeted demo (e.g. `./run-demos.nu --demo 3` or `./run-demos.nu -t 10b`).
    - Validates demo IDs against all known demos (`1`-`21` and `10b`) and rejects invalid input with an error.
    - Summarizes targeted runs cleanly (`Demo 3 executed. Review results above.`).
-6. **Orchestrator Planning Cognitive Contract:**
+6. **Unified Dialog Event Pipeline (Strict FIFO Ordering):**
+   - Added `AgentLoopEvent::DialogBlock` to the engine progress event channel.
+   - Channeled all LLM request prompts and response dialog blocks through the existing MPSC event queue rather than writing synchronously to `/dev/tty`.
+   - Eliminated race conditions and out-of-order event interleaving between parallel tool completions (`ToolComplete`), turn starts (`TurnStart`), and prompt submissions (`DialogBlock`).
+   - Preserved complete isolation and non-interference for all 4 observability tiers (Tier 1 terminal, Tier 2 OSC titles, Tier 3 JSON status files, Tier 4 stdout/stderr pipelines).
+7. **Orchestrator Planning Cognitive Contract:**
    - Updated `agents/orchestrator/index.yaml` in `llm-functions` so the orchestrator mandates planning via `_plan` for any multi-step task, regardless of whether it delegates to specialist agents (`coder`, `researcher`) or handles execution directly.
    - Refactored Demo 3 in [`scripts/run-demos.nu`](file:///home/istari/projects/aichat/scripts/run-demos.nu) to use `--agent orchestrator` instead of prompt-begging on `%functions%`.
    - Cleaned up `/tmp/os-summary.txt` upfront and post-run to prevent false-positive file assertions.
-7. **Observability Tiers & Trace Detection Invariant:**
+8. **Observability Tiers & Trace Detection Invariant:**
    - Maintained strict non-interference with the 4 observability tiers:
      - Tier 1: Terminal/Console live trace (`/dev/tty`)
      - Tier 2: Multiplexer pane/window titles (OSC 0/2 escapes)
      - Tier 3: External state files (`$XDG_RUNTIME_DIR/aichat-<pid>.json`)
      - Tier 4: Pipeline streams (`stdout` / `stderr`)
    - Fixed Demo 5 trace verification to recognize when root orchestrator trace events are routed to `/dev/tty`, eliminating false `calls=0` / `completions=0` output.
-   - Isolated Demo 10b environment variables so it can run independently of Demo 10.
 
 ---
 
-## 2. Key Code Changes
-
-### [`src/config/mod.rs`](file:///home/istari/projects/aichat/src/config/mod.rs)
-- Added `pub show_dialog: bool` to [`AgentLoopConfig`](file:///home/istari/projects/aichat/src/config/mod.rs) (default `false`).
-- Added `AICHAT_AGENT_LOOP_SHOW_DIALOG` environment variable parsing in `apply_env_overrides`.
-- Included `show_dialog` in `Config::info()`.
-
-### [`src/cli.rs`](file:///home/istari/projects/aichat/src/cli.rs) & [`src/main.rs`](file:///home/istari/projects/aichat/src/main.rs)
-- Added `--show-dialog` CLI flag to [`Cli`](file:///home/istari/projects/aichat/src/cli.rs).
-- Wired `--show-dialog` into `config.write().agent_loop.show_dialog = true` in [`src/main.rs`](file:///home/istari/projects/aichat/src/main.rs).
-- Updated the non-interactive render bypass check in `run_directive` so `show_dialog` preserves the observability loop.
+## 2. Key Changes by File
 
 ### [`src/agent_loop.rs`](file:///home/istari/projects/aichat/src/agent_loop.rs)
+- Added [`DialogDirection`](file:///home/istari/projects/aichat/src/agent_loop.rs) enum (`Request`, `Response`).
+- Added [`AgentLoopEvent::DialogBlock`](file:///home/istari/projects/aichat/src/agent_loop.rs) variant containing agent name, PID, turn, max_turns, direction, and content.
 - Added [`current_agent_depth() -> usize`](file:///home/istari/projects/aichat/src/agent_loop.rs) reading `AICHAT_AGENT_DEPTH` (default 0).
 - Added [`agent_color(&str) -> nu_ansi_term::Color`](file:///home/istari/projects/aichat/src/agent_loop.rs) mapping known agents to distinct colors and falling back to a deterministic palette.
 - Added [`truncate_payload_dialog(&str, top, bottom) -> String`](file:///home/istari/projects/aichat/src/agent_loop.rs) retaining top 20 and bottom 20 lines of non-instruction data, with horizontal line protection.
 - Updated [`format_messages_dialog(&[Message])`](file:///home/istari/projects/aichat/src/agent_loop.rs): preserves `[system]` instructions in full; truncates user and tool result payloads.
-- Updated [`emit_dialog_block(...)`](file:///home/istari/projects/aichat/src/agent_loop.rs): indents blocks according to `current_agent_depth()` and color-codes agent names.
-- Updated [`render_event(...)`](file:///home/istari/projects/aichat/src/agent_loop.rs): indents trace header and events according to depth, keeping orchestrator left-most and subagents indented, with colored agent labels.
+- Updated [`AgentLoop::run`](file:///home/istari/projects/aichat/src/agent_loop.rs): emits `AgentLoopEvent::DialogBlock` via `params.progress.emit(...)` for strict FIFO ordering.
+- Updated [`run_risk_evaluator`](file:///home/istari/projects/aichat/src/agent_loop.rs): emits `DialogBlock` via `progress.emit` when available, falling back to direct print.
+- Added [`format_dialog_block(...)`](file:///home/istari/projects/aichat/src/agent_loop.rs): formats dialog block with hierarchical indentation and color coding.
+- Updated [`render_event(...)`](file:///home/istari/projects/aichat/src/agent_loop.rs): renders both trace events and `DialogBlock` in strict order; manages spinner/tty integration.
+- Added unit tests: `test_dialog_block_fifo_event_ordering`, `state_from_event_maps_all_variants`.
 
 ### [`scripts/run-demos.nu`](file:///home/istari/projects/aichat/scripts/run-demos.nu)
 - Added `show-desc [desc: string]` helper printing formatted `ℹ <description>` banners.
@@ -93,10 +92,20 @@ This session delivered interactive stepping, full LLM dialog observability with 
 1. **Static Analysis & Unit Tests:**
    - `cargo check`: 0 errors.
    - `cargo clippy -- -D warnings`: 0 warnings.
-   - `cargo test --bin aichat`: All 468 unit tests passed in 6.63s.
+   - `cargo test --bin aichat`: All 469 unit tests passed in 7.90s.
    - `nu --ide-check 100 scripts/run-demos.nu`: 0 syntax or type errors.
 2. **Selective Demo Filtering & Descriptions:**
-   - Tested `nu scripts/run-demos.nu --demo 3`: Verified description banner displayed, orchestrator at left-most column, sub-agent `coder` indented 4 spaces, colors applied to agent names, and exit code 0.
+   - Tested `nu scripts/run-demos.nu --demo 1 --dialog`: Verified 100% causal FIFO order:
+     1. `TurnStart [turn 1/20]`
+     2. `DialogBlock [turn 1/20] >>> PROMPT`
+     3. `DialogBlock [turn 1/20] <<< RESPONSE`
+     4. Concurrent tool execution (`calling: slow_task`, `safety gate passed:`)
+     5. All 3 parallel tool completions (`slow_task completed (2.1s)`, `(2.2s)`, `(2.2s)`)
+     6. `TurnStart [turn 2/20]`
+     7. `DialogBlock [turn 2/20] >>> PROMPT`
+     8. `DialogBlock [turn 2/20] <<< RESPONSE`
+     9. `[done]`
+   - Tested `nu scripts/run-demos.nu --demo 3 --dialog`: Verified description banner displayed, orchestrator at left-most column, sub-agent `coder` indented 4 spaces, colors applied to agent names, and exit code 0.
    - Tested `nu scripts/run-demos.nu --demo 10b --dialog`: Verified PDF reading payload was cleanly truncated to top 20 and bottom 20 lines (`... (payload truncated: 100 lines omitted) ...`), instructions preserved in full, and dialog blocks properly formatted.
 3. **Interactive Debug Stepping:**
    - Verified `--debug` prompts the user before each test and cleanly aborts when given `q`.
@@ -107,11 +116,9 @@ This session delivered interactive stepping, full LLM dialog observability with 
 
 - **Engine Repo:** `/home/istari/projects/aichat`
   - **Branch:** `feat/tool-safety-permission-boundary`
-  - **Commit:** [`1f701f6`](file:///home/istari/projects/aichat)
   - **Status:** Clean.
 - **Tools Repo:** `/home/istari/projects/llm-functions`
   - **Branch:** `feat/tool-safety-permission-boundary`
   - **Commit:** [`734a376`](file:///home/istari/projects/llm-functions)
   - **Status:** Clean.
-- **Remotes:** No pushes to remotes performed (local commits only).
 

@@ -45,6 +45,12 @@ pub struct AgentLoopOutput {
     pub final_text: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogDirection {
+    Request,
+    Response,
+}
+
 /// Events emitted during the agent loop for observability.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
@@ -52,6 +58,14 @@ pub enum AgentLoopEvent {
     TurnStart {
         turn: usize,
         max_turns: usize,
+    },
+    DialogBlock {
+        agent: String,
+        pid: u32,
+        turn: usize,
+        max_turns: usize,
+        direction: DialogDirection,
+        content: String,
     },
     ToolStart {
         name: String,
@@ -1111,7 +1125,7 @@ async fn risk_evaluator_denied_result(
         });
     }
 
-    let verdict = match run_risk_evaluator(config, &risk_model, &context).await {
+    let verdict = match run_risk_evaluator(config, &risk_model, &context, progress).await {
         Ok(raw) => {
             let v = RiskVerdict::parse(&raw, base_tier);
             if let Some(p) = progress {
@@ -1183,6 +1197,7 @@ async fn run_risk_evaluator(
     config: &GlobalConfig,
     risk_model: &str,
     context: &str,
+    progress: Option<&AgentLoopProgress>,
 ) -> Result<String> {
     use crate::client::{Model, ModelType};
     use crate::config::{Input, RoleLike, ASSESS_RISK_ROLE};
@@ -1201,39 +1216,73 @@ async fn run_risk_evaluator(
             Ok(msgs) => format_messages_dialog(&msgs),
             Err(_) => context.to_string(),
         };
-        emit_dialog_block(
-            ASSESS_RISK_ROLE,
-            pid,
-            1,
-            1,
-            DialogDirection::Request,
-            &prompt_display,
-        );
+        if let Some(p) = progress {
+            p.emit(AgentLoopEvent::DialogBlock {
+                agent: ASSESS_RISK_ROLE.to_string(),
+                pid,
+                turn: 1,
+                max_turns: 1,
+                direction: DialogDirection::Request,
+                content: prompt_display,
+            });
+        } else {
+            emit_dialog_block(
+                ASSESS_RISK_ROLE,
+                pid,
+                1,
+                1,
+                DialogDirection::Request,
+                &prompt_display,
+            );
+        }
     }
     let res = input.fetch_chat_text().await;
     match &res {
         Ok(text) => {
             if show_dialog {
-                emit_dialog_block(
-                    ASSESS_RISK_ROLE,
-                    pid,
-                    1,
-                    1,
-                    DialogDirection::Response,
-                    text,
-                );
+                if let Some(p) = progress {
+                    p.emit(AgentLoopEvent::DialogBlock {
+                        agent: ASSESS_RISK_ROLE.to_string(),
+                        pid,
+                        turn: 1,
+                        max_turns: 1,
+                        direction: DialogDirection::Response,
+                        content: text.clone(),
+                    });
+                } else {
+                    emit_dialog_block(
+                        ASSESS_RISK_ROLE,
+                        pid,
+                        1,
+                        1,
+                        DialogDirection::Response,
+                        text,
+                    );
+                }
             }
         }
         Err(err) => {
             if show_dialog {
-                emit_dialog_block(
-                    ASSESS_RISK_ROLE,
-                    pid,
-                    1,
-                    1,
-                    DialogDirection::Response,
-                    &format!("(LLM error: {err})"),
-                );
+                let err_msg = format!("(LLM error: {err})");
+                if let Some(p) = progress {
+                    p.emit(AgentLoopEvent::DialogBlock {
+                        agent: ASSESS_RISK_ROLE.to_string(),
+                        pid,
+                        turn: 1,
+                        max_turns: 1,
+                        direction: DialogDirection::Response,
+                        content: err_msg,
+                    });
+                } else {
+                    emit_dialog_block(
+                        ASSESS_RISK_ROLE,
+                        pid,
+                        1,
+                        1,
+                        DialogDirection::Response,
+                        &err_msg,
+                    );
+                }
             }
         }
     }
@@ -1710,7 +1759,7 @@ async fn handle_escalation_request(
                 );
             }
 
-            let verdict = match run_risk_evaluator(config, rm, &eval_context_str).await {
+            let verdict = match run_risk_evaluator(config, rm, &eval_context_str, None).await {
                 Ok(raw) => {
                     let v = crate::safety::RiskVerdict::parse(&raw, effective_blast_radius);
                     if show_trace {
@@ -2577,14 +2626,14 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                 }
                 Err(e) => format!("(failed to format messages: {e})"),
             };
-            emit_dialog_block(
-                &agent_name,
+            params.progress.emit(AgentLoopEvent::DialogBlock {
+                agent: agent_name.clone(),
                 pid,
                 turn,
                 max_turns,
-                DialogDirection::Request,
-                &prompt_display,
-            );
+                direction: DialogDirection::Request,
+                content: prompt_display,
+            });
         }
 
         // 1. Call the LLM (returns raw tool_calls, does not eval them)
@@ -2593,27 +2642,27 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             Ok(val) => {
                 if params.config.read().agent_loop.show_dialog {
                     let response_display = format_llm_response(&val.0, &val.1);
-                    emit_dialog_block(
-                        &agent_name,
+                    params.progress.emit(AgentLoopEvent::DialogBlock {
+                        agent: agent_name.clone(),
                         pid,
                         turn,
                         max_turns,
-                        DialogDirection::Response,
-                        &response_display,
-                    );
+                        direction: DialogDirection::Response,
+                        content: response_display,
+                    });
                 }
                 val
             }
             Err(err) => {
                 if params.config.read().agent_loop.show_dialog {
-                    emit_dialog_block(
-                        &agent_name,
+                    params.progress.emit(AgentLoopEvent::DialogBlock {
+                        agent: agent_name.clone(),
                         pid,
                         turn,
                         max_turns,
-                        DialogDirection::Response,
-                        &format!("(LLM call failed: {err})"),
-                    );
+                        direction: DialogDirection::Response,
+                        content: format!("(LLM call failed: {err})"),
+                    });
                 }
                 return Err(err);
             }
@@ -2939,12 +2988,6 @@ pub fn current_agent_name(config: &GlobalConfig) -> String {
         .unwrap_or_else(|| "aichat".to_string())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DialogDirection {
-    Request,
-    Response,
-}
-
 /// Helper to get current agent nesting depth (0 for root/orchestrator).
 pub fn current_agent_depth() -> usize {
     std::env::var("AICHAT_AGENT_DEPTH")
@@ -3119,15 +3162,15 @@ pub fn format_llm_response(
     }
 }
 
-/// Emit a dialog trace block to /dev/tty (live terminal) or stderr.
-pub fn emit_dialog_block(
+/// Format a dialog trace block for rendering.
+pub fn format_dialog_block(
     agent: &str,
     pid: u32,
     turn: usize,
     max_turns: usize,
     direction: DialogDirection,
     content: &str,
-) {
+) -> String {
     let depth = current_agent_depth();
     let indent = "    ".repeat(depth);
     let color = agent_color(agent);
@@ -3142,11 +3185,23 @@ pub fn emit_dialog_block(
         .lines()
         .map(|line| format!("{indent}  {line}"))
         .collect();
-    let block = format!(
+    format!(
         "\n  {header}\n{bar}\n{}\n{bar}",
         indented_content.join("\n")
-    );
+    )
+}
 
+/// Emit a dialog trace block to /dev/tty (live terminal) or stderr.
+/// Used for standalone invocations where no AgentLoopProgress channel is attached.
+pub fn emit_dialog_block(
+    agent: &str,
+    pid: u32,
+    turn: usize,
+    max_turns: usize,
+    direction: DialogDirection,
+    content: &str,
+) {
+    let block = format_dialog_block(agent, pid, turn, max_turns, direction, content);
     if *IS_STDOUT_TERMINAL {
         eprintln!("{block}");
     } else if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
@@ -3280,6 +3335,7 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
                 "{pid} capability blocked: {name} (unwound recorded entries: {unwound})"
             ))
         }
+        AgentLoopEvent::DialogBlock { .. } => None,
     }
 }
 
@@ -3545,6 +3601,33 @@ pub fn render_event(
                 } else {
                     // No /dev/tty available (CI, cron, containers) — fall back to stderr
                     eprintln!("{output}");
+                }
+            }
+        }
+    }
+
+    // 1b. Dialog trace output (prompt submitted and response from LLM)
+    //     Routed through the event loop so trace lines and dialog blocks maintain
+    //     strict FIFO causal ordering with zero race conditions.
+    if config.show_dialog {
+        if let AgentLoopEvent::DialogBlock {
+            agent,
+            pid: d_pid,
+            turn,
+            max_turns,
+            direction,
+            content,
+        } = event
+        {
+            let block = format_dialog_block(agent, *d_pid, *turn, *max_turns, *direction, content);
+            if *IS_STDOUT_TERMINAL {
+                spinner.print_line(block)?;
+            } else {
+                use std::io::Write;
+                if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                    let _ = writeln!(tty, "{block}");
+                } else {
+                    eprintln!("{block}");
                 }
             }
         }
@@ -4568,6 +4651,61 @@ agent_loop:
             }),
             "working"
         );
+        assert_eq!(
+            state_from_event(&AgentLoopEvent::DialogBlock {
+                agent: "test".into(),
+                pid: 1,
+                turn: 1,
+                max_turns: 20,
+                direction: DialogDirection::Request,
+                content: "prompt".into(),
+            }),
+            "working"
+        );
+    }
+
+    #[test]
+    fn test_dialog_block_fifo_event_ordering() {
+        let (progress, mut rx) = AgentLoopProgress::live();
+        progress.emit(AgentLoopEvent::TurnStart { turn: 1, max_turns: 20 });
+        progress.emit(AgentLoopEvent::DialogBlock {
+            agent: "test".into(),
+            pid: 123,
+            turn: 1,
+            max_turns: 20,
+            direction: DialogDirection::Request,
+            content: "prompt 1".into(),
+        });
+        progress.emit(AgentLoopEvent::ToolStart {
+            name: "slow_task".into(),
+            id: None,
+        });
+        progress.emit(AgentLoopEvent::ToolComplete {
+            name: "slow_task".into(),
+            duration: std::time::Duration::from_millis(100),
+            success: true,
+        });
+        progress.emit(AgentLoopEvent::TurnStart { turn: 2, max_turns: 20 });
+        progress.emit(AgentLoopEvent::DialogBlock {
+            agent: "test".into(),
+            pid: 123,
+            turn: 2,
+            max_turns: 20,
+            direction: DialogDirection::Request,
+            content: "prompt 2".into(),
+        });
+
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        assert_eq!(events.len(), 6);
+        assert!(matches!(events[0], AgentLoopEvent::TurnStart { turn: 1, .. }));
+        assert!(matches!(events[1], AgentLoopEvent::DialogBlock { turn: 1, .. }));
+        assert!(matches!(events[2], AgentLoopEvent::ToolStart { .. }));
+        assert!(matches!(events[3], AgentLoopEvent::ToolComplete { .. }));
+        assert!(matches!(events[4], AgentLoopEvent::TurnStart { turn: 2, .. }));
+        assert!(matches!(events[5], AgentLoopEvent::DialogBlock { turn: 2, .. }));
     }
 
     #[test]
