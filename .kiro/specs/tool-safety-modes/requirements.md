@@ -159,10 +159,22 @@ can fall back to it.
 - **FR-6c.2 — Dedicated model.** The evaluator uses a **separate, configurable model**
   (`safety.risk_model`), intended to be small/fast/cheap, distinct from the agent's
   orchestration/planning model. Absent configuration, evaluation is skipped (degrade to #6b).
-- **FR-6c.3 — Minimal context.** The evaluator receives **only**: the tool name, the resolved
-  command/arguments, the static tier + reversibility facts, and the agent's stated intent for
-  *this step*. It MUST NOT receive the full plan history or conversation. (Threat: prompt
-  injection via arguments/fetched data — see NFRs.)
+- **FR-6c.3 — Enriched Semantic & Implementation Context (Bounding Black-Box Blind Spots while Mitigating Injection).**
+  To eliminate blind-spot evaluation where the evaluator judges an opaque tool name without knowing what it executes,
+  the evaluator context is enriched with three bounded structural payloads:
+  1. **`declaration`**: Primary functional description (from `# @describe` or OpenAPI schema), multi-line header
+     documentation notes/caveats, typed parameter schemas with required status, and `# @env` variables.
+  2. **`implementation`**: The tool's underlying script source code resolved dynamically (checking MCP tools,
+     agent `tools/` and `bin/`, and root functions `tools/` and `bin/`, traversing runner symlinks to underlying
+     scripts like `bin/execute_command -> run-tool.sh -> tools/execute_command.sh`). Detects language (`bash`,
+     `python`, `javascript`, etc.) or categorizes as `Binary`, `Mcp`, `Builtin`, or `Unknown`. Imposes a strict
+     4KB text budget (sliced at valid UTF-8 character boundaries) and binary executable detection via null-byte
+     scanning in the first 512 bytes.
+  3. **`invocation`**: A formatted preview string of the exact tool command-line invocation with bound flags
+     (e.g. `execute_command --command "git status"`).
+  - **Injection Defense Boundary:** The evaluator MUST NOT receive the full plan history, scratchpad, or
+    conversation history. Arguments are treated strictly as untrusted data, and the engine-level monotone
+    clamp ensures malicious tool code or arguments can only trigger a raise, never loosen security.
 - **FR-6c.4 — Structured verdict.** The evaluator returns structured JSON:
   `{ tier, reversible, confidence: low|med|high, rationale, concerns[], enrichment }` where
   `enrichment` is a small context payload to help an upstream agent's retry (per #6d).
@@ -172,9 +184,10 @@ can fall back to it.
   never grant reversibility, never override the Protected Policy File. (Principle 1, enforced
   in code, not by prompt.)
 - **FR-6c.6 — Fast-path skip.** `Safe`/read-only actions MUST NOT call the evaluator (cost/latency).
-- **FR-6c.7 — Two-phase evaluation.** At **plan time**, the evaluator runs once over the plan and
-  **flags the key steps** that require a fresh pre-execution re-check. At **act time**, only the
-  flagged steps are re-evaluated (the deterministic policy floor is invariant and is not re-checked).
+- **FR-6c.7 — Act-time evaluation & monotonic raise-only cache (as-built).** The literal plan-time
+  flagging pass was superseded in implementation: in a ReAct loop, unflagged step skips create an injection
+  hazard. Instead, every non-`Safe`, in-ceiling action is evaluated at act-time, backed by a monotonic
+  **raise-only `RiskCache`** that reuses assessed authority floors across turns without redundant model calls.
 - **FR-6c.8 — Fail toward escalation/block.** Evaluator unreachable, timeout, malformed output, or
   `confidence: low` MUST NOT permit the action. With #6d present it escalates; without #6d it blocks.
 

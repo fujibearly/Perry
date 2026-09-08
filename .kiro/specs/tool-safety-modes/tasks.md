@@ -81,6 +81,16 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 - [x] 6c.10 Docs + threat note: `.kiro/architecture.md` #6c section + dispatch gate; roadmap.md status; this
       tasks list; design.md as-built note (prompt-injection mitigations: minimal context, stricter-only clamp,
       fail-toward, raise-only cache). (NFR-2)
+- [x] 6c.11 Semantic declaration & implementation context enrichment:
+      - `ToolDeclarationContext` + `parse_script_header_comments()` in `src/safety.rs` for `@describe`, header commentary, parameter docs, and `@env` extraction.
+      - `resolve_tool_implementation()` in `src/agent_loop.rs`: checks MCP, agent tools/bin, root tools/bin, follows symlinks, detects binaries via null-byte check, enforces 4KB text budget.
+      - `format_tool_invocation()` generates exact command preview with bound CLI arguments.
+      - Updated `assets/roles/%assess-risk%.md` prompt directives (contrast declared intent with code, trace args to sinks, detect hardcoded side effects and confirmation guards).
+      - `[%assess-risk% evaluator response]` trace logging; hermetic end-to-end unit test `evaluator_context_end_to_end_resolution`. (FR-6c.3)
+- [x] 6c.12 Complete 100% parameter classification in `llm-functions` (branch `feat/tool-safety-classification`, commit `83dea2e`):
+      - All 31 root tools annotated with `# @meta mode` and `# @meta risk` (`fs_patch`, `fs_rm`, `fs_write` have `reversible-via backup`).
+      - All agent subcommands (`coder`, `demo`, `json-viewer`, `orchestrator`, `researcher`, `sql`, `todo`) classified.
+      - Verified via `argc test` and all 16 demos in `scripts/run-demos.nu`.
 
 ## Phase #6d — Escalation & Control Protocol + Human-in-the-Loop (branch `feat/tool-safety-6d`)
 

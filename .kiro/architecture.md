@@ -392,10 +392,21 @@ dispatch wiring are in `agent_loop.rs` (after the #6b authority gate).
 - **Dedicated cheap model.** `safety.risk_model` selects a small/fast model, distinct from the
   orchestration model. **Absent `risk_model` → the evaluator is skipped entirely** and behavior
   degrades to exactly #6b (verified by the degrade check).
-- **Minimal context (injection defense).** The evaluator sees *only*
-  `{tool, resolved arguments, static tier, reversibility, this-step intent}` — never the plan or
-  conversation history. Less surface area for an argument-borne prompt-injection to steer the
-  verdict, and the role treats arguments as untrusted data.
+- **Bounded semantic & implementation context (injection defense + ending black-box evaluation).**
+  The evaluator receives bounded structural context: `{tool, arguments, static tier, reversibility, intent}`
+  enriched with:
+  1. **`declaration`:** Primary functional description, parameter schemas, multi-line comment notes/caveats
+     parsed from script headers (`parse_script_header_comments`), and `# @env` variables.
+  2. **`implementation`:** Tool script source code resolved dynamically (checking MCP tools, agent `tools/`/`bin/`,
+     and root `tools/`/`bin/`, traversing runner symlinks to underlying scripts). Detects language, scans for
+     binary files via null-byte inspection (first 512 bytes), and enforces a strict 4KB text budget sliced at
+     valid UTF-8 character boundaries.
+  3. **`invocation`:** Formatted CLI command-line preview showing bound argument flags.
+  - **Injection Defense Boundary:** The evaluator NEVER sees the full plan or conversation history. Arguments
+    are explicitly tagged as untrusted data. The evaluator prompt directs the model to contrast declared
+    `@describe` intent against the script implementation and trace argument flow into sinks (`eval`, `rm`, shell
+    interpreters, curl). Malicious tool code or adversarial arguments can only trigger a raise, never unlock.
+
 - **Stricter-only clamp.** `clamp_verdict(base, verdict)` takes the *more dangerous* of the
   deterministic authority and the verdict's tier. A permissive verdict is a no-op; a `Human`
   base (unclassified / policy-forbid / catastrophic) is never loosened. So a compromised verdict

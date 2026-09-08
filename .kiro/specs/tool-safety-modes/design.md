@@ -278,6 +278,29 @@ authoritative for the #6c as-shipped behavior.
 - **Pipe-target actuations are gated fresh.** A tool executed as an output-routing pipe target
   runs through the same gate but with no shared `RiskCache` (it is a derived call outside the turn
   loop) — still fully gated, just evaluated fresh rather than cache-reused.
+- **Enriched Semantic & Implementation Context (Ending Black-Box Evaluation).**
+  - *Motivation:* Blind-spot evaluation where the evaluator model only sees opaque tool names and
+    arguments (e.g. `execute_command` with `"git status"`) forced the model to guess whether the underlying
+    tool uses `eval`, sanitizes inputs, ignores flags, or executes hardcoded side effects.
+  - *Architecture:*
+    1. **`ToolDeclarationContext` ([`src/safety.rs`](../../src/safety.rs)):** Merges JSON schema descriptions
+       with docstrings parsed directly from tool script headers via `parse_script_header_comments()`.
+       Extracts `# @describe`, multi-line documentation comments, parameter schemas, and `# @env` variables.
+    2. **Dynamic Tool Resolution (`resolve_tool_implementation` in [`src/agent_loop.rs`](../../src/agent_loop.rs)):**
+       Scans MCP tools, agent `tools/` and `bin/`, and root functions `tools/` and `bin/`. Recursively traverses
+       runner symlinks (e.g. `bin/execute_command -> ../scripts/run-tool.sh -> tools/execute_command.sh`), detects
+       binary executables via null-byte inspection across the first 512 bytes, and captures script source with a
+       strict 4KB text budget sliced at valid UTF-8 grapheme/char boundaries.
+    3. **Invocation Preview (`format_tool_invocation` in [`src/agent_loop.rs`](../../src/agent_loop.rs)):**
+       Renders the exact command string with bound CLI arguments (e.g. `execute_command --command "git status"`).
+    4. **Evaluator Role Alignment ([`assets/roles/%assess-risk%.md`](../../assets/roles/%25assess-risk%25.md)):**
+       Instructs the model to contrast declared `@describe` intent against the implementation source, trace argument
+       flow into sinks (`eval`, `rm`, shell interpreters, curl), detect hardcoded destructive operations, and check
+       for confirmation guards (e.g. `guard_operation.sh`).
+    5. **Security Invariant:** Scratchpad and conversation history remain excluded to bound prompt-injection
+       exposure. Arguments are tagged as untrusted data. The engine-level `clamp_verdict` guarantees the model
+       can only raise risk or withhold reversibility credit — the LLM is an observer and red-light raiser, never a pardoner.
+
 
 ## As-Built Notes — #6d transport decision (Path 1′)
 
