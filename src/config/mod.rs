@@ -283,6 +283,8 @@ pub struct AgentLoopConfig {
     pub max_agent_depth: usize,
     /// Print live trace events to stderr. Default: false.
     pub show_trace: bool,
+    /// Print full LLM prompt and response dialog to trace. Default: false.
+    pub show_dialog: bool,
     /// Inject the _plan pseudo-tool. Default: true.
     pub planning_tool: bool,
     /// Emit OSC 0/2 terminal title updates. Default: true.
@@ -304,6 +306,7 @@ impl Default for AgentLoopConfig {
             max_concurrency: 8,
             max_agent_depth: 3,
             show_trace: false,
+            show_dialog: false,
             planning_tool: true,
             osc_title: true,
             status_file: true,
@@ -1073,6 +1076,9 @@ impl Config {
             }
             if al.show_trace {
                 al_parts.push("show_trace".to_string());
+            }
+            if al.show_dialog {
+                al_parts.push("show_dialog".to_string());
             }
             if !al.planning_tool {
                 al_parts.push("planning_tool=off".to_string());
@@ -2926,6 +2932,9 @@ impl Config {
         }
         if let Some(Some(v)) = read_env_bool(&get_env_name("agent_loop_show_trace")) {
             self.agent_loop.show_trace = v;
+        }
+        if let Some(Some(v)) = read_env_bool(&get_env_name("agent_loop_show_dialog")) {
+            self.agent_loop.show_dialog = v;
         }
         if let Some(Some(v)) = read_env_value::<f64>(&get_env_name("agent_loop_max_cost")) {
             self.agent_loop.max_cost = v;

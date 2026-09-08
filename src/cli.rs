@@ -43,6 +43,9 @@ pub struct Cli {
     /// Display sanitized multi-agent activity on stderr
     #[clap(long)]
     pub show_agent_trace: bool,
+    /// Display full prompt and response dialog trace
+    #[clap(long)]
+    pub show_dialog: bool,
     /// Enable OpenAI hosted web search in multi-agent mode
     #[clap(long)]
     pub web_search: bool,

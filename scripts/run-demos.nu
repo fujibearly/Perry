@@ -72,15 +72,8 @@ let manual_pdf = ($project_dir | path join "manual.pdf")
 # is what's under test, not model capability). Override by editing this line.
 const DEMO_MODEL = "gemini:gemini-2.5-flash"
 
-# Base environment for all aichat invocations. AICHAT_MODEL makes every demo
-# use DEMO_MODEL as its default model without needing a per-demo -m flag;
-# WEB_SEARCH_MODEL points the researcher/web-search tooling at the same model.
-let base_env = {
-    AICHAT_FUNCTIONS_DIR: $functions_dir
-    AICHAT_MODEL: $DEMO_MODEL
-    WEB_SEARCH_MODEL: $DEMO_MODEL
-    AICHAT_SAFETY_RISK_MODEL: $DEMO_MODEL
-}
+# Base environment for all aichat invocations is constructed dynamically
+# inside def main below to honor the --dialog flag.
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -151,9 +144,36 @@ def extract-plan [trace: string]: nothing -> string {
     }
 }
 
-# ─── Preflight Checks ────────────────────────────────────────────────────────
+# Wait for user input to step to the next demo when in debug mode
+def step-pause [debug: bool, next_test: string] {
+    if $debug {
+        print $"\n(ansi yellow_bold)⏸ [DEBUG](ansi reset) Next: (ansi yellow)($next_test)(ansi reset). Press Enter to proceed [or 'q' to quit]: "
+        let reply = (try { input "" } catch { "" })
+        if ($reply | str trim | str lowercase) == "q" {
+            print $"\n(ansi red)Execution aborted by user.(ansi reset)\n"
+            exit 0
+        }
+    }
+}
 
-header "Preflight Checks"
+def main [
+    --debug (-d),     # Execute tests one by one, waiting for user input to proceed
+    --dialog,         # Display full submitted LLM prompt and response observability trace
+] {
+    # Base environment for all aichat invocations. AICHAT_MODEL makes every demo
+    # use DEMO_MODEL as its default model without needing a per-demo -m flag;
+    # WEB_SEARCH_MODEL points the researcher/web-search tooling at the same model;
+    # AICHAT_AGENT_LOOP_SHOW_DIALOG enables the LLM dialog trace when --dialog is set.
+    let base_env = {
+        AICHAT_FUNCTIONS_DIR: $functions_dir
+        AICHAT_MODEL: $DEMO_MODEL
+        WEB_SEARCH_MODEL: $DEMO_MODEL
+        AICHAT_SAFETY_RISK_MODEL: $DEMO_MODEL
+    } | merge (if $dialog { { AICHAT_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
+
+    # ─── Preflight Checks ────────────────────────────────────────────────────────
+
+    header "Preflight Checks"
 
 if not ($aichat_bin | path exists) {
     print $"(ansi red_bold)ERROR:(ansi reset) Binary not found at ($aichat_bin). Run: cargo build --release"
@@ -191,6 +211,7 @@ report "Agents visible" $agents_ok $"Found: ($agents | str join ', ')"
 
 # ─── Demo 1: Parallel Tool Execution ─────────────────────────────────────────
 
+step-pause $debug "Demo 1: Parallel Tool Execution"
 header "Demo 1: Parallel Tool Execution"
 
 let demo1_prompt = "You MUST call slow_task exactly 3 times in parallel: label='first' delay=2, label='second' delay=2, label='third' delay=2. Do NOT answer without calling the tools."
@@ -218,6 +239,7 @@ show-cost ($demo1.stderr | default "")
 
 # ─── Demo 2: Turn Budget ─────────────────────────────────────────────────────
 
+step-pause $debug "Demo 2: Turn Budget"
 header "Demo 2: Turn Budget"
 
 let demo2_prompt = "Read each of the files /etc/hostname, /etc/os-release, /etc/shells, /etc/fstab one by one and summarize each"
@@ -236,6 +258,7 @@ report "Turn budget warning fires" $budget_warning
 
 # ─── Demo 3: Planning Tool (_plan) ───────────────────────────────────────────
 
+step-pause $debug "Demo 3: Planning Tool (_plan)"
 header "Demo 3: Planning Tool (_plan)"
 
 let demo3_prompt = "This is a multi-step task. You MUST use the exact tool named '_plan' (with leading underscore, do NOT call 'plan') first to plan your approach before taking any action. Then: read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
@@ -272,6 +295,7 @@ show-cost ($demo3.stderr | default "")
 
 # ─── Demo 4: Sub-Agent Delegation ────────────────────────────────────────────
 
+step-pause $debug "Demo 4: Sub-Agent Delegation"
 header "Demo 4: Sub-Agent Delegation"
 
 let demo4_prompt = "You MUST delegate this to the researcher agent (do NOT answer yourself): Search the web for 'what is Model Context Protocol MCP by Anthropic' and return a summary with sources."
@@ -295,6 +319,7 @@ show-cost ($demo4.stderr | default "")
 
 # ─── Demo 5: Parallel Delegation ─────────────────────────────────────────────
 
+step-pause $debug "Demo 5: Parallel Delegation (2 researchers)"
 header "Demo 5: Parallel Delegation (2 researchers)"
 
 let demo5_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
@@ -320,6 +345,7 @@ show-cost ($demo5.stderr | default "")
 
 # ─── Demo 6: External Observability ──────────────────────────────────────────
 
+step-pause $debug "Demo 6: External Observability (status file + tmux title)"
 header "Demo 6: External Observability (status file + tmux title)"
 
 let demo6_prompt = "You MUST call slow_task with label=observability-test and delay=8. Do NOT answer without calling the tool."
@@ -342,10 +368,11 @@ if $in_tmux {
         $"AICHAT_FUNCTIONS_DIR=($functions_dir)"
         $"WEB_SEARCH_MODEL=gemini:gemini-2.5-pro"
         $"AICHAT_AGENT_LOOP_SHOW_TRACE=true"
+        (if $dialog { "AICHAT_AGENT_LOOP_SHOW_DIALOG=true" } else { "" })
         $"($aichat_bin) --show-cost -r '%functions%'"
         $"\"($demo6_prompt)\""
         "< /dev/null > /tmp/demo6-stdout.txt &"
-    ] | str join " ")
+    ] | where { ($in | str length) > 0 } | str join " ")
 
     let bg_script = ([
         $aichat_cmd
@@ -404,6 +431,7 @@ if $in_tmux {
 
 # ─── Demo 7: Auto-Capping ────────────────────────────────────────────────────
 
+step-pause $debug "Demo 7: Tool Output Auto-Capping"
 header "Demo 7: Tool Output Auto-Capping"
 
 let demo7_prompt = "Use fs_cat to read the file /usr/share/dict/cracklib-small"
@@ -435,6 +463,7 @@ $cap_files | each { |f| rm -f $f }; null
 
 # ─── Demo 8: Pipe Routing ────────────────────────────────────────────────────
 
+step-pause $debug "Demo 8: Pipe Routing (fetch_and_summarize)"
 header "Demo 8: Pipe Routing (fetch_and_summarize)"
 
 let demo8_prompt = "You MUST call the fetch_and_summarize tool with url 'https://example.com'. Do not use any other tool."
@@ -459,6 +488,7 @@ show-cost ($demo8.stderr | default "")
 
 # ─── Demo 9: File Destination ─────────────────────────────────────────────────
 
+step-pause $debug "Demo 9: File Destination (generate_data)"
 header "Demo 9: File Destination (generate_data)"
 
 let demo9_prompt = "You MUST call generate_data with rows=20. Do NOT answer without calling the tool."
@@ -497,6 +527,7 @@ show-cost ($demo9.stderr | default "")
 
 # ─── Demo 10: PDF Reading ────────────────────────────────────────────────────
 
+step-pause $debug "Demo 10: PDF Reading (manual.pdf)"
 header "Demo 10: PDF Reading (manual.pdf)"
 
 let demo10_prompt = $"Use read_pdf to read the file ($manual_pdf) and tell me what this document is about. List the main sections."
@@ -519,6 +550,7 @@ show-cost ($demo10.stderr | default "")
 
 # ─── Demo 10b: PDF with page selection ───────────────────────────────────────
 
+step-pause $debug "Demo 10b: PDF Page Selection + Compact"
 header "Demo 10b: PDF Page Selection + Compact"
 
 let demo10b_prompt = $"You MUST call read_pdf with path='($manual_pdf)', pages='5-10', and the compact flag. Then summarize what those pages cover."
@@ -538,6 +570,7 @@ show-cost ($demo10b.stderr | default "")
 
 # ─── Demo 11: Combined Workflow ───────────────────────────────────────────────
 
+step-pause $debug "Demo 11: Combined (plan + delegate + synthesize)"
 header "Demo 11: Combined (plan + delegate + synthesize)"
 
 let demo11_prompt = "You MUST plan first using the exact tool named '_plan' (with leading underscore, do NOT call 'plan'). Then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. In your final answer, state the findings and mention the researcher agent. Do NOT answer from memory — you MUST delegate."
@@ -586,6 +619,7 @@ show-cost ($demo11.stderr | default "")
 # the same signal eval_agent_tool_subprocess captures and wraps as agent_error.
 # A throwaway config dir + closed stdin prevent the interactive config prompt.
 
+step-pause $debug "Demo 12: Sub-Agent Crash Isolation"
 header "Demo 12: Sub-Agent Crash Isolation (deterministic, offline)"
 
 let crash_cfg_dir = ($nu.temp-dir | path join $"aichat-crash-demo-($nu.pid)")
@@ -631,6 +665,7 @@ rm -rf $crash_cfg_dir
 # Reuses the real config dir (for the provider key + model catalog) and injects
 # the policy via AICHAT_SAFETY_POLICY_FILE — no config.yaml edits needed.
 
+step-pause $debug "Demo 13: Protected Policy File — forbid"
 header "Demo 13: Protected Policy File — forbid (live, gemini-2.5-flash)"
 
 let d13_dir = ($nu.temp-dir | path join $"aichat-policy-forbid-($nu.pid)")
@@ -678,6 +713,7 @@ rm -rf $d13_dir
 # ceiling comparison in the live path, distinct from Demo 13's `forbid`.)
 # Same cheap model + tight budget.
 
+step-pause $debug "Demo 14: Authority Ceiling Exceeded"
 header "Demo 14: Authority Ceiling Exceeded (live, gemini-2.5-flash)"
 
 let d14_dir = ($nu.temp-dir | path join $"aichat-authority-($nu.pid)")
@@ -724,6 +760,7 @@ rm -rf $d14_dir
 # so the arg-match fires and the gate blocks it before anything runs. (Even if
 # the gate failed, an echo is side-effect-free — no real risk in the demo.)
 
+step-pause $debug "Demo 15: Argument-Sensitive Policy Escalation"
 header "Demo 15: Argument-Sensitive Policy Escalation (live, gemini-2.5-flash)"
 
 let d15_dir = ($nu.temp-dir | path join $"aichat-argpolicy-($nu.pid)")
@@ -775,6 +812,7 @@ rm -rf $d15_dir
 #   3. Rollback journal durability: Journals are created with strict 0600 (owner-only)
 #      permissions under the configured/runtime directory and replay commands atomically.
 
+step-pause $debug "Demo 16: Multi-Process Escalation & Rollback Journal"
 header "Demo 16: Multi-Process Escalation & Rollback Journal (deterministic, offline)"
 
 let d16_dir = ($nu.temp-dir | path join $"aichat-escalation-demo-($nu.pid)")
@@ -846,6 +884,7 @@ rm -rf $d16_dir
 #   4. Gate #6d durable rollback journal records pre-mutation entry (0600 fsync).
 #   5. Tool executes cleanly with piped input.
 
+step-pause $debug "Demo 17: Full Safety Lifecycle — Happy Path"
 header "Demo 17: Full Safety Lifecycle — Happy Path (live, gemini-2.5-flash)"
 
 let d17_target = ($nu.temp-dir | path join $"aichat-safe-write-($nu.pid).txt")
@@ -893,6 +932,7 @@ if ($d17_target | path exists) { rm -f $d17_target }
 # opportunistically creates an atomic backup in the durable rollback journal UPFRONT,
 # stepping down the required authority to `reversible` and allowing the gate to pass!
 
+step-pause $debug "Demo 18: Pre-flight Opportunistic Remediation (Option B)"
 header "Demo 18: Pre-flight Opportunistic Remediation (Option B — live)"
 
 let d18_target = ($nu.temp-dir | path join $"aichat-remediated-write-($nu.pid).txt")
@@ -935,6 +975,7 @@ if ($d18_target | path exists) { rm -f $d18_target }
 # `fs_write` is disruptive -> stepped down to reversible, but reversible > safe!
 # The gate blocks with authority_exceeded and the file is NOT created.
 
+step-pause $debug "Demo 19: Authority Ceiling Fail-Closed"
 header "Demo 19: Authority Ceiling Fail-Closed (live, gemini-2.5-flash)"
 
 let d19_target = ($nu.temp-dir | path join $"aichat-blocked-write-($nu.pid).txt")
@@ -978,6 +1019,7 @@ if ($d19_target | path exists) { rm -f $d19_target }
 # The parent evaluates via the Session-10 Should Gate (Protected Policy, anti-spoof,
 # risk assessment) and grants Continue verdict within its own ceiling; sub-agent actuates and succeeds.
 
+step-pause $debug "Demo 20: Orchestrator Sub-Agent Authority Escalation"
 header "Demo 20: Orchestrator Sub-Agent Authority Escalation (live, gemini-2.5-flash)"
 
 let d20_target = ($nu.temp-dir | path join $"aichat-orch-esc-($nu.pid).txt")
@@ -1022,6 +1064,7 @@ if ($d20_target | path exists) { rm -f $d20_target }
 #    to coder with explicit mutating permissions.
 # 5. Coder executes successfully on the second delegation and writes the file.
 
+step-pause $debug "Demo 21: Sub-Agent Capability Block & Re-Delegation"
 header "Demo 21: Sub-Agent Capability Block & Re-Delegation (live, gemini-2.5-flash)"
 
 let d21_target = ($nu.temp-dir | path join $"aichat-orch-redelegate-($nu.pid).txt")
@@ -1063,3 +1106,5 @@ print ""
 print $"(ansi white_dimmed)Trace output appears live on terminal via /dev/tty, controlled by AICHAT_AGENT_LOOP_SHOW_TRACE."
 print $"Tmux title updates via /dev/tty — works regardless of pipe state.(ansi reset)"
 print ""
+}
+

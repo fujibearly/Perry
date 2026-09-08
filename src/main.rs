@@ -165,6 +165,9 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if cli.show_cost {
         config.write().show_cost = true;
     }
+    if cli.show_dialog {
+        config.write().agent_loop.show_dialog = true;
+    }
 
     if let Some(agent) = &cli.agent {
         let session = cli.session.as_ref().map(|v| match v {
@@ -406,6 +409,7 @@ async fn run_directive(
 
     // If no trace/observability needed and stdout is not a terminal, run without rendering overhead
     if !agent_loop_config.show_trace
+        && !agent_loop_config.show_dialog
         && !agent_loop_config.osc_title
         && !agent_loop_config.status_file
         && !agent_loop_config.notify

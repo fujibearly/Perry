@@ -1194,7 +1194,50 @@ async fn run_risk_evaluator(
     }
 
     let input = Input::from_str(config, context, Some(role.to_role()));
-    input.fetch_chat_text().await
+    let show_dialog = config.read().agent_loop.show_dialog;
+    let pid = std::process::id();
+    if show_dialog {
+        let prompt_display = match input.build_messages() {
+            Ok(msgs) => format_messages_dialog(&msgs),
+            Err(_) => context.to_string(),
+        };
+        emit_dialog_block(
+            ASSESS_RISK_ROLE,
+            pid,
+            1,
+            1,
+            DialogDirection::Request,
+            &prompt_display,
+        );
+    }
+    let res = input.fetch_chat_text().await;
+    match &res {
+        Ok(text) => {
+            if show_dialog {
+                emit_dialog_block(
+                    ASSESS_RISK_ROLE,
+                    pid,
+                    1,
+                    1,
+                    DialogDirection::Response,
+                    text,
+                );
+            }
+        }
+        Err(err) => {
+            if show_dialog {
+                emit_dialog_block(
+                    ASSESS_RISK_ROLE,
+                    pid,
+                    1,
+                    1,
+                    DialogDirection::Response,
+                    &format!("(LLM error: {err})"),
+                );
+            }
+        }
+    }
+    res
 }
 
 /// Prompt the human operator when an action requiring Human authority reaches the root orchestrator (FR-6d.8).
@@ -2514,6 +2557,8 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     // future plan-time pre-pass can pre-raise an action's floor). Raise-only means
     // it can only ever make the gate stricter — never green-light.
     let risk_cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
+    let agent_name = current_agent_name(params.config);
+    let pid = std::process::id();
 
     for turn in 1..=max_turns {
         params.progress.set_turn(turn, max_turns);
@@ -2524,8 +2569,55 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             params.config.write().before_chat_completion(&current_input)?;
         }
 
+        if params.config.read().agent_loop.show_dialog {
+            let prompt_display = match current_input.build_messages() {
+                Ok(mut msgs) => {
+                    crate::client::patch_messages(&mut msgs, &model);
+                    format_messages_dialog(&msgs)
+                }
+                Err(e) => format!("(failed to format messages: {e})"),
+            };
+            emit_dialog_block(
+                &agent_name,
+                pid,
+                turn,
+                max_turns,
+                DialogDirection::Request,
+                &prompt_display,
+            );
+        }
+
         // 1. Call the LLM (returns raw tool_calls, does not eval them)
-        let (output, tool_calls) = call_llm_raw(&current_input, &params).await?;
+        let call_res = call_llm_raw(&current_input, &params).await;
+        let (output, tool_calls) = match call_res {
+            Ok(val) => {
+                if params.config.read().agent_loop.show_dialog {
+                    let response_display = format_llm_response(&val.0, &val.1);
+                    emit_dialog_block(
+                        &agent_name,
+                        pid,
+                        turn,
+                        max_turns,
+                        DialogDirection::Response,
+                        &response_display,
+                    );
+                }
+                val
+            }
+            Err(err) => {
+                if params.config.read().agent_loop.show_dialog {
+                    emit_dialog_block(
+                        &agent_name,
+                        pid,
+                        turn,
+                        max_turns,
+                        DialogDirection::Response,
+                        &format!("(LLM call failed: {err})"),
+                    );
+                }
+                return Err(err);
+            }
+        };
 
         total_usage.add(output.usage());
         last_text = output.text.clone();
@@ -2836,6 +2928,128 @@ async fn call_llm_raw(
 use crate::config::AgentLoopConfig;
 use serde::Serialize;
 use std::io::Write;
+
+/// Helper to identify the executing agent for trace / dialog observability.
+pub fn current_agent_name(config: &GlobalConfig) -> String {
+    std::env::var("AICHAT_AGENT_NAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| config.read().agent.as_ref().map(|a| a.name().to_string()))
+        .or_else(|| config.read().role.as_ref().map(|r| r.name().to_string()))
+        .unwrap_or_else(|| "aichat".to_string())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogDirection {
+    Request,
+    Response,
+}
+
+/// Format messages submitted to LLM for dialog observability trace.
+pub fn format_messages_dialog(messages: &[crate::client::Message]) -> String {
+    use crate::client::{MessageContent, MessageContentPart, MessageRole};
+    let mut out = String::new();
+    for (i, msg) in messages.iter().enumerate() {
+        let role_str = match msg.role {
+            MessageRole::System => "system",
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+            MessageRole::Tool => "tool",
+        };
+        let content_str = match &msg.content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Array(parts) => parts
+                .iter()
+                .map(|p| match p {
+                    MessageContentPart::Text { text } => text.as_str(),
+                    MessageContentPart::ImageUrl { .. } => "[image]",
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            MessageContent::ToolCalls(tc) => {
+                let mut parts = Vec::new();
+                if !tc.text.is_empty() {
+                    parts.push(tc.text.clone());
+                }
+                for res in &tc.tool_results {
+                    parts.push(format!("tool_result: {} -> {}", res.call.name, res.output));
+                }
+                parts.join("\n")
+            }
+        };
+        if i > 0 {
+            out.push_str("\n---\n");
+        }
+        out.push_str(&format!("[{role_str}]\n{content_str}"));
+    }
+    out
+}
+
+/// Format the LLM response (text and/or tool calls) for dialog observability trace.
+pub fn format_llm_response(
+    output: &ChatCompletionsOutput,
+    tool_calls: &[crate::client::ToolCall],
+) -> String {
+    let mut parts = Vec::new();
+    if !output.text.trim().is_empty() {
+        parts.push(output.text.trim().to_string());
+    }
+    if !tool_calls.is_empty() {
+        let calls_val: Vec<_> = tool_calls
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "name": c.name,
+                    "arguments": c.arguments,
+                })
+            })
+            .collect();
+        if let Ok(calls_str) = serde_json::to_string_pretty(&calls_val) {
+            parts.push(format!("tool_calls:\n{calls_str}"));
+        } else {
+            parts.push(format!("tool_calls: {:?}", tool_calls));
+        }
+    }
+    if parts.is_empty() {
+        "(empty response)".to_string()
+    } else {
+        parts.join("\n\n")
+    }
+}
+
+/// Emit a dialog trace block to /dev/tty (live terminal) or stderr.
+pub fn emit_dialog_block(
+    agent: &str,
+    pid: u32,
+    turn: usize,
+    max_turns: usize,
+    direction: DialogDirection,
+    content: &str,
+) {
+    let (arrow, dir_str) = match direction {
+        DialogDirection::Request => (">>>", "PROMPT SUBMITTED TO LLM"),
+        DialogDirection::Response => ("<<<", "RESPONSE FROM LLM"),
+    };
+    let header = format!("[{pid} {agent} [turn {turn}/{max_turns}] {arrow} {dir_str}:]");
+    let bar = "  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄";
+    let indented_content: Vec<String> = content
+        .lines()
+        .map(|line| format!("  {line}"))
+        .collect();
+    let block = format!(
+        "\n  {header}\n{bar}\n{}\n{bar}",
+        indented_content.join("\n")
+    );
+
+    if *IS_STDOUT_TERMINAL {
+        eprintln!("{block}");
+    } else if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        use std::io::Write;
+        let _ = writeln!(tty, "{block}");
+    } else {
+        eprintln!("{block}");
+    }
+}
 
 /// Format an event as a trace line for stderr output.
 pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
@@ -3283,6 +3497,7 @@ mod tests {
         assert_eq!(al.max_concurrency, 8);
         assert_eq!(al.max_agent_depth, 3);
         assert!(!al.show_trace);
+        assert!(!al.show_dialog);
         assert!(al.planning_tool);
         assert!(al.osc_title);
         assert!(al.status_file);
