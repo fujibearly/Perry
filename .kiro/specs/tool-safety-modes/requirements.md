@@ -307,6 +307,13 @@ can fall back to it.
   `[safety preflight reversibility: atomic backup recorded in journal, required authority stepped down <from> -> <to>]`,
   `[%assess-risk% evaluator response: tier=<tier>, reversible=<rev>, conf=<conf>, rationale=<rat>]`,
   and escalation transitions and verdicts.
+- **FR-6d.17 — Supervisory Policy Enforcement & Risk Evaluation ("The Should Gate").**
+  When an invoking supervisor receives an `EscalationMsg` from a child agent via mTLS:
+  1. **Supervisor Policy Check:** The supervisor MUST evaluate its own Protected Policy File against the requested tool and arguments. If forbidden, the supervisor MUST immediately halt execution (`VerdictDecision::Halt`) returning a structured `policy_forbidden` error.
+  2. **Static Tier & Reversibility Floor:** The supervisor MUST compute the effective static tier (`max(supervisor_declared_tier, esc.blast_radius)`) and verify reversibility against its tool declarations, never trusting an unverified child claim of reversibility or lower blast radius.
+  3. **Supervisory Risk Assessment:** For non-Safe actions where a risk model is configured, the supervisor MUST evaluate the proposed action by invoking the `%assess-risk%` evaluator with extended supervisory context (including `child_agent_id`, `child_depth`, `child_stated_reason`, and `child_enrichment` alongside tool declaration, implementation source code, invocation preview, and arguments).
+  4. **Strict Clamping & Fail-Toward:** The evaluator verdict is clamped (`clamp_verdict`). A `Low`-confidence verdict or model failure MUST fail toward safety (`RequiredAuthority::Human`), requiring human approval or upward escalation.
+  5. **Authority Enforcement & Routing:** If the clamped required authority is permitted under the supervisor's authority ceiling, the supervisor autonomously approves with `VerdictDecision::Continue` (attaching evaluator rationale in `added_context`). If it exceeds the supervisor's ceiling, the supervisor escalates upward (depth > 0) or prompts the human operator (depth 0, failing closed to `Halt` in headless mode).
 
 ## Non-Functional Requirements
 

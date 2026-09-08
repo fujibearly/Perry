@@ -692,9 +692,9 @@ fn format_tool_invocation(tool_name: &str, arguments: &serde_json::Value) -> Opt
 }
 
 /// Collect the string-valued arguments of a call, for policy matching.
-fn string_args_of(call: &ToolCall) -> Vec<String> {
+fn string_args_from_value(args: &serde_json::Value) -> Vec<String> {
     let mut out = vec![];
-    match &call.arguments {
+    match args {
         serde_json::Value::Object(map) => {
             for v in map.values() {
                 if let Some(s) = v.as_str() {
@@ -719,6 +719,10 @@ fn string_args_of(call: &ToolCall) -> Vec<String> {
         _ => {}
     }
     out
+}
+
+fn string_args_of(call: &ToolCall) -> Vec<String> {
+    string_args_from_value(&call.arguments)
 }
 
 /// Whether a tool call targets a sub-agent (agent-flagged function that names a
@@ -1500,26 +1504,205 @@ async fn get_or_init_parent_listener(
     Ok(Some(listener.clone()))
 }
 
+/// Backlog #6d / Option B: pure decision helper for supervisory escalation.
+/// Combines the base required authority (from tool tier + policy + reversibility)
+/// with an optional risk evaluator verdict under the supervisor's authority ceiling.
+/// Low-confidence verdicts fail toward Human authority.
+fn supervisory_verdict_decision(
+    base: crate::safety::RequiredAuthority,
+    ceiling: crate::safety::AuthorityCeiling,
+    verdict: Option<&crate::safety::RiskVerdict>,
+    reversible: bool,
+) -> (crate::safety::RequiredAuthority, bool) {
+    let effective = match verdict {
+        Some(v) => {
+            if v.confidence == crate::safety::VerdictConfidence::Low {
+                crate::safety::RequiredAuthority::Human
+            } else {
+                crate::safety::clamp_verdict(base, v, reversible)
+            }
+        }
+        None => base,
+    };
+    let permits = ceiling.permits(effective);
+    (effective, permits)
+}
+
 async fn handle_escalation_request(
     config: &GlobalConfig,
     hello: &crate::safety::HelloMsg,
     esc: crate::safety::EscalationMsg,
 ) -> crate::safety::VerdictMsg {
     let escalation_id = esc.id.clone();
-    let current_ceiling = current_authority_ceiling(config);
-    let static_tier = crate::function::StaticTier::Tier(esc.blast_radius);
-    let required = crate::safety::required_authority(static_tier, None, esc.reversible);
+    let tool_name = esc.action.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let args = esc.action.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
+    let show_trace = config.read().agent_loop.show_trace || config.read().multi_agent.show_trace;
 
-    // If within parent's ceiling, parent decides autonomously
-    if current_ceiling.permits(required) {
+    if show_trace {
+        eprintln!(
+            "  [supervisor] received escalation from child '{}' (depth {}) for tool '{}' (reported tier: {}, reversible: {})",
+            hello.agent_id, hello.depth, tool_name, esc.blast_radius.as_str(), esc.reversible
+        );
+    }
+
+    // 1. Protected Policy Check (Supervisor's own non-pardonable deterministic policy)
+    let policy_path = config.read().safety.policy_file.clone();
+    let policy = match policy_path {
+        Some(p) => crate::safety::PolicyFile::load(&p).unwrap_or_default(),
+        None => crate::safety::PolicyFile::default(),
+    };
+    let arg_strings = string_args_from_value(&args);
+    let arg_refs: Vec<&str> = arg_strings.iter().map(|s| s.as_str()).collect();
+    let policy_outcome = policy.evaluate(tool_name, &arg_refs);
+
+    if policy_outcome == Some(crate::safety::PolicyOutcome::Forbid) {
+        if show_trace {
+            eprintln!(
+                "  [supervisor] policy forbids tool '{}' requested by child '{}'",
+                tool_name, hello.agent_id
+            );
+        }
         return crate::safety::VerdictMsg {
             escalation_id,
-            decision: crate::safety::VerdictDecision::Continue,
-            added_context: None,
+            decision: crate::safety::VerdictDecision::Halt,
+            added_context: Some(serde_json::json!({
+                "error": {
+                    "type": "policy_forbidden",
+                    "message": format!(
+                        "Tool '{}' is forbidden by the supervisor's protected safety policy. \
+                         This is a non-pardonable deterministic rule and cannot be overridden.",
+                        tool_name
+                    )
+                }
+            })),
         };
     }
 
-    // If over ceiling, check if parent has its own parent (depth > 0) to re-escalate upward
+    // 2. Determine static tier, reversibility, and base required authority
+    let (supervisor_static_tier, static_reversible) = tool_tier_and_reversibility(config, tool_name);
+    let effective_blast_radius = match supervisor_static_tier {
+        crate::function::StaticTier::Tier(t) => t.max(esc.blast_radius),
+        crate::function::StaticTier::Unclassified => esc.blast_radius,
+    };
+    let static_tier = crate::function::StaticTier::Tier(effective_blast_radius);
+    let decl = find_tool_declaration(config, tool_name);
+    let can_be_reversible = decl.as_ref().map(|d| {
+        d.reversible_via.as_deref() == Some("backup") || d.reversible == Some(true)
+    }).unwrap_or(static_reversible);
+    let reversible = can_be_reversible && (static_reversible || esc.reversible);
+    let base_required = crate::safety::required_authority(static_tier, policy_outcome, reversible);
+    let current_ceiling = current_authority_ceiling(config);
+
+    // 3. Supervisory Risk Evaluation ("The Should Gate")
+    let risk_model = config
+        .read()
+        .safety
+        .risk_model
+        .clone()
+        .or_else(|| {
+            config
+                .read()
+                .role_model_id(crate::config::ASSESS_RISK_ROLE)
+        });
+
+    let mut evaluator_verdict: Option<crate::safety::RiskVerdict> = None;
+
+    if effective_blast_radius != crate::function::BlastRadius::Safe {
+        if let Some(ref rm) = risk_model {
+            let impl_info = resolve_tool_implementation(config, tool_name);
+            let decl_ctx = crate::safety::extract_declaration_context(decl.as_ref(), impl_info.source());
+            let invocation = format_tool_invocation(tool_name, &args);
+            let supervisory_intent = format!(
+                "Supervisory authorization: child agent '{}' (depth {}) requested permission to execute tool '{}'. Child reason: '{}'",
+                hello.agent_id, hello.depth, tool_name, esc.reason
+            );
+            let raw_context = crate::safety::build_evaluator_context(
+                tool_name,
+                &args,
+                effective_blast_radius,
+                reversible,
+                &supervisory_intent,
+                decl_ctx.as_ref(),
+                Some(&impl_info),
+                invocation.as_deref(),
+            );
+            let mut payload: serde_json::Value =
+                serde_json::from_str(&raw_context).unwrap_or_else(|_| serde_json::json!({}));
+            payload["supervisory_request"] = serde_json::json!({
+                "child_agent_id": hello.agent_id,
+                "child_depth": hello.depth,
+                "child_stated_reason": esc.reason,
+                "child_enrichment": esc.enrichment,
+            });
+            let eval_context_str = serde_json::to_string_pretty(&payload).unwrap_or(raw_context);
+
+            if show_trace {
+                eprintln!(
+                    "  [supervisor] evaluating risk of child '{}' action '{}' with model '{}' ...",
+                    hello.agent_id, tool_name, rm
+                );
+            }
+
+            let verdict = match run_risk_evaluator(config, rm, &eval_context_str).await {
+                Ok(raw) => {
+                    let v = crate::safety::RiskVerdict::parse(&raw, effective_blast_radius);
+                    if show_trace {
+                        eprintln!(
+                            "  [supervisor] risk assessment completed for '{}': tier={}, confidence={:?}, rationale={}",
+                            tool_name, v.tier.as_str(), v.confidence, v.rationale
+                        );
+                    }
+                    v
+                }
+                Err(err) => {
+                    if show_trace {
+                        eprintln!(
+                            "  [supervisor] risk assessment error for '{}': {err} (falling back to low-confidence)",
+                            tool_name
+                        );
+                    }
+                    crate::safety::RiskVerdict::low_confidence_fallback(effective_blast_radius)
+                }
+            };
+            evaluator_verdict = Some(verdict);
+        }
+    }
+
+    let (required, permitted) = supervisory_verdict_decision(
+        base_required,
+        current_ceiling,
+        evaluator_verdict.as_ref(),
+        reversible,
+    );
+
+    // 4. Authority Decision: If permitted within ceiling, approve autonomously!
+    if permitted {
+        if show_trace {
+            eprintln!(
+                "  [supervisor] approving child '{}' escalation for '{}' (required: {:?}, ceiling: {:?})",
+                hello.agent_id, tool_name, required, current_ceiling.tier()
+            );
+        }
+        let added_context = evaluator_verdict.map(|v| serde_json::json!({
+            "supervisor": "approved",
+            "evaluator_tier": v.tier.as_str(),
+            "evaluator_rationale": v.rationale,
+        }));
+        return crate::safety::VerdictMsg {
+            escalation_id,
+            decision: crate::safety::VerdictDecision::Continue,
+            added_context,
+        };
+    }
+
+    if show_trace {
+        eprintln!(
+            "  [supervisor] escalation for tool '{}' requires {:?} exceeding ceiling {:?} -> escalating upward",
+            tool_name, required, current_ceiling.tier()
+        );
+    }
+
+    // 5. Over-ceiling: Re-escalate upward if parent exists (depth > 0)
     if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
         let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
             .ok()
@@ -1559,10 +1742,18 @@ async fn handle_escalation_request(
         }
     }
 
-    // We are at root orchestrator (Depth 0) — consult Human in the loop!
-    let tool_name = esc.action.get("tool").and_then(|v| v.as_str()).unwrap_or("unknown");
-    let args = esc.action.get("arguments").cloned().unwrap_or(serde_json::Value::Null);
-    let decision = prompt_human_verdict(tool_name, &args, esc.blast_radius, &esc.reason, None)
+    // 6. Root orchestrator (Depth 0): Prompt Human in the loop!
+    let prompt_reason = if let Some(ref v) = evaluator_verdict {
+        if !v.rationale.is_empty() {
+            format!("{} (Supervisor Evaluator Rationale: {})", esc.reason, v.rationale)
+        } else {
+            esc.reason.clone()
+        }
+    } else {
+        esc.reason.clone()
+    };
+
+    let decision = prompt_human_verdict(tool_name, &args, effective_blast_radius, &prompt_reason, None)
         .unwrap_or(crate::safety::VerdictDecision::Halt);
 
     crate::safety::VerdictMsg {
@@ -4297,6 +4488,7 @@ agent_loop:
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn risk_evaluator_disabled_without_risk_model_is_noop() {
         let _guard = MASK_ENV_LOCK.lock();
         let prev = std::env::var("AICHAT_ROLES_DIR").ok();
@@ -4324,6 +4516,7 @@ agent_loop:
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn risk_evaluator_uses_role_model_when_safety_risk_model_unset() {
         let _guard = MASK_ENV_LOCK.lock();
         let prev = std::env::var("AICHAT_ROLES_DIR").ok();
@@ -4623,4 +4816,149 @@ agent_loop:
             None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
         }
     }
+
+    // --- Backlog #6d / Option B: supervisory escalation decisions ---
+
+    #[test]
+    fn supervisory_decision_permissive_high_confidence_within_ceiling_permits() {
+        use crate::function::BlastRadius::*;
+        use crate::safety::{AuthorityCeiling, RequiredAuthority, VerdictConfidence};
+
+        let base = RequiredAuthority::Tier(Disruptive);
+        let ceiling = AuthorityCeiling::UpTo(Destructive);
+        let v = verdict(Disruptive, VerdictConfidence::High);
+
+        let (req, permitted) = supervisory_verdict_decision(base, ceiling, Some(&v), false);
+        assert_eq!(req, RequiredAuthority::Tier(Disruptive));
+        assert!(permitted, "within ceiling with high confidence must be permitted");
+    }
+
+    #[test]
+    fn supervisory_decision_raises_over_ceiling_does_not_permit() {
+        use crate::function::BlastRadius::*;
+        use crate::safety::{AuthorityCeiling, RequiredAuthority, VerdictConfidence};
+
+        let base = RequiredAuthority::Tier(Disruptive);
+        let ceiling = AuthorityCeiling::UpTo(Disruptive);
+        let v = verdict(Destructive, VerdictConfidence::High);
+
+        let (req, permitted) = supervisory_verdict_decision(base, ceiling, Some(&v), false);
+        assert_eq!(req, RequiredAuthority::Tier(Destructive));
+        assert!(!permitted, "raised over ceiling must not be permitted");
+    }
+
+    #[test]
+    fn supervisory_decision_low_confidence_fails_toward_human() {
+        use crate::function::BlastRadius::*;
+        use crate::safety::{AuthorityCeiling, RequiredAuthority, VerdictConfidence};
+
+        let base = RequiredAuthority::Tier(Disruptive);
+        let ceiling = AuthorityCeiling::UpTo(Destructive);
+        let v = verdict(Disruptive, VerdictConfidence::Low);
+
+        let (req, permitted) = supervisory_verdict_decision(base, ceiling, Some(&v), false);
+        assert_eq!(req, RequiredAuthority::Human);
+        assert!(!permitted, "low confidence must fail toward Human and not be permitted");
+    }
+
+    #[test]
+    fn supervisory_decision_without_verdict_uses_base() {
+        use crate::function::BlastRadius::*;
+        use crate::safety::{AuthorityCeiling, RequiredAuthority};
+
+        let base = RequiredAuthority::Tier(Disruptive);
+        let ceiling = AuthorityCeiling::UpTo(Destructive);
+
+        let (req, permitted) = supervisory_verdict_decision(base, ceiling, None, false);
+        assert_eq!(req, RequiredAuthority::Tier(Disruptive));
+        assert!(permitted);
+
+        let ceiling_safe = AuthorityCeiling::UpTo(Safe);
+        let (_, permitted_safe) = supervisory_verdict_decision(base, ceiling_safe, None, false);
+        assert!(!permitted_safe);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn handle_escalation_request_policy_forbid_returns_halt() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let config = config_with_tiers();
+        let temp_dir = crate::utils::temp_file("-test-orch-policy-", "");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let policy_file = temp_dir.join("policy.yaml");
+        std::fs::write(&policy_file, "rules:\n  - tool: rm\n    forbid: true\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&policy_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        config.write().safety.policy_file = Some(policy_file);
+
+        let hello = crate::safety::HelloMsg {
+            agent_id: "child-coder".to_string(),
+            depth: 1,
+            capabilities: vec![],
+        };
+        let esc = crate::safety::EscalationMsg {
+            id: "esc-1".to_string(),
+            agent_id: "child-coder".to_string(),
+            tree_id: "tree-test".to_string(),
+            action: json!({"tool": "rm", "arguments": {"path": "/tmp/test"}}),
+            reason: "needs rm".to_string(),
+            enrichment: json!({}),
+            blast_radius: crate::function::BlastRadius::Destructive,
+            reversible: false,
+            challenge: "chall".to_string(),
+        };
+
+        let verdict = handle_escalation_request(&config, &hello, esc).await;
+        assert_eq!(verdict.decision, crate::safety::VerdictDecision::Halt);
+        assert!(verdict.added_context.is_some());
+        let err_obj = verdict.added_context.unwrap();
+        assert_eq!(err_obj["error"]["type"], "policy_forbidden");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn handle_escalation_request_within_ceiling_approves() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev_ceiling = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let prev_roles = std::env::var("AICHAT_ROLES_DIR").ok();
+        let empty_dir = crate::utils::temp_file("-test-orch-empty-roles-", "");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        std::env::set_var("AICHAT_ROLES_DIR", &empty_dir);
+        std::env::set_var("AICHAT_AUTHORITY_CEILING", "destructive");
+
+        let config = config_with_tiers();
+        let hello = crate::safety::HelloMsg {
+            agent_id: "child-coder".to_string(),
+            depth: 1,
+            capabilities: vec![],
+        };
+        let esc = crate::safety::EscalationMsg {
+            id: "esc-2".to_string(),
+            agent_id: "child-coder".to_string(),
+            tree_id: "tree-test".to_string(),
+            action: json!({"tool": "write_file", "arguments": {"path": "/tmp/test.txt"}}),
+            reason: "needs write".to_string(),
+            enrichment: json!({}),
+            blast_radius: crate::function::BlastRadius::Disruptive,
+            reversible: false,
+            challenge: "chall".to_string(),
+        };
+
+        let verdict = handle_escalation_request(&config, &hello, esc).await;
+        assert_eq!(verdict.decision, crate::safety::VerdictDecision::Continue);
+
+        match prev_ceiling {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
+        match prev_roles {
+            Some(v) => std::env::set_var("AICHAT_ROLES_DIR", v),
+            None => std::env::remove_var("AICHAT_ROLES_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&empty_dir);
+    }
 }
+

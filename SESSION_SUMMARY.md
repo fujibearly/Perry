@@ -107,3 +107,16 @@ This repository maintains continuous, chronological session handoff summaries do
      * **Verification:** Suite **461 pass, 0 fail** (453 unit + 5 catalog + 3 integration); `cargo clippy --all-targets -- -D warnings` clean; all 20 demos passing in `scripts/run-demos.nu`.
      * **State:** on branch `feat/tool-safety-6d` @ `2a7da73`; local-only (nothing pushed).
 
+  10. **Session 10: Supervisory Governance & Risk Assessment in Multi-Agent Escalation ("The Should Gate")**
+    * **Period:** `2026-09-08`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-08-session10.md`](.kiro/docs/session-summary-2026-09-08-session10.md)
+    * **Focus Areas:**
+      * **The Should Gate:** Closed the critical gap where supervisors approved escalations simply because their ceiling allowed it ("can != should").
+      * **Parent Policy Enforcement:** Supervisor enforces its own `PolicyFile` against child tool calls and args; explicit `Forbid` immediately halts (`policy_forbidden`).
+      * **Anti-Spoofed Static Tier Floor:** Enforces `max(supervisor_declared_tier, esc.blast_radius)` and validates tool reversibility declarations before honoring reversibility claims.
+      * **Supervisory %assess-risk% Invocation:** Calls evaluator with extended supervisory context (child ID, depth, stated reason, enrichment, declaration metadata, 4KB script source code, invocation command line).
+      * **Strict Clamping & Routing:** Pure `supervisory_verdict_decision` helper clamps strictly; `Low` confidence fails toward `Human`; within-ceiling approvals attach evaluator rationale in `added_context`; over-ceiling escalates upward or prompts human operator.
+      * **Live Verification:** Verified end-to-end with live Demo 20 under Gemini 2.5 Flash showing supervisor risk assessment and approval trace; test suite **467 pass, 0 fail** (459 unit + 5 catalog + 3 integration).
+      * **State:** on branch `feat/tool-safety-6d`; local-only (nothing pushed).
+
+

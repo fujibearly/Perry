@@ -362,6 +362,14 @@ These refine the #6b/#6d safety gating model based on decisions taken to solve t
   - `SafetyBlockReason` (`CapabilityDenied`, `AuthorityExceeded`, `PolicyForbidden`)
   Live traces format these consistently with turn indices and child agent IDs.
 
+- **Supervisory Governance & Risk Assessment in Multi-Agent Escalation:**
+  Authority does not imply approval ("can != should"). In `handle_escalation_request`:
+  1. **Supervisor Policy Check:** The supervisor evaluates its own `PolicyFile` against the escalated action and arguments. Explicit `Forbid` rules immediately produce `VerdictDecision::Halt` with `policy_forbidden` context.
+  2. **Deterministic Floor & Anti-Spoofing:** The supervisor enforces `effective_tier = max(supervisor_declared_tier, esc.blast_radius)` and validates reversibility against its tool declarations, preventing a compromised or hallucinating child from self-reporting a discounted tier.
+  3. **Supervisory Risk Assessment:** For non-Safe actions with a configured risk model, the supervisor invokes `%assess-risk%` using an extended context payload containing `child_agent_id`, `child_depth`, `child_stated_reason`, and `child_enrichment`, alongside tool declaration, implementation code, invocation command line, and arguments.
+  4. **Strict Clamping & Fail-Toward:** `clamp_verdict` ensures the evaluation is strictly raise-only. `Low`-confidence verdicts or model errors fail toward `RequiredAuthority::Human`.
+  5. **Decision Routing:** If the clamped required authority is permitted by the supervisor's authority ceiling and confident, the supervisor grants `VerdictDecision::Continue` with evaluator rationale in `added_context`. If over ceiling, it propagates upward to its own parent or prompts the human operator.
+
 ## Threat Model (explicit, per NFR-2/3/4)
 
 1. **Prompt injection into the evaluator** — a tool's arguments or fetched content tries to coerce a

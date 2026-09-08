@@ -772,6 +772,7 @@ pub fn extract_declaration_context(
 /// the tool's declaration (functional description from `@describe`, parameter schemas,
 /// and environment), its local implementation source code / execution mechanism,
 /// and the resolved invocation command line.
+#[allow(clippy::too_many_arguments)]
 pub fn build_evaluator_context(
     tool_name: &str,
     arguments: &serde_json::Value,
@@ -1798,7 +1799,7 @@ main() {
         assert!(notes.contains("When used as a pipe target"));
         assert!(notes.contains("Uses Gemini Flash"));
         assert_eq!(options.len(), 1);
-        assert_eq!(options["input"].required, true);
+        assert!(options["input"].required);
         assert_eq!(options["input"].description, "The text content to summarize");
         assert_eq!(env_map.len(), 2);
         assert!(env_map["SUMMARIZE_MODEL"].contains("gemini-3.5-flash"));
