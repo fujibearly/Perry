@@ -119,4 +119,28 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Live Verification:** Verified end-to-end with live Demo 20 under Gemini 2.5 Flash showing supervisor risk assessment and approval trace; test suite **467 pass, 0 fail** (459 unit + 5 catalog + 3 integration).
       * **State:** on branch `feat/tool-safety-6d`; local-only (nothing pushed).
 
+  11. **Session 11: Permission vs. Authorization Boundary & Bounded Re-Delegation (FR-6d.18–FR-6d.21)**
+    * **Period:** `2026-09-08`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-08-session11.md`](.kiro/docs/session-summary-2026-09-08-session11.md)
+    * **Focus Areas:**
+      * **Hard Process Capability Boundary:** Established strict engine separation between Permissions (technical process sandboxing) and Authorization (supervisory goal alignment). Removed mTLS escalation for `capability_denied` so `readonly` processes cannot have their capability mask elevated in-flight.
+      * **Hierarchical Upfront Provisioning (`DelegatedPermissions`):** Orchestrator provisions sub-agents with execution capabilities at delegation time via typed schema (`permissions: { mask, ceiling }`). Engine validates `requested <= parent` and clamps closed on malformed inputs.
+      * **Sub-Agent Unwind & Clean Exit:** Sub-agents tripping `capability_denied` immediately halt, unwind journal entries (`journal.replay_last()`), emit `AgentLoopEvent::CapabilityBlocked`, and return structured JSON (`status: "permission_blocked"`).
+      * **Bounded Re-Delegation Circuit Breaker:** Orchestrator ingests `permission_blocked` results, evaluates whether to re-delegate with mutating permissions or consult the user, capped by a per-`(agent, task)` circuit breaker (2 attempts).
+      * **Live Verification:** Verified via live Demo 21 under Gemini 2.5 Flash; test suite **468 pass, 0 fail**; companion `llm-functions` schema committed.
+      * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
+
+  12. **Session 12: Interactive Debug Stepping, Observability Dialog Trace, Visual Hierarchy & FIFO Event Pipeline**
+    * **Period:** `2026-09-08`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-08-session12.md`](.kiro/docs/session-summary-2026-09-08-session12.md)
+    * **Focus Areas:**
+      * **Interactive Debug Stepping (`--debug` / `-d`):** Added interactive step-pause to `scripts/run-demos.nu`, enabling users to inspect tests one by one or abort with `q`.
+      * **Selective Demo Execution (`--demo (-t) <ID>`):** Filter and execute single targeted demos (e.g. `./run-demos.nu --demo 1` or `-t 10b`) with input validation against all 22 test suites.
+      * **Natural Language Demo Descriptions:** Formatted objective headers (`ℹ <description>`) across all 22 demos in `scripts/run-demos.nu`.
+      * **Visual Hierarchy Indentation & Colors:** Root agent (`orchestrator`) renders left-most; subagents (`coder`, `researcher`, etc.) indent 4 spaces per nesting depth; unique ANSI colors assigned to agents.
+      * **LLM Dialog Observability (`--dialog`) with Payload Truncation:** Complete prompt and response tracing with full `[system]` preservation and top/bottom 20-line payload truncation.
+      * **Unified Event Pipeline (Option 1):** Added `AgentLoopEvent::DialogBlock` to route dialog blocks through the existing MPSC event queue, eliminating chronological race conditions with tool completions and guaranteeing 100% causal FIFO order across all 4 observability tiers.
+      * **Live Verification:** Unit suite **469 pass, 0 fail**; verified with live Demos 1, 3, 5, 10b; debug and release builds fully up to date.
+      * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
+
 
