@@ -15,7 +15,7 @@
 # NOTE: Demos 1-11 exercise the live agent loop and require API access
 # (they invoke real LLM providers). Demo 12 (sub-agent crash isolation) and
 # Demo 16 (multi-process escalation and rollback journal) are deterministic
-# and offline — no provider needed. Demos 13-15 & 17-20 (#6b-#6d safety lifecycle) are live
+# and offline — no provider needed. Demos 13-15 & 17-21 (#6b-#6d safety lifecycle) are live
 # but tightly scoped:
 #   13 — Protected Policy File `forbid`      → policy_forbidden
 #   14 — authority ceiling exceeded          → authority_exceeded
@@ -24,7 +24,8 @@
 #   17 — Full Safety Lifecycle (Happy Path)  → Gate pass + %assess-risk% + 0600 journal + exec
 #   18 — Pre-flight Remediation (Option B)   → fs_write + journal backup upfront -> stepped down, passes
 #   19 — Authority Ceiling Fail-Closed       → safe ceiling blocks (even with reversibility)
-#   20 — Orchestrator Sub-Agent Escalation   → child capability_denied -> mTLS escalation to parent Continue
+#   20 — Orchestrator Sub-Agent Authority Escalation → mutating sub-agent authority_exceeded -> mTLS Should Gate -> Continue
+#   21 — Sub-Agent Capability Block & Re-Delegation  → readonly sub-agent capability_denied -> unwind -> permission_blocked -> orchestrator re-delegates mutating
 #
 # All live demos run under DEMO_MODEL (default gemini-2.5-flash) for a
 # consistent, cost-conscious profile — see the constant below.
@@ -49,7 +50,15 @@
 const SCRIPT_DIR = (path self | path dirname)
 let project_dir = ($SCRIPT_DIR | path join ".." | path expand)
 let aichat_bin = (
-    if (($project_dir | path join "target/release/aichat") | path exists) {
+    if ($env.AICHAT_BIN? | default "" | is-not-empty) {
+        $env.AICHAT_BIN
+    } else if (($project_dir | path join "target/debug/aichat") | path exists) and (($project_dir | path join "target/release/aichat") | path exists) {
+        if ((ls ($project_dir | path join "target/debug/aichat") | get modified.0) > (ls ($project_dir | path join "target/release/aichat") | get modified.0)) {
+            $project_dir | path join "target/debug/aichat"
+        } else {
+            $project_dir | path join "target/release/aichat"
+        }
+    } else if (($project_dir | path join "target/release/aichat") | path exists) {
         $project_dir | path join "target/release/aichat"
     } else {
         $project_dir | path join "target/debug/aichat"
@@ -960,20 +969,22 @@ if ($d19_target | path exists) { rm -f $d19_target }
 
 # ─── Demo 20: Orchestrator to Sub-Agent Escalation (live, gemini-2.5-flash) ───────
 #
-# Multi-process escalation under delegation:
-# The orchestrator delegates file creation to the `coder` sub-agent.
-# The sub-agent inherits `AICHAT_CAPABILITY_MASK=readonly`, so actuation of mutating
-# tools triggers `capability_denied`.
+# Multi-process authority escalation under delegation:
+# The orchestrator delegates file creation to the `coder` sub-agent with explicit
+# mutating permission, but with a `reversible` authority ceiling.
+# `fs_write` has blast-radius `Disruptive`, so actuation exceeds coder's
+# autonomous authority ceiling, triggering `authority_exceeded`.
 # The sub-agent dispatches an mTLS escalation request to the parent orchestrator.
-# The parent evaluates and grants Continue verdict; sub-agent actuates and succeeds.
+# The parent evaluates via the Session-10 Should Gate (Protected Policy, anti-spoof,
+# risk assessment) and grants Continue verdict within its own ceiling; sub-agent actuates and succeeds.
 
-header "Demo 20: Orchestrator Sub-Agent Escalation (live, gemini-2.5-flash)"
+header "Demo 20: Orchestrator Sub-Agent Authority Escalation (live, gemini-2.5-flash)"
 
 let d20_target = ($nu.temp-dir | path join $"aichat-orch-esc-($nu.pid).txt")
 if ($d20_target | path exists) { rm -f $d20_target }
 
-let d20_prompt = $"Delegate to coder: write the exact text ESCALATED_OK to ($d20_target) using fs_write. You MUST delegate to coder."
-show-cmd $'aichat --show-cost --agent orchestrator "Delegate to coder: write ESCALATED_OK to <target>"'
+let d20_prompt = $"Delegate to coder with permissions_mask 'mutating' and permissions_ceiling 'reversible': write the exact text ESCALATED_OK to ($d20_target) using fs_write. You MUST delegate to coder."
+show-cmd 'aichat --show-cost --agent orchestrator "Delegate to coder [mutating, reversible ceiling]: write ESCALATED_OK to <target>"'
 
 let d20_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
@@ -988,17 +999,61 @@ let combined20 = $"($demo20.stdout)($trace20)"
 
 let d20_file_created = ($d20_target | path exists)
 let d20_delegated = ($trace20 | str contains "calling: coder") or ($combined20 | str contains "coder")
-let d20_escalated = ($trace20 | str contains "escalation:") or ($trace20 | str contains "EscalationDispatched") or ($trace20 | str contains "capability_denied")
+let d20_escalated = ($trace20 | str contains "escalation:") or ($trace20 | str contains "EscalationDispatched") or ($trace20 | str contains "authority_exceeded")
 let d20_verdict = ($trace20 | str contains "escalation verdict:") or ($trace20 | str contains "EscalationVerdictReceived") or ($trace20 | str contains "Continue")
 
-report "Orchestrator delegated task to coder" $d20_delegated
-report "Coder dispatched capability_denied escalation to parent" ($d20_escalated or $d20_file_created)
+report "Orchestrator delegated task to coder with mutating permissions" $d20_delegated
+report "Coder dispatched authority_exceeded escalation to parent" ($d20_escalated or $d20_file_created)
 report "Parent orchestrator returned escalation verdict" ($d20_verdict or $d20_file_created)
 report "File created through delegated escalation" $d20_file_created
 show-output $demo20.stdout
 show-cost ($demo20.stderr | default "")
 
 if ($d20_target | path exists) { rm -f $d20_target }
+
+# ─── Demo 21: Sub-Agent Capability Block & Re-Delegation (live, gemini-2.5-flash) ───
+#
+# Process capability boundary & bounded re-delegation:
+# 1. The orchestrator delegates to `coder` without specifying permissions (defaults to `readonly`).
+# 2. Coder attempts `fs_write`, which is blocked by the capability mask (`capability_denied`).
+# 3. Coder halts actuation immediately, unwinds pre-mutation journal entries, and exits cleanly
+#    with structured `status: "permission_blocked"` (no in-flight mTLS escalation).
+# 4. Orchestrator ingests the `permission_blocked` tool result, evaluates context, and re-delegates
+#    to coder with explicit mutating permissions.
+# 5. Coder executes successfully on the second delegation and writes the file.
+
+header "Demo 21: Sub-Agent Capability Block & Re-Delegation (live, gemini-2.5-flash)"
+
+let d21_target = ($nu.temp-dir | path join $"aichat-orch-redelegate-($nu.pid).txt")
+if ($d21_target | path exists) { rm -f $d21_target }
+
+let d21_prompt = $"Delegate to coder: write the exact text PERMISSION_UNWOUND_OK to ($d21_target) using fs_write. Do NOT specify permissions upfront. When coder reports permission_blocked, re-delegate with mutating permissions."
+show-cmd 'aichat --show-cost --agent orchestrator "Delegate to coder [default readonly] -> permission_blocked -> re-delegate mutating"'
+
+let d21_env = ($base_env | merge {
+    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
+    AICHAT_AGENT_LOOP_MAX_TURNS: "5"
+})
+let demo21 = (do {
+    "" | with-env $d21_env { ^$aichat_bin --show-cost --agent orchestrator $d21_prompt }
+} | complete)
+
+let trace21 = ($demo21.stderr | default "")
+let combined21 = $"($demo21.stdout)($trace21)"
+
+let d21_file_created = ($d21_target | path exists)
+let d21_first_call = ($trace21 | str contains "calling: coder") or ($combined21 | str contains "coder")
+let d21_blocked = ($trace21 | str contains "capability blocked:") or ($trace21 | str contains "permission_blocked") or ($combined21 | str contains "permission_blocked")
+let d21_redelegate = ($trace21 | str contains "calling: coder") and ($d21_file_created or ($combined21 | str contains "mutating"))
+
+report "Orchestrator delegated task to coder" $d21_first_call
+report "Coder blocked by capability mask and reported permission_blocked" ($d21_blocked or $d21_file_created)
+report "Orchestrator re-delegated with provisioned mutating permissions" ($d21_redelegate or $d21_file_created)
+report "File created through bounded re-delegation" $d21_file_created
+show-output $demo21.stdout
+show-cost ($demo21.stderr | default "")
+
+if ($d21_target | path exists) { rm -f $d21_target }
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
 

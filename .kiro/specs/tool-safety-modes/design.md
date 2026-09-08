@@ -370,6 +370,16 @@ These refine the #6b/#6d safety gating model based on decisions taken to solve t
   4. **Strict Clamping & Fail-Toward:** `clamp_verdict` ensures the evaluation is strictly raise-only. `Low`-confidence verdicts or model errors fail toward `RequiredAuthority::Human`.
   5. **Decision Routing:** If the clamped required authority is permitted by the supervisor's authority ceiling and confident, the supervisor grants `VerdictDecision::Continue` with evaluator rationale in `added_context`. If over ceiling, it propagates upward to its own parent or prompts the human operator.
 
+## As-Built Notes — #6d Permission vs. Authorization Architecture Redesign (FR-6d.18–FR-6d.21)
+
+- **Permission vs. Authorization Boundary (Refinement to Decision B):**
+  A strict architectural distinction is established between **Permissions** (engine-enforced, static process execution capabilities provisioned at spawn time) and **Authorization** (supervisory goal-alignment and advisory risk assessment via the Session-10 Should Gate).
+  1. **Elimination of In-Flight Permission Loans:** The #6a capability mask is a hard process sandbox boundary. A sub-agent process running under a `readonly` mask cannot have that technical capability boundary lifted in-flight over mTLS by any supervisor verdict.
+  2. **Hierarchical Upfront Provisioning (`DelegatedPermissions`):** The orchestrator provisions sub-agents with execution capabilities via a typed contract (`permissions: { mask, ceiling }`, with flat fallbacks `permissions_mask`, `permissions_ceiling`). The engine strictly validates `requested <= parent`, clamping unknown/malformed inputs to the safe floor (`readonly`, `safe`), and barring autonomous delegation of `catastrophic` authority (reserved to humans).
+  3. **Deterministic Unwinding on Capability Block:** When a sub-agent trips `capability_denied`, it does NOT escalate over mTLS: it halts actuation immediately, unwinds recorded pre-mutation entries in its durable rollback journal (`journal.replay_last()`), and cleanly exits with structured status `permission_blocked`.
+  4. **Orchestrator Ingestion & Bounded Re-Delegation:** The invoking orchestrator ingests `permission_blocked` as a tool result and reasons via its LLM whether to re-delegate with explicit permissions. A per-`(agent, task)` circuit breaker (cap of 2 attempts) bounds re-delegation cycles.
+  5. **Preservation of the Should Gate:** The authority-ceiling escalation path (`authority_exceeded`) over mTLS into `handle_escalation_request` remains intact (Protected Policy, anti-spoof static tier floor, reversibility verification, `%assess-risk%`, stricter clamping, fail-toward-`Human`). Defense-in-depth rejects any incoming escalation with reason `"capability_denied"`.
+
 ## Threat Model (explicit, per NFR-2/3/4)
 
 1. **Prompt injection into the evaluator** — a tool's arguments or fetched content tries to coerce a

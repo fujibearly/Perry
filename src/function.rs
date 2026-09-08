@@ -200,7 +200,13 @@ impl Functions {
                 )
             };
             let content = fs::read_to_string(declarations_path).with_context(ctx)?;
-            serde_json::from_str(&content).with_context(ctx)?
+            let mut decls: Vec<FunctionDeclaration> = serde_json::from_str(&content).with_context(ctx)?;
+            for decl in &mut decls {
+                if decl.agent {
+                    decl.enrich_agent_permissions_schema();
+                }
+            }
+            decls
         } else {
             vec![]
         };
@@ -209,13 +215,23 @@ impl Functions {
     }
 
     /// Append additional declarations (e.g., from MCP servers).
-    pub fn extend(&mut self, declarations: Vec<FunctionDeclaration>) {
+    pub fn extend(&mut self, mut declarations: Vec<FunctionDeclaration>) {
+        for decl in &mut declarations {
+            if decl.agent {
+                decl.enrich_agent_permissions_schema();
+            }
+        }
         self.declarations.extend(declarations);
     }
 
     /// Create from an explicit list of declarations (for tests and programmatic use).
     #[allow(dead_code)]
-    pub fn init_from_declarations(declarations: Vec<FunctionDeclaration>) -> Self {
+    pub fn init_from_declarations(mut declarations: Vec<FunctionDeclaration>) -> Self {
+        for decl in &mut declarations {
+            if decl.agent {
+                decl.enrich_agent_permissions_schema();
+            }
+        }
         Self { declarations }
     }
 
@@ -284,6 +300,52 @@ impl FunctionDeclaration {
             Some(ToolMode::Readonly) => SafetyClass::Readonly,
             Some(ToolMode::Mutating) => SafetyClass::Mutating,
             None => SafetyClass::Unclassified,
+        }
+    }
+
+    /// Enrich an agent tool declaration with the optional `permissions` parameter schema.
+    pub fn enrich_agent_permissions_schema(&mut self) {
+        if !self.agent {
+            return;
+        }
+        let props = self.parameters.properties.get_or_insert_with(IndexMap::new);
+        if !props.contains_key("permissions") {
+            if let Ok(schema) = serde_json::from_value::<JsonSchema>(json!({
+                "type": "object",
+                "description": "Optional permission contract for the delegated sub-agent. Cannot exceed orchestrator's own permissions.",
+                "properties": {
+                    "mask": {
+                        "type": "string",
+                        "enum": ["readonly", "mutating"],
+                        "description": "Execution capability mask: readonly (safe reads only) or mutating (may alter state)"
+                    },
+                    "ceiling": {
+                        "type": "string",
+                        "enum": ["safe", "reversible", "disruptive", "destructive"],
+                        "description": "Maximum autonomous blast-radius authority ceiling"
+                    }
+                }
+            })) {
+                props.insert("permissions".to_string(), schema);
+            }
+        }
+        if !props.contains_key("permissions_mask") {
+            if let Ok(schema) = serde_json::from_value::<JsonSchema>(json!({
+                "type": "string",
+                "enum": ["readonly", "mutating"],
+                "description": "Flat fallback for permissions.mask"
+            })) {
+                props.insert("permissions_mask".to_string(), schema);
+            }
+        }
+        if !props.contains_key("permissions_ceiling") {
+            if let Ok(schema) = serde_json::from_value::<JsonSchema>(json!({
+                "type": "string",
+                "enum": ["safe", "reversible", "disruptive", "destructive"],
+                "description": "Flat fallback for permissions.ceiling"
+            })) {
+                props.insert("permissions_ceiling".to_string(), schema);
+            }
         }
     }
 }
@@ -406,6 +468,126 @@ impl FunctionDeclaration {
             Some(ToolMode::Mutating) => StaticTier::Tier(BlastRadius::Disruptive),
             None => StaticTier::Unclassified,
         }
+    }
+}
+
+/// Strongly-typed delegation permissions contract (Backlog #6d, FR-6d.18).
+///
+/// Allows an orchestrator / parent agent to provision execution capabilities
+/// to a delegated sub-agent process at spawn time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DelegatedPermissions {
+    #[serde(default)]
+    pub mask: Option<String>, // "readonly" | "mutating"
+    #[serde(default)]
+    pub ceiling: Option<String>, // "safe" | "reversible" | "disruptive" | "destructive"
+}
+
+impl DelegatedPermissions {
+    /// Parse delegated permissions from tool call arguments.
+    ///
+    /// Accepts:
+    /// 1. Nested object: `permissions: { mask: "...", ceiling: "..." }`
+    /// 2. Flat fallback: `permissions_mask: "..."`, `permissions_ceiling: "..."`
+    ///
+    /// If neither is present, returns `None`.
+    pub fn parse_from_value(args: &Value) -> Option<Self> {
+        let val: Value = match args {
+            Value::String(s) => serde_json::from_str(s).ok()?,
+            _ => args.clone(),
+        };
+        let obj = val.as_object()?;
+
+        let mut perms: Option<DelegatedPermissions> = None;
+        if let Some(p_val) = obj.get("permissions") {
+            if let Ok(p) = serde_json::from_value::<DelegatedPermissions>(p_val.clone()) {
+                if p.mask.is_some() || p.ceiling.is_some() {
+                    perms = Some(p);
+                }
+            }
+        }
+
+        let flat_mask = obj
+            .get("permissions_mask")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let flat_ceiling = obj
+            .get("permissions_ceiling")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        if flat_mask.is_some() || flat_ceiling.is_some() {
+            let mut p = perms.unwrap_or_default();
+            if p.mask.is_none() {
+                p.mask = flat_mask;
+            }
+            if p.ceiling.is_none() {
+                p.ceiling = flat_ceiling;
+            }
+            perms = Some(p);
+        }
+
+        perms
+    }
+
+    /// Validate requested permissions against parent capabilities, clamping unknown values to safe floor.
+    ///
+    /// Fails with an error if:
+    /// - Child requests `mutating` when parent is `readonly`.
+    /// - Child requests a ceiling higher than parent ceiling.
+    /// - Child requests `catastrophic` ceiling (reserved to humans).
+    ///
+    /// Returns `(provisioned_mask, provisioned_ceiling)`.
+    pub fn validate_against_parent(
+        &self,
+        parent_is_readonly: bool,
+        parent_ceiling: crate::safety::AuthorityCeiling,
+    ) -> Result<(String, crate::safety::AuthorityCeiling)> {
+        let mask = match self.mask.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+            Some(ref m) if m == "mutating" => {
+                if parent_is_readonly {
+                    bail!("Parent runs under readonly capability mask and cannot provision mutating permission to sub-agent");
+                }
+                "mutating".to_string()
+            }
+            Some(ref m) if m == "readonly" => "readonly".to_string(),
+            // Unknown or omitted values clamp closed to safe floor
+            _ => "readonly".to_string(),
+        };
+
+        let ceiling = match self.ceiling.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+            Some(ref c) => match BlastRadius::from_str(c) {
+                Some(BlastRadius::Catastrophic) => {
+                    bail!("Catastrophic ceiling cannot be granted to autonomous sub-agents; reserved to humans");
+                }
+                Some(tier) => {
+                    if tier > parent_ceiling.tier() {
+                        bail!(
+                            "Requested authority ceiling '{}' exceeds parent authority ceiling '{}'",
+                            tier.as_str(),
+                            parent_ceiling.tier().as_str()
+                        );
+                    }
+                    crate::safety::AuthorityCeiling::UpTo(tier)
+                }
+                // Unknown values clamp closed to safe floor
+                None => crate::safety::AuthorityCeiling::MINIMAL,
+            },
+            None => crate::safety::AuthorityCeiling::MINIMAL,
+        };
+
+        Ok((mask, ceiling))
+    }
+
+    /// Resolve effective permissions for a delegation call.
+    /// If no permissions are specified, defaults strictly to the safe floor (`readonly`, `safe`).
+    pub fn resolve_for_call(
+        args: &Value,
+        parent_is_readonly: bool,
+        parent_ceiling: crate::safety::AuthorityCeiling,
+    ) -> Result<(String, crate::safety::AuthorityCeiling)> {
+        let requested = Self::parse_from_value(args).unwrap_or_default();
+        requested.validate_against_parent(parent_is_readonly, parent_ceiling)
     }
 }
 
@@ -1035,5 +1217,112 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(decl.static_tier(), StaticTier::Unclassified);
+    }
+
+    #[test]
+    fn delegated_permissions_parsing_nested_and_flat() {
+        let nested = json!({
+            "task": "do work",
+            "permissions": {
+                "mask": "mutating",
+                "ceiling": "reversible"
+            }
+        });
+        let p_nested = DelegatedPermissions::parse_from_value(&nested).unwrap();
+        assert_eq!(p_nested.mask.as_deref(), Some("mutating"));
+        assert_eq!(p_nested.ceiling.as_deref(), Some("reversible"));
+
+        let flat = json!({
+            "task": "do work",
+            "permissions_mask": "mutating",
+            "permissions_ceiling": "disruptive"
+        });
+        let p_flat = DelegatedPermissions::parse_from_value(&flat).unwrap();
+        assert_eq!(p_flat.mask.as_deref(), Some("mutating"));
+        assert_eq!(p_flat.ceiling.as_deref(), Some("disruptive"));
+
+        let str_args = json!("{\"permissions_mask\": \"readonly\", \"permissions_ceiling\": \"safe\"}");
+        let p_str = DelegatedPermissions::parse_from_value(&str_args).unwrap();
+        assert_eq!(p_str.mask.as_deref(), Some("readonly"));
+        assert_eq!(p_str.ceiling.as_deref(), Some("safe"));
+    }
+
+    #[test]
+    fn delegated_permissions_validation_and_clamping() {
+        use crate::safety::AuthorityCeiling;
+
+        // Valid sub-agent provisioning within parent limits
+        let valid = DelegatedPermissions {
+            mask: Some("mutating".into()),
+            ceiling: Some("reversible".into()),
+        };
+        let (mask, ceiling) = valid
+            .validate_against_parent(false, AuthorityCeiling::UpTo(BlastRadius::Disruptive))
+            .unwrap();
+        assert_eq!(mask, "mutating");
+        assert_eq!(ceiling, AuthorityCeiling::UpTo(BlastRadius::Reversible));
+
+        // Readonly parent cannot provision mutating mask
+        let mutating_req = DelegatedPermissions {
+            mask: Some("mutating".into()),
+            ceiling: Some("safe".into()),
+        };
+        assert!(mutating_req
+            .validate_against_parent(true, AuthorityCeiling::UpTo(BlastRadius::Disruptive))
+            .is_err());
+
+        // Sub-agent cannot exceed parent ceiling
+        let over_ceiling = DelegatedPermissions {
+            mask: Some("mutating".into()),
+            ceiling: Some("destructive".into()),
+        };
+        assert!(over_ceiling
+            .validate_against_parent(false, AuthorityCeiling::UpTo(BlastRadius::Reversible))
+            .is_err());
+
+        // Catastrophic ceiling is reserved to humans
+        let cat_req = DelegatedPermissions {
+            mask: Some("mutating".into()),
+            ceiling: Some("catastrophic".into()),
+        };
+        assert!(cat_req
+            .validate_against_parent(false, AuthorityCeiling::UpTo(BlastRadius::Catastrophic))
+            .is_err());
+
+        // Malformed/unknown values clamp closed to safe floor
+        let malformed = DelegatedPermissions {
+            mask: Some("unlimited_power".into()),
+            ceiling: Some("infinite".into()),
+        };
+        let (clamp_m, clamp_c) = malformed
+            .validate_against_parent(false, AuthorityCeiling::UpTo(BlastRadius::Disruptive))
+            .unwrap();
+        assert_eq!(clamp_m, "readonly");
+        assert_eq!(clamp_c, AuthorityCeiling::MINIMAL);
+    }
+
+    #[test]
+    fn enrich_agent_permissions_schema_adds_properties() {
+        let mut decl = FunctionDeclaration {
+            name: "coder".into(),
+            description: "Agent".into(),
+            parameters: serde_json::from_value(json!({
+                "type": "object",
+                "properties": {
+                    "task": {"type": "string"}
+                }
+            })).unwrap(),
+            agent: true,
+            output: None,
+            mode: None,
+            risk: None,
+            reversible: None,
+            reversible_via: None,
+        };
+        decl.enrich_agent_permissions_schema();
+        let props = decl.parameters.properties.unwrap();
+        assert!(props.contains_key("permissions"));
+        assert!(props.contains_key("permissions_mask"));
+        assert!(props.contains_key("permissions_ceiling"));
     }
 }

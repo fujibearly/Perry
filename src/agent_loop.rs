@@ -151,6 +151,10 @@ pub enum AgentLoopEvent {
         mechanism: String,
         stepped_down_to: String,
     },
+    CapabilityBlocked {
+        name: String,
+        unwound: bool,
+    },
 }
 
 /// Thread-safe progress tracker for the agent loop.
@@ -1545,6 +1549,26 @@ async fn handle_escalation_request(
         );
     }
 
+    // Defense-in-depth (FR-6d.21): capability mask cannot be elevated in-flight over mTLS
+    if esc.reason == "capability_denied" {
+        if show_trace {
+            eprintln!(
+                "  [supervisor] rejected in-flight capability elevation for child '{}' tool '{}'",
+                hello.agent_id, tool_name
+            );
+        }
+        return crate::safety::VerdictMsg {
+            escalation_id,
+            decision: crate::safety::VerdictDecision::Halt,
+            added_context: Some(serde_json::json!({
+                "error": {
+                    "type": "capability_denied",
+                    "message": "Capability mask is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit mutating permission contract."
+                }
+            })),
+        };
+    }
+
     // 1. Protected Policy Check (Supervisor's own non-pardonable deterministic policy)
     let policy_path = config.read().safety.policy_file.clone();
     let policy = match policy_path {
@@ -1837,15 +1861,11 @@ async fn eval_single_tool(
     risk_cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
     progress: Option<&AgentLoopProgress>,
 ) -> Result<serde_json::Value> {
-    // Backlog #6a: capability-mask gate.
+    // Backlog #6a: capability-mask gate — a hard process sandbox boundary.
+    // NO in-flight escalation over mTLS (a mask is a static permission, not an authorization).
+    // Return the denial immediately so the child loop can unwind and report `permission_blocked`.
     if let Some(denied) = capability_denied_result(config, &call.name) {
-        if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-            if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, "capability_denied", progress).await {
-                return Ok(res);
-            }
-        } else {
-            return Ok(denied);
-        }
+        return Ok(denied);
     }
 
     let mut proven_reversible_applied = false;
@@ -2033,18 +2053,30 @@ async fn eval_agent_tool_subprocess(
     cmd.env("AICHAT_AGENT_DEPTH", (current_depth + 1).to_string());
     cmd.env("AICHAT_AGENT_NAME", &agent_name);
 
-    // Backlog #6a: every spawned sub-agent inherits a read-only capability mask.
-    // Sub-agents perform triage in parallel; only the unmasked top-level process
-    // may actuate `mutating` tools ("triage in parallel, actuate in sequence").
-    // The mask is monotonic — once set it is never cleared for descendants — so a
-    // sub-sub-agent stays masked regardless of nesting.
-    cmd.env("AICHAT_CAPABILITY_MASK", "readonly");
+    // Backlog #6d (FR-6d.18): hierarchical upfront permission provisioning.
+    let parent_is_readonly = under_readonly_mask();
+    let parent_ceiling = current_authority_ceiling(config);
+    let (provisioned_mask, provisioned_ceiling) = match crate::function::DelegatedPermissions::resolve_for_call(
+        &call.arguments,
+        parent_is_readonly,
+        parent_ceiling,
+    ) {
+        Ok(perms) => perms,
+        Err(err) => {
+            return Ok((
+                json!({
+                    "error": {
+                        "type": "delegation_permission_exceeded",
+                        "message": format!("Permission provisioning failed: {err}")
+                    }
+                }),
+                0.0,
+            ));
+        }
+    };
 
-    // Backlog #6b: propagate the authority ceiling down the spawn chain. The child
-    // inherits this agent's current ceiling; a parent may only *lower* it, never
-    // raise it (the child cannot grant itself more authority than its parent has).
-    let child_ceiling = current_authority_ceiling(config);
-    cmd.env("AICHAT_AUTHORITY_CEILING", child_ceiling.tier().as_str());
+    cmd.env("AICHAT_CAPABILITY_MASK", &provisioned_mask);
+    cmd.env("AICHAT_AUTHORITY_CEILING", provisioned_ceiling.tier().as_str());
 
     // Backlog #6d: pass escalation listener connection parameters to child
     if let Ok(Some(listener)) = get_or_init_parent_listener(config).await {
@@ -2075,6 +2107,46 @@ async fn eval_agent_tool_subprocess(
 
     if output.status.success() {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let parsed_json = serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .or_else(|| {
+                text.rfind("{\"status\":").and_then(|idx| {
+                    serde_json::from_str::<serde_json::Value>(&text[idx..]).ok()
+                })
+            });
+        if let Some(val) = parsed_json {
+            if val.get("status").and_then(|s| s.as_str()) == Some("permission_blocked") {
+                let attempted_tool = val
+                    .get("attempted_tool")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("unknown");
+                let reason = val
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("capability_denied");
+                let suggested_ceiling = val
+                    .get("required_permission")
+                    .and_then(|p| p.get("ceiling"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("disruptive");
+                let guidance = format!(
+                    "Sub-agent '{}' was blocked by its read-only permission mask when attempting '{}' (reason: {}). \
+                     Pre-mutation entries were unwound. If this action is authorized and within your ceiling, \
+                     re-delegate to '{}' with permissions: {{ mask: \"mutating\", ceiling: \"{}\" }} \
+                     (or flat args permissions_mask=\"mutating\", permissions_ceiling=\"{}\").",
+                    agent_name, attempted_tool, reason, agent_name, suggested_ceiling, suggested_ceiling
+                );
+                return Ok((
+                    json!({
+                        "status": "permission_blocked",
+                        "agent": agent_name,
+                        "details": val,
+                        "guidance": guidance,
+                    }),
+                    sub_cost,
+                ));
+            }
+        }
         Ok((json!({"output": text}), sub_cost))
     } else {
         let message = if stderr_text.trim().is_empty() {
@@ -2435,6 +2507,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     // return an error immediately without execution.
     let mut tool_failure_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     let mut tripped_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut redelegation_counts: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
 
     // #6c: a monotonic, raise-only risk-verdict cache shared across all turns of
     // this run, so an identical action assessed once is not re-evaluated (and so a
@@ -2548,20 +2621,39 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
 
         // Circuit breaker: separate tripped calls from executable calls
         let (tripped_calls, executable_calls): (Vec<ToolCall>, Vec<ToolCall>) =
-            real_calls.into_iter().partition(|c| tripped_tools.contains(&c.name));
+            real_calls.into_iter().partition(|c| {
+                if tripped_tools.contains(&c.name) {
+                    return true;
+                }
+                if call_targets_agent(params.config, &c.name) {
+                    let task_key = c.arguments.get("task").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if redelegation_counts.get(&(c.name.clone(), task_key)).copied().unwrap_or(0) >= 2 {
+                        return true;
+                    }
+                }
+                false
+            });
 
         // Return immediate errors for tripped tools
         for call in &tripped_calls {
+            let msg = if call_targets_agent(params.config, &call.name) {
+                format!(
+                    "Sub-agent '{}' re-delegation circuit breaker tripped after repeated permission blocks on the same task. Escalate to the human or change your delegation strategy.",
+                    call.name
+                )
+            } else {
+                format!(
+                    "Tool '{}' has been disabled after {} consecutive failures. \
+                     Use a different tool or approach.",
+                    call.name, CIRCUIT_BREAKER_THRESHOLD
+                )
+            };
             tool_results.push(ToolResult::new(
                 call.clone(),
                 json!({
                     "error": {
                         "type": "circuit_breaker",
-                        "message": format!(
-                            "Tool '{}' has been disabled after {} consecutive failures. \
-                             Use a different tool or approach.",
-                            call.name, CIRCUIT_BREAKER_THRESHOLD
-                        )
+                        "message": msg
                     }
                 }),
             ));
@@ -2581,7 +2673,95 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             // Update circuit breaker state based on results
             update_circuit_breaker(&real_results, &mut tool_failure_counts, &mut tripped_tools);
 
+            for res in &real_results {
+                if res.output.get("status").and_then(|s| s.as_str()) == Some("permission_blocked") {
+                    let task_key = res.call.arguments.get("task").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    let count = redelegation_counts.entry((res.call.name.clone(), task_key)).or_insert(0);
+                    *count += 1;
+                }
+            }
+
             tool_results.extend(real_results);
+        }
+
+        // Backlog #6d (FR-6d.19): If running under a readonly capability mask and a mutating
+        // tool was blocked, halt actuation immediately, unwind durable journal entries,
+        // and exit cleanly with status: "permission_blocked".
+        if under_readonly_mask() {
+            if let Some(denied_res) = tool_results.iter().find(|r| {
+                r.output
+                    .get("error")
+                    .and_then(|e| e.get("type"))
+                    .and_then(|t| t.as_str())
+                    == Some("capability_denied")
+            }) {
+                let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
+                let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "agent".into());
+                let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&params.config.read().safety.escalation_dir);
+                let unwound = if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
+                    journal.replay_last().await.is_ok()
+                } else {
+                    false
+                };
+
+                params.progress.emit(AgentLoopEvent::CapabilityBlocked {
+                    name: denied_res.call.name.clone(),
+                    unwound,
+                });
+
+                let tool_decl = find_tool_declaration(params.config, &denied_res.call.name);
+                let required_ceiling = tool_decl
+                    .as_ref()
+                    .and_then(|d| d.risk)
+                    .map(|r| r.as_str())
+                    .unwrap_or("safe");
+
+                let payload = json!({
+                    "status": "permission_blocked",
+                    "attempted_tool": denied_res.call.name,
+                    "arguments": denied_res.call.arguments,
+                    "required_permission": {
+                        "mask": "mutating",
+                        "ceiling": required_ceiling,
+                    },
+                    "reason": "capability_denied",
+                    "rollback_executed": unwound,
+                    "triage_summary": output.text,
+                });
+
+                let payload_str = payload.to_string();
+
+                if let Some(client) = get_or_init_child_client().await {
+                    let _ = client
+                        .send_result(
+                            Ok(payload.clone()),
+                            params.progress.cost(),
+                        )
+                        .await;
+                } else if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
+                    let depth = std::env::var("AICHAT_AGENT_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let _ = crate::escalation::notify_parent_result(
+                        &parent_info,
+                        &agent_id,
+                        depth,
+                        Ok(payload.clone()),
+                        params.progress.cost(),
+                    )
+                    .await;
+                }
+
+                println!("{payload_str}");
+
+                params
+                    .config
+                    .write()
+                    .after_chat_completion(&current_input, &payload_str, &tool_results)?;
+
+                return Ok(AgentLoopOutput {
+                    usage: total_usage,
+                    final_text: payload_str,
+                });
+            }
         }
 
         // If all real calls were tripped and no executable calls ran, give the model
@@ -2773,6 +2953,11 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
         } => {
             Some(format!(
                 "{pid} preflight remediation: {name} (via {mechanism} -> stepped down to {stepped_down_to})"
+            ))
+        }
+        AgentLoopEvent::CapabilityBlocked { name, unwound } => {
+            Some(format!(
+                "{pid} capability blocked: {name} (unwound recorded entries: {unwound})"
             ))
         }
     }
@@ -3375,6 +3560,13 @@ agent_loop:
         };
         let line = format_trace_event(&event, pid).unwrap();
         assert_eq!(line, "12345 rollback journal: recorded fs_write (entry-abc-123)");
+
+        let event = AgentLoopEvent::CapabilityBlocked {
+            name: "fs_write".to_string(),
+            unwound: true,
+        };
+        let line = format_trace_event(&event, pid).unwrap();
+        assert_eq!(line, "12345 capability blocked: fs_write (unwound recorded entries: true)");
     }
 
     #[test]
@@ -4959,6 +5151,33 @@ agent_loop:
             None => std::env::remove_var("AICHAT_ROLES_DIR"),
         }
         let _ = std::fs::remove_dir_all(&empty_dir);
+    }
+
+    #[tokio::test]
+    async fn handle_escalation_request_rejects_capability_denied_defense_in_depth() {
+        let config = config_with_tiers();
+        let hello = crate::safety::HelloMsg {
+            agent_id: "child-coder".to_string(),
+            depth: 1,
+            capabilities: vec![],
+        };
+        let esc = crate::safety::EscalationMsg {
+            id: "esc-cap-1".to_string(),
+            agent_id: "child-coder".to_string(),
+            tree_id: "tree-test".to_string(),
+            action: json!({"tool": "write_file", "arguments": {"path": "/tmp/test.txt"}}),
+            reason: "capability_denied".to_string(),
+            enrichment: json!({}),
+            blast_radius: crate::function::BlastRadius::Disruptive,
+            reversible: false,
+            challenge: "chall".to_string(),
+        };
+
+        let verdict = handle_escalation_request(&config, &hello, esc).await;
+        assert_eq!(verdict.decision, crate::safety::VerdictDecision::Halt);
+        assert!(verdict.added_context.is_some());
+        let err_obj = verdict.added_context.unwrap();
+        assert_eq!(err_obj["error"]["type"], "capability_denied");
     }
 }
 
