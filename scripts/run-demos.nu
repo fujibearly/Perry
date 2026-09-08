@@ -29,6 +29,13 @@
 #   - Demo 3  : flash may format the plan differently or use fs_patch vs fs_write.
 #   - Demo 6  : tmux pane-title update needs a real interactive controlling /dev/tty.
 #   - Demo 9  : flash phrasing may omit the written file path in its summary.
+#
+# NOTE on Interactive Prompts vs Piped Invocations:
+#   Testing commands that require user interaction (e.g., mutating tools like
+#   `fs_write` that prompt confirmation `Write '<path>'? [Y/n]`) will get stuck
+#   indefinitely waiting on stdin when run in background or subshell runners.
+#   Piping standard input (e.g. `"" | with-env ...` or `echo y | aichat ...`) avoids
+#   the issue by providing an immediate response or EOF.
 
 # ─── Configuration ────────────────────────────────────────────────────────────
 
