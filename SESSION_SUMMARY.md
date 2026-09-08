@@ -82,5 +82,14 @@ This repository maintains continuous, chronological session handoff summaries do
      * **Verification:** Suite **446 pass, 0 fail** (438 unit + 5 catalog + 3 integration, +20 tests from #6d), `cargo clippy --all-targets -- -D warnings` with 0 warnings, **16/16 demos pass** (`scripts/run-demos.nu`, with Demo 16 verifying genuine subprocess offline fail-closed and 0600 journal durability).
      * **State:** on branch `feat/tool-safety-6d` @ `f57a7e6`; local-only (nothing pushed).
 
-
-
+8. **Session 8: %assess-risk% Code-Aware Safety Evaluator — Semantic Declarations & Script Implementation Context**
+   * **Period:** `2026-09-07`
+   * **Focus Areas:**
+     * **Code-Aware Evaluator Overlay (#6c Enhancement):** Eliminated black-box tool evaluation where the `%assess-risk%` LLM only saw tool names and arguments without knowing what the tool actually does.
+     * **Dynamic Tool Resolution:** Added `resolve_tool_implementation()` in `src/agent_loop.rs` to dynamically resolve local tool scripts (`tools/*.{sh,py,js,...}`), follow `bin/` symlinks, detect binary vs UTF-8 files, and enforce a 4KB budget.
+     * **Semantic Header Extraction:** Added `parse_script_header_comments()` and `extract_declaration_context()` in `src/safety.rs` to extract `@describe` functional docstrings, multi-line comment notes, `@option` parameter definitions, and `@env` variables.
+     * **Enriched Context Schema:** Updated `build_evaluator_context()` in `src/safety.rs` to pass `declaration`, `implementation`, `invocation` preview, and `arguments`.
+     * **Evaluator Prompt Alignment:** Updated `assets/roles/%assess-risk%.md` to instruct the evaluator to contrast declared `@describe` intent against the actual script mechanics, trace argument flow (e.g. `eval`, `rm`), detect hardcoded side effects, and verify guards (`guard_operation.sh`).
+     * **Live Verification & Tracing:** Added `[%assess-risk% evaluator response]` trace logging when `show_trace` is enabled. Verified with live `execute_command` call with Gemini 2.5 Flash, confirming the model accurately analyzes the `eval` execution mechanics.
+     * **Verification:** Suite **451 pass, 0 fail** (443 unit + 5 catalog + 3 integration).
+     * **State:** on branch `feat/tool-safety-6d`; local-only (nothing pushed).

@@ -535,29 +535,295 @@ fn extract_json_object(raw: &str) -> Option<&str> {
     None
 }
 
-/// Build the **minimal** context payload shown to the evaluator (FR-6c.3).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolSafetyMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reversible: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reversible_via: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ParameterDoc {
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub param_type: Option<String>,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub required: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolDeclarationContext {
+    pub description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub functional_notes: Option<String>,
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub parameters: indexmap::IndexMap<String, ParameterDoc>,
+    #[serde(default, skip_serializing_if = "indexmap::IndexMap::is_empty")]
+    pub environment: indexmap::IndexMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<ToolSafetyMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ToolImplementation {
+    Script {
+        path: String,
+        language: String,
+        source: String,
+        truncated: bool,
+    },
+    Binary {
+        path: String,
+    },
+    Mcp {
+        server: String,
+        tool: String,
+    },
+    Builtin,
+    Unknown,
+}
+
+impl ToolImplementation {
+    pub fn source(&self) -> Option<&str> {
+        match self {
+            ToolImplementation::Script { source, .. } => Some(source.as_str()),
+            _ => None,
+        }
+    }
+}
+
+/// Parse functional description, commentary notes, environment variables, and options
+/// from script header comments (e.g. argc-annotated bash, python, or javascript scripts).
+pub fn parse_script_header_comments(
+    src: &str,
+) -> (
+    String,
+    String,
+    indexmap::IndexMap<String, String>,
+    indexmap::IndexMap<String, ParameterDoc>,
+) {
+    let mut desc = String::new();
+    let mut notes_lines: Vec<String> = Vec::new();
+    let mut env_map = indexmap::IndexMap::new();
+    let mut options = indexmap::IndexMap::new();
+
+    for (idx, line) in src.lines().enumerate() {
+        if idx > 80 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with("#!") {
+            continue;
+        }
+        if !trimmed.starts_with('#') {
+            if !trimmed.is_empty() && idx > 5 {
+                break;
+            }
+            continue;
+        }
+
+        let comment = trimmed.trim_start_matches('#').trim();
+        if let Some(rest) = comment.strip_prefix("@describe") {
+            let d = rest.trim();
+            if !d.is_empty() {
+                desc = d.to_string();
+            }
+        } else if let Some(rest) = comment.strip_prefix("@env") {
+            let env_str = rest.trim();
+            if let Some((k_part, desc_part)) = env_str.split_once(char::is_whitespace) {
+                let desc_trimmed = desc_part.trim();
+                if let Some((var, default_val)) = k_part.split_once('=') {
+                    env_map.insert(
+                        var.to_string(),
+                        format!("default: {} - {}", default_val, desc_trimmed),
+                    );
+                } else {
+                    env_map.insert(k_part.to_string(), desc_trimmed.to_string());
+                }
+            } else if let Some((var, default_val)) = env_str.split_once('=') {
+                env_map.insert(var.to_string(), format!("default: {}", default_val));
+            } else if !env_str.is_empty() {
+                env_map.insert(env_str.to_string(), String::new());
+            }
+        } else if let Some(rest) = comment.strip_prefix("@option") {
+            let opt_str = rest.trim();
+            let words: Vec<&str> = opt_str.split_whitespace().collect();
+            let mut flag_name = None;
+            let mut required = false;
+            let mut desc_words = Vec::new();
+            for word in words {
+                if word.starts_with("--") {
+                    let mut name = word.trim_start_matches('-');
+                    if name.ends_with('!') {
+                        required = true;
+                        name = &name[..name.len() - 1];
+                    }
+                    flag_name = Some(name.replace('-', "_"));
+                } else if flag_name.is_some() {
+                    desc_words.push(word);
+                }
+            }
+            if let Some(name) = flag_name {
+                options.insert(
+                    name,
+                    ParameterDoc {
+                        param_type: Some("string".into()),
+                        description: desc_words.join(" "),
+                        required,
+                    },
+                );
+            }
+        } else if !comment.starts_with('@') && !comment.is_empty() {
+            notes_lines.push(comment.to_string());
+        }
+    }
+
+    let notes = notes_lines.join("\n");
+    (desc, notes, env_map, options)
+}
+
+/// Extract enriched declaration context from a [`FunctionDeclaration`] and/or raw script source.
+pub fn extract_declaration_context(
+    decl: Option<&FunctionDeclaration>,
+    script_source: Option<&str>,
+) -> Option<ToolDeclarationContext> {
+    if decl.is_none() && script_source.is_none() {
+        return None;
+    }
+
+    let mut description = decl.map(|d| d.description.trim().to_string()).unwrap_or_default();
+    let mut functional_notes: Option<String> = None;
+    let mut parameters: indexmap::IndexMap<String, ParameterDoc> = indexmap::IndexMap::new();
+    let mut environment: indexmap::IndexMap<String, String> = indexmap::IndexMap::new();
+    let mut safety: Option<ToolSafetyMeta> = None;
+
+    if let Some(d) = decl {
+        if let Some(props) = &d.parameters.properties {
+            for (name, prop) in props {
+                let required = d
+                    .parameters
+                    .required
+                    .as_ref()
+                    .map(|reqs| reqs.contains(name))
+                    .unwrap_or(false);
+                parameters.insert(
+                    name.clone(),
+                    ParameterDoc {
+                        param_type: prop.type_value.clone(),
+                        description: prop.description.clone().unwrap_or_default(),
+                        required,
+                    },
+                );
+            }
+        }
+        safety = Some(ToolSafetyMeta {
+            mode: d.mode.map(|m| format!("{:?}", m).to_lowercase()),
+            risk: d.risk.map(|r| r.as_str().to_string()),
+            reversible: d.reversible,
+            reversible_via: d.reversible_via.clone(),
+        });
+    }
+
+    if let Some(src) = script_source {
+        let (parsed_desc, notes, env_map, parsed_options) = parse_script_header_comments(src);
+        if description.is_empty() {
+            description = parsed_desc;
+        }
+        if !notes.is_empty() {
+            functional_notes = Some(notes);
+        }
+        for (k, v) in env_map {
+            environment.insert(k, v);
+        }
+        if parameters.is_empty() {
+            for (name, doc) in parsed_options {
+                parameters.insert(name, doc);
+            }
+        }
+    }
+
+    if description.is_empty()
+        && functional_notes.is_none()
+        && parameters.is_empty()
+        && environment.is_empty()
+        && safety.is_none()
+    {
+        return None;
+    }
+
+    Some(ToolDeclarationContext {
+        description,
+        functional_notes,
+        parameters,
+        environment,
+        safety,
+    })
+}
+
+/// Build the context payload shown to the evaluator (FR-6c.3).
 ///
-/// This is the ONLY information the `%assess-risk%` role ever sees. It deliberately
-/// excludes the plan, conversation history, and any other agent state — both to
-/// keep the evaluator cheap and, more importantly, to shrink the surface area for
-/// prompt injection: the model judges one action in isolation and cannot be
-/// steered by surrounding narrative it never receives.
+/// The evaluator role receives the action's identity and arguments alongside
+/// the tool's declaration (functional description from `@describe`, parameter schemas,
+/// and environment), its local implementation source code / execution mechanism,
+/// and the resolved invocation command line.
 pub fn build_evaluator_context(
     tool_name: &str,
     arguments: &serde_json::Value,
     static_tier: BlastRadius,
     proven_reversible: bool,
     intent: &str,
+    declaration: Option<&ToolDeclarationContext>,
+    implementation: Option<&ToolImplementation>,
+    invocation: Option<&str>,
 ) -> String {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "tool": tool_name,
         "arguments": arguments,
         "static_tier": static_tier.as_str(),
         "reversible": proven_reversible,
         "intent": intent,
     });
+    if let Some(decl) = declaration {
+        if let Ok(val) = serde_json::to_value(decl) {
+            payload["declaration"] = val;
+        }
+    }
+    if let Some(imp) = implementation {
+        if let Ok(val) = serde_json::to_value(imp) {
+            payload["implementation"] = val;
+        }
+    }
+    if let Some(inv) = invocation {
+        payload["invocation"] = serde_json::json!(inv);
+    }
     // Pretty-print so the single action is legible; it is small by construction.
     serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
+}
+
+#[cfg(test)]
+pub fn build_evaluator_context_simple(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    static_tier: BlastRadius,
+    proven_reversible: bool,
+    intent: &str,
+) -> String {
+    build_evaluator_context(
+        tool_name,
+        arguments,
+        static_tier,
+        proven_reversible,
+        intent,
+        None,
+        None,
+        None,
+    )
 }
 
 /// Apply the **stricter-only clamp** (FR-6c.5) — the central invariant of #6c:
@@ -1426,15 +1692,15 @@ mod tests {
         assert_eq!(extract_json_object("{unbalanced"), None);
     }
 
-    // --- Backlog #6c: minimal-context builder ---
+    // --- Backlog #6c: minimal-context builder and enriched evaluator context ---
 
     #[test]
     fn evaluator_context_contains_only_the_allowed_fields() {
         let args = serde_json::json!({"path": "/etc/hosts", "content": "x"});
-        let ctx = build_evaluator_context("fs_write", &args, Disruptive, false, "update hosts");
+        let ctx = build_evaluator_context_simple("fs_write", &args, Disruptive, false, "update hosts");
         let parsed: serde_json::Value = serde_json::from_str(&ctx).unwrap();
         let obj = parsed.as_object().unwrap();
-        // Exactly the five whitelisted keys — no plan, no history, nothing else.
+        // Exactly the five whitelisted keys when no extra context is supplied.
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort_unstable();
         assert_eq!(keys, vec!["arguments", "intent", "reversible", "static_tier", "tool"]);
@@ -1442,6 +1708,102 @@ mod tests {
         assert_eq!(obj["static_tier"], "disruptive");
         assert_eq!(obj["reversible"], false);
         assert_eq!(obj["intent"], "update hosts");
+    }
+
+    #[test]
+    fn evaluator_context_with_declaration_and_implementation() {
+        let args = serde_json::json!({"command": "git status"});
+        let mut params = indexmap::IndexMap::new();
+        params.insert(
+            "command".to_string(),
+            ParameterDoc {
+                param_type: Some("string".into()),
+                description: "The command to execute.".into(),
+                required: true,
+            },
+        );
+        let decl = ToolDeclarationContext {
+            description: "Execute the shell command.".into(),
+            functional_notes: Some("Runs in a bash subshell.".into()),
+            parameters: params,
+            environment: indexmap::IndexMap::new(),
+            safety: Some(ToolSafetyMeta {
+                mode: Some("mutating".into()),
+                risk: Some("destructive".into()),
+                reversible: Some(false),
+                reversible_via: None,
+            }),
+        };
+        let implementation = ToolImplementation::Script {
+            path: "tools/execute_command.sh".into(),
+            language: "bash".into(),
+            source: "eval \"$argc_command\"".into(),
+            truncated: false,
+        };
+        let invocation = "execute_command --command 'git status'";
+        let ctx = build_evaluator_context(
+            "execute_command",
+            &args,
+            Destructive,
+            false,
+            "check repo status",
+            Some(&decl),
+            Some(&implementation),
+            Some(invocation),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&ctx).unwrap();
+        assert_eq!(parsed["tool"], "execute_command");
+        assert_eq!(parsed["declaration"]["description"], "Execute the shell command.");
+        assert_eq!(parsed["declaration"]["functional_notes"], "Runs in a bash subshell.");
+        assert_eq!(parsed["declaration"]["parameters"]["command"]["required"], true);
+        assert_eq!(parsed["implementation"]["type"], "script");
+        assert_eq!(parsed["implementation"]["source"], "eval \"$argc_command\"");
+        assert_eq!(parsed["invocation"], invocation);
+    }
+
+    #[test]
+    fn parse_script_header_comments_extracts_all_metadata() {
+        let script = r#"#!/usr/bin/env bash
+set -e
+
+# @describe Summarize text content using a fast, cheap local LLM call.
+# @meta risk safe
+# @meta reversible true
+# When used as a pipe target, receives input via --input.
+# Uses Gemini Flash for cost-effective summarization.
+
+# @option --input! The text content to summarize
+
+# @env SUMMARIZE_MODEL=gemini:gemini-3.5-flash The model to use for summarization
+# @env LLM_OUTPUT=/dev/stdout The output path
+
+main() {
+    echo "test"
+}
+"#;
+        let (desc, notes, env_map, options) = parse_script_header_comments(script);
+        assert_eq!(desc, "Summarize text content using a fast, cheap local LLM call.");
+        assert!(notes.contains("When used as a pipe target"));
+        assert!(notes.contains("Uses Gemini Flash"));
+        assert_eq!(options.len(), 1);
+        assert_eq!(options["input"].required, true);
+        assert_eq!(options["input"].description, "The text content to summarize");
+        assert_eq!(env_map.len(), 2);
+        assert!(env_map["SUMMARIZE_MODEL"].contains("gemini-3.5-flash"));
+        assert!(env_map["LLM_OUTPUT"].contains("/dev/stdout"));
+    }
+
+    #[test]
+    fn extract_declaration_context_merges_decl_and_script() {
+        let script = r#"#!/usr/bin/env bash
+# @describe Extracted description
+# Note line 1
+# @env MY_VAR=1 Test var
+"#;
+        let ctx = extract_declaration_context(None, Some(script)).expect("must extract context");
+        assert_eq!(ctx.description, "Extracted description");
+        assert_eq!(ctx.functional_notes.as_deref(), Some("Note line 1"));
+        assert_eq!(ctx.environment.get("MY_VAR").map(|s| s.as_str()), Some("default: 1 - Test var"));
     }
 
     // --- Backlog #6c: stricter-only clamp ---

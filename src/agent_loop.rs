@@ -10,7 +10,7 @@ use crate::client::{
     call_chat_completions_raw, call_chat_completions_streaming_raw, ChatCompletionsOutput,
     TokenUsage,
 };
-use crate::config::{GlobalConfig, Input, RoleLike};
+use crate::config::{Config, GlobalConfig, Input, RoleLike};
 use crate::escalation::EscalationTransport;
 use crate::function::{FunctionDeclaration, JsonSchema, ToolCall, ToolResult};
 use crate::utils::*;
@@ -446,6 +446,195 @@ fn tool_tier_and_reversibility(
     }
 }
 
+/// Find a tool declaration from agent functions or global functions.
+fn find_tool_declaration(
+    config: &GlobalConfig,
+    tool_name: &str,
+) -> Option<crate::function::FunctionDeclaration> {
+    let config_read = config.read();
+    config_read
+        .agent
+        .as_ref()
+        .and_then(|a| a.functions().find(tool_name))
+        .or_else(|| config_read.functions.find(tool_name))
+        .cloned()
+}
+
+/// Resolve the underlying script implementation or execution metadata for a tool.
+fn resolve_tool_implementation(
+    config: &GlobalConfig,
+    tool_name: &str,
+) -> crate::safety::ToolImplementation {
+    use crate::safety::ToolImplementation;
+
+    #[cfg(feature = "mcp")]
+    {
+        let mcp_info = {
+            let config_read = config.read();
+            config_read
+                .mcp_tools
+                .get(tool_name)
+                .map(|e| (e.server_name.clone(), e.original_name.clone()))
+        };
+        if let Some((server, tool)) = mcp_info {
+            return ToolImplementation::Mcp { server, tool };
+        }
+    }
+
+    let mut candidate_paths: Vec<std::path::PathBuf> = Vec::new();
+    let config_read = config.read();
+
+    // Agent tools directory
+    if let Some(agent) = &config_read.agent {
+        let agent_tools_dir = Config::agent_functions_dir(agent.name()).join("tools");
+        if agent_tools_dir.exists() {
+            for ext in &["sh", "py", "js", "bash", "nu", "rb"] {
+                candidate_paths.push(agent_tools_dir.join(format!("{tool_name}.{ext}")));
+            }
+            candidate_paths.push(agent_tools_dir.join(tool_name));
+        }
+        let agent_bin_file = Config::agent_functions_dir(agent.name()).join("bin").join(tool_name);
+        if agent_bin_file.exists() {
+            candidate_paths.push(agent_bin_file);
+        }
+    }
+
+    // Global functions tools directory
+    let functions_tools_dir = Config::functions_dir().join("tools");
+    if functions_tools_dir.exists() {
+        for ext in &["sh", "py", "js", "bash", "nu", "rb"] {
+            candidate_paths.push(functions_tools_dir.join(format!("{tool_name}.{ext}")));
+        }
+        candidate_paths.push(functions_tools_dir.join(tool_name));
+    }
+
+    // Global functions bin directory
+    let functions_bin_file = Config::functions_bin_dir().join(tool_name);
+    if functions_bin_file.exists() {
+        candidate_paths.push(functions_bin_file);
+    }
+    drop(config_read);
+
+    for path in candidate_paths {
+        if !path.exists() {
+            continue;
+        }
+
+        let resolved_path = if path.is_symlink() {
+            if let Ok(target) = std::fs::read_link(&path) {
+                let target_str = target.to_string_lossy();
+                if target_str.contains("run-tool.") {
+                    if let Some(parent) = path.parent().and_then(|p| p.parent()) {
+                        let tools_dir = parent.join("tools");
+                        let mut found = None;
+                        for ext in &["sh", "py", "js", "bash", "nu", "rb"] {
+                            let p = tools_dir.join(format!("{tool_name}.{ext}"));
+                            if p.exists() {
+                                found = Some(p);
+                                break;
+                            }
+                        }
+                        found.unwrap_or(path)
+                    } else {
+                        path
+                    }
+                } else if let Ok(canonical) = path.canonicalize() {
+                    canonical
+                } else {
+                    path
+                }
+            } else {
+                path
+            }
+        } else {
+            path
+        };
+
+        if !resolved_path.is_file() {
+            continue;
+        }
+
+        const BUDGET: usize = 4096;
+        if let Ok(bytes) = std::fs::read(&resolved_path) {
+            let check_len = bytes.len().min(512);
+            if bytes[..check_len].contains(&0) {
+                return ToolImplementation::Binary {
+                    path: resolved_path.display().to_string(),
+                };
+            }
+
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                let language = match resolved_path.extension().and_then(|e| e.to_str()) {
+                    Some("sh" | "bash") => "bash".to_string(),
+                    Some("py") => "python".to_string(),
+                    Some("js") => "javascript".to_string(),
+                    Some("nu") => "nushell".to_string(),
+                    Some(other) => other.to_string(),
+                    None => "text".to_string(),
+                };
+
+                let (source, truncated) = if bytes.len() > BUDGET {
+                    let mut end = BUDGET;
+                    while end > 0 && !text.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    (text[..end].to_string(), true)
+                } else {
+                    (text.to_string(), false)
+                };
+
+                return ToolImplementation::Script {
+                    path: resolved_path.display().to_string(),
+                    language,
+                    source,
+                    truncated,
+                };
+            } else {
+                return ToolImplementation::Binary {
+                    path: resolved_path.display().to_string(),
+                };
+            }
+        }
+    }
+
+    ToolImplementation::Unknown
+}
+
+/// Format a human-readable preview of the tool invocation command.
+fn format_tool_invocation(tool_name: &str, arguments: &serde_json::Value) -> Option<String> {
+    match arguments {
+        serde_json::Value::Object(map) if map.is_empty() => Some(tool_name.to_string()),
+        serde_json::Value::Object(map) => {
+            let mut parts = vec![tool_name.to_string()];
+            for (k, v) in map {
+                let flag = k.replace('_', "-");
+                match v {
+                    serde_json::Value::String(s) => {
+                        parts.push(format!("--{flag} {:?}", s));
+                    }
+                    serde_json::Value::Bool(true) => {
+                        parts.push(format!("--{flag}"));
+                    }
+                    serde_json::Value::Bool(false) => {}
+                    _ => {
+                        parts.push(format!("--{flag} {}", v));
+                    }
+                }
+            }
+            Some(parts.join(" "))
+        }
+        serde_json::Value::String(s) => {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str::<serde_json::Value>(s) {
+                format_tool_invocation(tool_name, &serde_json::Value::Object(map))
+            } else {
+                Some(format!("{} {:?}", tool_name, s))
+            }
+        }
+        serde_json::Value::Null => Some(tool_name.to_string()),
+        _ => Some(format!("{} {}", tool_name, arguments)),
+    }
+}
+
 /// Collect the string-valued arguments of a call, for policy matching.
 fn string_args_of(call: &ToolCall) -> Vec<String> {
     let mut out = vec![];
@@ -725,11 +914,37 @@ async fn risk_evaluator_denied_result(
     // Cache miss → run the evaluator. Any model/parse error → low-confidence
     // fallback (fail-toward), never a silent pass.
     let intent = format!("execute tool '{}'", call.name);
-    let context =
-        build_evaluator_context(&call.name, &call.arguments, base_tier, reversible, &intent);
+    let decl = find_tool_declaration(config, &call.name);
+    let impl_info = resolve_tool_implementation(config, &call.name);
+    let decl_ctx = crate::safety::extract_declaration_context(decl.as_ref(), impl_info.source());
+    let invocation = format_tool_invocation(&call.name, &call.arguments);
+    let context = build_evaluator_context(
+        &call.name,
+        &call.arguments,
+        base_tier,
+        reversible,
+        &intent,
+        decl_ctx.as_ref(),
+        Some(&impl_info),
+        invocation.as_deref(),
+    );
     let verdict = match run_risk_evaluator(config, &risk_model, &context).await {
-        Ok(raw) => RiskVerdict::parse(&raw, base_tier),
-        Err(_) => RiskVerdict::low_confidence_fallback(base_tier),
+        Ok(raw) => {
+            let show_trace = config.read().agent_loop.show_trace
+                || config.read().multi_agent.show_trace;
+            if show_trace {
+                eprintln!("  [%assess-risk% evaluator response] {}", raw.trim());
+            }
+            RiskVerdict::parse(&raw, base_tier)
+        }
+        Err(err) => {
+            let show_trace = config.read().agent_loop.show_trace
+                || config.read().multi_agent.show_trace;
+            if show_trace {
+                eprintln!("  [%assess-risk% evaluator error] {}", err);
+            }
+            RiskVerdict::low_confidence_fallback(base_tier)
+        }
     };
 
     // Fold the verdict into a cacheable authority *floor*. The clamp is
@@ -3736,5 +3951,68 @@ agent_loop:
                 .is_none(),
             "a cached in-ceiling floor should proceed without re-calling the model"
         );
+    }
+
+    #[test]
+    fn format_tool_invocation_formats_flags_and_values() {
+        let args = json!({"command": "ls -la", "force": true, "dry_run": false});
+        let formatted = format_tool_invocation("execute_command", &args).unwrap();
+        assert!(formatted.starts_with("execute_command"));
+        assert!(formatted.contains("--command \"ls -la\""));
+        assert!(formatted.contains("--force"));
+        assert!(!formatted.contains("--dry-run"));
+    }
+
+    #[test]
+    fn resolve_tool_implementation_handles_unknown_gracefully() {
+        let config = config_with_tiers();
+        let res = resolve_tool_implementation(&config, "nonexistent_tool_xyz");
+        assert_eq!(res, crate::safety::ToolImplementation::Unknown);
+    }
+
+    #[test]
+    fn evaluator_context_end_to_end_resolution() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_FUNCTIONS_DIR").ok();
+        let tmp = crate::utils::temp_file("-test-tools-", "");
+        let tools_dir = tmp.join("tools");
+        std::fs::create_dir_all(&tools_dir).unwrap();
+        let script_file = tools_dir.join("my_tool.sh");
+        std::fs::write(
+            &script_file,
+            "#!/usr/bin/env bash\n# @describe Test tool.\n# @option --cmd! Command to run\nmain() { eval \"$argc_cmd\"; }\n",
+        ).unwrap();
+        std::env::set_var("AICHAT_FUNCTIONS_DIR", &tmp);
+
+        let config = config_with_tiers();
+        let tool_name = "my_tool";
+        let call_args = json!({"cmd": "whoami"});
+        let decl = find_tool_declaration(&config, tool_name);
+        let impl_info = resolve_tool_implementation(&config, tool_name);
+        assert!(matches!(impl_info, crate::safety::ToolImplementation::Script { .. }));
+        let decl_ctx = crate::safety::extract_declaration_context(decl.as_ref(), impl_info.source());
+        assert_eq!(decl_ctx.as_ref().unwrap().description, "Test tool.");
+        let invocation = format_tool_invocation(tool_name, &call_args);
+        assert_eq!(invocation.as_deref(), Some("my_tool --cmd \"whoami\""));
+        let context = crate::safety::build_evaluator_context(
+            tool_name,
+            &call_args,
+            crate::function::BlastRadius::Destructive,
+            false,
+            "execute tool 'my_tool'",
+            decl_ctx.as_ref(),
+            Some(&impl_info),
+            invocation.as_deref(),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
+        assert_eq!(parsed["tool"], "my_tool");
+        assert_eq!(parsed["declaration"]["description"], "Test tool.");
+        assert_eq!(parsed["implementation"]["type"], "script");
+        assert!(parsed["implementation"]["source"].as_str().unwrap().contains("eval"));
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_FUNCTIONS_DIR", v),
+            None => std::env::remove_var("AICHAT_FUNCTIONS_DIR"),
+        }
     }
 }
