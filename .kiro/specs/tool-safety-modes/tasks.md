@@ -154,7 +154,7 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
       status now lives once in the roadmap.md Status Table.
 - [x] X.3 Architecture docs updated with the decision-funnel and `src/safety.rs` module (#6a–#6c
       landed; #6d section added in 6d.13).
-- [x] X.4 Session summaries: Session 4 (#6a), Session 5 (#6b), Session 6 (#6c + #6d Part 1), Session 7 (#6d Part 2), Session 8 (%assess-risk% Code-Aware Evaluator), Session 9 (Option B Pre-flight Remediation & Demos 17-20), Session 10 (Supervisory Policy Enforcement & Risk Evaluation).
+- [x] X.4 Session summaries: Session 4 (#6a), Session 5 (#6b), Session 6 (#6c + #6d Part 1), Session 7 (#6d Part 2), Session 8 (%assess-risk% Code-Aware Evaluator), Session 9 (Option B Pre-flight Remediation & Demos 17-20), Session 10 (Supervisory Policy Enforcement & Risk Evaluation), Session 11 (Permission vs. Authorization Architecture Redesign).
 
 ## Notes
 
