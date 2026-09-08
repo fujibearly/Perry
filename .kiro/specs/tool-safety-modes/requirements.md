@@ -314,6 +314,25 @@ can fall back to it.
   3. **Supervisory Risk Assessment:** For non-Safe actions where a risk model is configured, the supervisor MUST evaluate the proposed action by invoking the `%assess-risk%` evaluator with extended supervisory context (including `child_agent_id`, `child_depth`, `child_stated_reason`, and `child_enrichment` alongside tool declaration, implementation source code, invocation preview, and arguments).
   4. **Strict Clamping & Fail-Toward:** The evaluator verdict is clamped (`clamp_verdict`). A `Low`-confidence verdict or model failure MUST fail toward safety (`RequiredAuthority::Human`), requiring human approval or upward escalation.
   5. **Authority Enforcement & Routing:** If the clamped required authority is permitted under the supervisor's authority ceiling, the supervisor autonomously approves with `VerdictDecision::Continue` (attaching evaluator rationale in `added_context`). If it exceeds the supervisor's ceiling, the supervisor escalates upward (depth > 0) or prompts the human operator (depth 0, failing closed to `Halt` in headless mode).
+- **FR-6d.18 — Hierarchical Delegation Permissions Contract (`DelegatedPermissions`).**
+  The engine MUST provide a strongly-typed delegation contract `permissions: { mask, ceiling }` (with flat argument fallbacks `permissions_mask`, `permissions_ceiling` for provider robustness):
+  1. `mask`: `"readonly" | "mutating"`.
+  2. `ceiling`: `"safe" | "reversible" | "disruptive" | "destructive"`.
+  3. **Strict parent clamping:** A parent process under a `readonly` mask MAY NOT provision a `mutating` mask to a child. A parent MAY NOT provision an authority ceiling exceeding its own ceiling (`requested <= parent`).
+  4. **Safe-floor fail-closed:** If `permissions` is omitted, or if malformed/unrecognized values are provided, the engine strictly clamps to the safe floor (`readonly` mask, `safe` ceiling).
+- **FR-6d.19 — Hard Capability-Mask Block (No In-Flight Elevation) & Graceful Unwind.**
+  When a sub-agent executes under `AICHAT_CAPABILITY_MASK=readonly` and invokes a `mutating` tool (`capability_denied`):
+  1. The child MUST NOT dispatch an mTLS escalation request to the parent.
+  2. The child engine MUST immediately halt actuation of the tool.
+  3. The child MUST unwind any pre-mutation journal entries recorded in that execution session.
+  4. The child process MUST exit cleanly with a structured `status: "permission_blocked"` payload reporting the attempted tool, arguments, required permission, and triage findings.
+  5. The `#6b` authority ceiling (`authority_exceeded`) MUST NOT be routed through this hard-block path; it continues through the FR-6d.17 Should Gate via mTLS.
+- **FR-6d.20 — Orchestrator Loop Ingestion & Bounded Re-Delegation.**
+  When an invoking orchestrator receives a sub-agent tool result containing `status: "permission_blocked"`:
+  1. The engine MUST surface the structured block and unwound state as a tool result in the conversation context, guiding the orchestrator to assess user intent and re-delegate with explicit permissions if authorized and within its own ceiling.
+  2. The engine MUST enforce a per-`(agent, task)` re-delegation attempt cap (circuit breaker) to prevent unbounded `permission_blocked → re-delegate → permission_blocked` cycles.
+- **FR-6d.21 — Escalation Handler Defense-in-Depth.**
+  In `handle_escalation_request`, if an incoming escalation request arrives with reason `"capability_denied"`, the supervisor MUST immediately reject it with `VerdictDecision::Halt` (`"Capability mask is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit mutating permission contract."`).
 
 ## Non-Functional Requirements
 

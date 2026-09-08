@@ -137,6 +137,13 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 - [x] 6d.17 Structured safety execution trace enrichment (`[safety gate passed: ...]`, `[safety preflight reversibility: ...]`, `[%assess-risk% evaluator response: ...]`). (FR-6d.16)
 - [x] 6d.18 Live demo expansion in `scripts/run-demos.nu`: Demos 17 (Happy Path), 18 (Option B Remediation), 19 (Authority Ceiling Fail-Closed), 20 (Orchestrator to Sub-Agent Multi-Process Escalation). (Verification)
 - [x] 6d.19 Supervisory policy enforcement & risk assessment in escalation handler ("The Should Gate"): load supervisor PolicyFile, evaluate caller tool + args, compute anti-spoofed static tier and reversibility floor, run %assess-risk% with supervisory context (child ID, depth, stated reason, enrichment), clamp strictly, and route Continue/Halt/Human. (FR-6d.17)
+- [ ] 6d.20 Delegation permissions contract in `src/function.rs` and `src/config/agent.rs`: define `DelegatedPermissions`, `validate_against_parent`, safe-floor clamping, flat argument fallbacks, and schema exposure. (FR-6d.18)
+- [ ] 6d.21 Subprocess spawning & env provisioning in `src/agent_loop.rs`: parse `permissions` (or flat fallback) in `eval_agent_tool_subprocess`, validate against parent ceiling & mask, set `AICHAT_CAPABILITY_MASK` and `AICHAT_AUTHORITY_CEILING`. (FR-6d.18)
+- [ ] 6d.22 Child capability gate immediate denial & unwinding in `src/agent_loop.rs`: update `eval_single_tool` so `capability_denied` does not escalate over mTLS; in child loop, unwind journal entries, emit trace, and exit with structured `permission_blocked` payload. Retain mTLS escalation for `authority_exceeded`. (FR-6d.19)
+- [ ] 6d.23 Orchestrator loop ingestion & bounded re-delegation in `src/agent_loop.rs`: parse `permission_blocked` tool result, format re-delegation guidance, and enforce re-delegation attempt cap. (FR-6d.20)
+- [ ] 6d.24 Escalation handler defense-in-depth in `src/agent_loop.rs`: reject any incoming `capability_denied` escalation with `VerdictDecision::Halt`. Preserve all existing FR-6d.17 Should Gate behavior for `authority_exceeded`. (FR-6d.21)
+- [ ] 6d.25 Unit tests & demos: add unit tests for `DelegatedPermissions` clamping/validation, child unwind, and Should Gate preservation; add Demo 21 in `scripts/run-demos.nu`; assert Demo 20 passes. (Verification)
+- [ ] 6d.26 Specs & documentation: add Decision B as-built note to `design.md`, update `roadmap.md`, and record session summary.
 
 ## Cross-cutting / Land
 
