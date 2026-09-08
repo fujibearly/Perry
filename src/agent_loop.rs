@@ -945,7 +945,16 @@ async fn risk_evaluator_denied_result(
         RiskVerdict,
     };
 
-    let risk_model = config.read().safety.risk_model.clone()?;
+    let risk_model = config
+        .read()
+        .safety
+        .risk_model
+        .clone()
+        .or_else(|| {
+            config
+                .read()
+                .role_model_id(crate::config::ASSESS_RISK_ROLE)
+        })?;
 
     if call.name == "_plan" {
         return None;
@@ -1108,8 +1117,10 @@ async fn run_risk_evaluator(
     use crate::config::{Input, RoleLike, ASSESS_RISK_ROLE};
 
     let mut role = config.read().retrieve_role(ASSESS_RISK_ROLE)?;
-    let model = Model::retrieve_model(&config.read(), risk_model, ModelType::Chat)?;
-    role.set_model(model);
+    if role.model_id() != Some(risk_model) {
+        let model = Model::retrieve_model(&config.read(), risk_model, ModelType::Chat)?;
+        role.set_model(model);
+    }
 
     let input = Input::from_str(config, context, Some(role.to_role()));
     input.fetch_chat_text().await
@@ -4187,6 +4198,37 @@ agent_loop:
                 .await
                 .is_none(),
             "with no risk_model the evaluator must be a no-op (degrade to #6b)"
+        );
+    }
+
+    #[tokio::test]
+    async fn risk_evaluator_uses_role_model_when_safety_risk_model_unset() {
+        let roles_dir = crate::utils::temp_file("-test-roles-", "");
+        std::fs::create_dir_all(&roles_dir).unwrap();
+        let role_content = "---\nmodel: custom:evaluator-model\n---\nPrompt";
+        std::fs::write(roles_dir.join("%assess-risk%.md"), role_content).unwrap();
+        std::env::set_var("AICHAT_ROLES_DIR", &roles_dir);
+
+        let config = config_with_tiers();
+        assert!(config.read().safety.risk_model.is_none());
+
+        let (progress, mut rx) = AgentLoopProgress::live();
+        let _ = risk_evaluator_denied_result(&config, &call("restart_svc"), None, Some(&progress)).await;
+        
+        let mut start_ev = None;
+        while let Ok(event) = rx.try_recv() {
+            if let AgentLoopEvent::RiskAssessmentStart { model, .. } = event {
+                start_ev = Some(model);
+                break;
+            }
+        }
+        std::env::remove_var("AICHAT_ROLES_DIR");
+        let _ = std::fs::remove_dir_all(&roles_dir);
+
+        assert_eq!(
+            start_ev.as_deref(),
+            Some("custom:evaluator-model"),
+            "risk evaluator must use model defined in %assess-risk% role"
         );
     }
 

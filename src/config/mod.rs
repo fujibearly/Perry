@@ -1424,6 +1424,18 @@ impl Config {
         Ok(role)
     }
 
+    pub fn role_model_id(&self, name: &str) -> Option<String> {
+        let names = Self::list_roles(false);
+        let role = if names.contains(&name.to_string()) {
+            let path = Self::role_file(name);
+            let content = std::fs::read_to_string(&path).ok()?;
+            Role::new(name, &content)
+        } else {
+            Role::builtin(name).ok()?
+        };
+        role.model_id().map(|m| m.to_string())
+    }
+
     pub fn new_role(&mut self, name: &str) -> Result<()> {
         if self.macro_flag {
             bail!("No role");

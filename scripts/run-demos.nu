@@ -59,6 +59,7 @@ let base_env = {
     AICHAT_FUNCTIONS_DIR: $functions_dir
     AICHAT_MODEL: $DEMO_MODEL
     WEB_SEARCH_MODEL: $DEMO_MODEL
+    AICHAT_SAFETY_RISK_MODEL: $DEMO_MODEL
 }
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
