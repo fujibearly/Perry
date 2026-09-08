@@ -14,26 +14,30 @@ Action proposed by any agent (any depth)
 [Protected Policy File]  deterministic, non-pardonable            ──(forbid)──► BLOCKED
    │                                                                            (policy_forbidden)
    ▼
-Blast-radius classify {Safe…Catastrophic}  +  reversibility PROVEN? (real artifact)
-   │      effective required authority = f(tier, proven_reversible)
-   ├─ ≤ this agent's ceiling ───────────────────────────────────────────────► EXECUTE
-   │        └─ plan-time flagged step? → mandatory act-time evaluator re-check
-   ▼ (> ceiling, or uncertain, or Safe? → skip evaluator entirely)
-[%assess-risk% role · dedicated model · minimal context]  STRICTER-ONLY
-   │        clamp: may raise tier / withhold reversibility credit; may NOT loosen
-   │        (fail / low-confidence ─► escalate)
-   ▼
-Escalate → INVOKING agent    (branch suspends; siblings run on)
-   │   child writes escalation file (WHY + enrichment + proposed action), STAYS ALIVE polling
-   │   parent merges enrichment into its context, decides, writes AUTHENTICATED verdict file:
-   │        HALT (graceful) │ REVERT (child rolls back) │ CONTINUE (child resumes)
-   │        unresponsive child → hard-kill
-   ▼ (parent ceiling insufficient → escalate upward, accumulating evidence … → Orchestrator)
-Orchestrator ceiling insufficient
+Blast-radius classify {Safe…Catastrophic}
    │
+   ├─ Trips ceiling solely due to unproven reversibility?
+   │  └─ Declares `reversible-via backup`?
+   │        └─ (Option B: Pre-flight Opportunistic Remediation)
+   │           Creates atomic backup in durable rollback journal
+   │           Steps down required authority: one_step_down(tier)
    ▼
-HUMAN — blocking prompt on THIS branch via interactive CLI (siblings continue)
-        │ OR │ emit same escalation record to a Layer 3 supervisor (headless/preferred)
+Evaluate effective required authority ≤ agent's ceiling?
+   │
+   ├─ Yes (≤ ceiling) ───────────────────────────────────────────────► [%assess-risk% Evaluator]
+   │                                                                  (Dedicated model, code context,
+   │                                                                   reversibility-aware clamp)
+   │                                                                        │
+   │                                                                        ├─ Pass ──► EXECUTE
+   │                                                                        └─ Stricter/Over-ceiling ─┐
+   ▼ (> ceiling or evaluator raise) ◄─────────────────────────────────────────────────────────────────┘
+Escalate → INVOKING parent via persistent mTLS (branch suspends; siblings run on)
+   │   Child sends EscalationMsg (action, args, reason, enrichment, trace)
+   │   Parent decides or propagates upward:
+   │        HALT (graceful stop) │ REVERT (replay durable journal) │ CONTINUE (resume)
+   ▼ (Orchestrator ceiling insufficient)
+HUMAN — interactive single-key CLI prompt ([c]ontinue | [h]alt | [r]evert | [e]xplain | [g]uide)
+        │ OR │ Layer-3 supervisor emit (headless fail-closed)
 ```
 
 The funnel is the *target* (#6d complete). Each increment realizes a prefix of it, with the
@@ -331,6 +335,32 @@ fingerprint pinning, channel-bound challenge–response, loopback-only; typed
   mismatch or replay) is where the care and the most thorough tests go.
 - Wherever the design/requirements above say "WSS"/"WebSocket", read "mutual-TLS loopback stream
   (WS framing deferred behind the transport trait)".
+
+## As-Built Notes — Option B Pre-Flight Opportunistic Remediation & Reversibility Clamping
+
+These refine the #6b/#6d safety gating model based on decisions taken to solve the chicken-and-egg gating paradox:
+
+- **The Chicken-and-Egg Paradox:** Previously, safety gates evaluated required authority against the agent's ceiling *before* tool execution. Tools like `fs_write` (classified as `Disruptive`) declared `# @meta reversible-via backup`. However, the backup was only created inside the tool or journal *during* actuation. Consequently, an agent with a `Reversible` ceiling (e.g., `coder`) failed the gate immediately with `authority_exceeded`, never reaching the point where the backup would make the operation reversible.
+- **Option B (Opportunistic Remediation):** When an autonomous tool call trips an agent's authority ceiling solely because it is not yet proven reversible (i.e. `static_tier > ceiling`, but `one_step_down(static_tier) <= ceiling`), and the tool declares reversible capability (`reversible == true` or `reversible_via == "backup"`):
+  1. The engine checks if the target path exists. If it exists, an atomic copy is created in `$XDG_RUNTIME_DIR/aichat/journals/artifacts/` and logged in the durable rollback journal. If it does not exist (new file creation), an `rm -f '<path>'` undo command is logged.
+  2. The invocation's `reversible` flag is set to `true`.
+  3. Required authority steps down by one level (`one_step_down(Disruptive) = Reversible`).
+  4. The engine emits `AgentLoopEvent::PreflightReversibilityApplied` and prints `[safety preflight reversibility: atomic backup recorded in journal, required authority stepped down <from> -> <to>]`.
+  5. The action proceeds through the gate autonomously.
+- **Monotone Clamp Reversibility Bug Fix:**
+  Previously, `clamp_verdict` took `(base_tier, verdict)`. When a tool had stepped down its required tier to `Reversible` via Option B, but the evaluator independently verified the raw blast radius as `Disruptive`, `max(base, verdict.tier)` evaluated to `max(Reversible, Disruptive) = Disruptive`. This accidentally erased the reversibility step-down.
+  - *Fix:* `clamp_verdict` now accepts `reversible: bool`. When `reversible == true`, the evaluator's verdict is stepped down: `verdict_required = Tier(one_step_down(verdict.tier))` (unless `Catastrophic`, which remains `Human`).
+  - Clamping `stricter_of(base, verdict_required)` preserves the discount when the evaluator agrees with the tool's declared blast radius, while still allowing the evaluator to raise risk (e.g. flagging an unmitigated side-effect or raising to Catastrophic).
+- **Evaluator Awareness of Rollback Mechanism:**
+  `build_evaluator_context` now includes `"rollback_mechanism": "atomic pre-mutation backup in durable rollback journal"` when reversibility is applied. This prevents the LLM evaluator from penalizing operations under the hallucinated assumption that mutations lack rollback artifacts.
+- **Permanent Model Definition in `%assess-risk%` Role:**
+  Added support in `AgentConfig::load_role` / `Role::load` to recognize a `model:` field directly in `%assess-risk%.md` front-matter. If `safety.risk_model` is not set in `config.yaml`, the evaluator defaults to the model defined in the role (e.g. `gemini-2.5-flash`), eliminating the need for mandatory config file edits.
+- **Structured Safety Trace Events:**
+  `AgentLoopEvent` includes:
+  - `SafetyGatePassed { name, tier, required, ceiling }`
+  - `PreflightReversibilityApplied { name, from_tier, to_tier, journal_entry }`
+  - `SafetyBlockReason` (`CapabilityDenied`, `AuthorityExceeded`, `PolicyForbidden`)
+  Live traces format these consistently with turn indices and child agent IDs.
 
 ## Threat Model (explicit, per NFR-2/3/4)
 

@@ -94,5 +94,16 @@ This repository maintains continuous, chronological session handoff summaries do
      * **100% Parameter Classification in `llm-functions`:** Annotated and exported `mode`, `risk`, and reversibility across all 31 root tools and all agent subcommands (`coder`, `demo`, `json-viewer`, `orchestrator`, `researcher`, `sql`, `todo`). Committed in `llm-functions` branch `feat/tool-safety-classification` (`83dea2e`).
      * **Specification & Documentation Alignment:** Updated `.kiro/specs/tool-safety-modes/` (`requirements.md`, `design.md`, `tasks.md`), `.kiro/docs/roadmap.md` (canonical status table, 6c narrative, decisions log, backlog), and `.kiro/architecture.md`.
      * **Verification:** Suite **452 pass, 0 fail** (444 unit + 5 catalog + 3 integration); `argc test` 100% passing in `llm-functions`; **all 16 demos pass** in `scripts/run-demos.nu`.
-     * **State:** on branch `feat/tool-safety-6d` in `aichat`, `feat/tool-safety-classification` in `llm-functions`; local-only (nothing pushed).
+  9. **Session 9: Option B Pre-flight Opportunistic Remediation, Clamp Reversibility Fix & Live Safety Demos 17–20**
+   * **Period:** `2026-09-07`
+   * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-07-session9.md`](.kiro/docs/session-summary-2026-09-07-session9.md)
+   * **Focus Areas:**
+     * **Option B Pre-flight Remediation:** Solved the chicken-and-egg gating paradox where tools declaring `reversible-via backup` (e.g. `fs_write`) were blocked by authority ceilings before reaching the point where backups are made. The engine upfront creates an atomic backup in the durable rollback journal, stepping down required authority (`one_step_down(Disruptive) = Reversible`) and permitting autonomous actuation.
+     * **Monotone Clamp Reversibility Bug Fix:** Fixed `clamp_verdict` to step down the evaluator's raw risk assessment when `reversible == true` before computing `stricter_of`, preserving the reversibility discount when evaluator agrees with tool tier.
+     * **Evaluator Rollback Awareness:** Added `"rollback_mechanism": "atomic pre-mutation backup in durable rollback journal"` to evaluator context and updated `%assess-risk%.md` prompt.
+     * **Role Front-Matter Model Support:** Enabled direct `model:` declaration in `%assess-risk%.md` front-matter, honoring dedicated models without mandatory `config.yaml` edits.
+     * **Structured Safety Trace Events:** Added live trace rendering for gate passage, preflight reversibility application, evaluator responses, and block reasons.
+     * **Live Demos 17–20:** Added Demo 17 (Happy Path), Demo 18 (Option B Pre-flight Remediation), Demo 19 (Authority Ceiling Fail-Closed), and Demo 20 (Orchestrator to Coder Multi-Process Escalation).
+     * **Verification:** Suite **461 pass, 0 fail** (453 unit + 5 catalog + 3 integration); `cargo clippy --all-targets -- -D warnings` clean; all 20 demos passing in `scripts/run-demos.nu`.
+     * **State:** on branch `feat/tool-safety-6d` @ `2a7da73`; local-only (nothing pushed).
 

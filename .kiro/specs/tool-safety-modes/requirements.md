@@ -282,6 +282,31 @@ can fall back to it.
   message types and auth model generalize to **remote sub-agents** by binding WSS to a routable
   interface with real certificates (org-CA or pinned), and adding an `endpoint:` field to the
   agent registry. This is NOT built in #6d but the protocol MUST NOT preclude it.
+- **FR-6d.13 — Pre-flight Opportunistic Remediation (Option B).** When an autonomous tool call trips
+  an agent's authority ceiling solely because it is not yet proven reversible (i.e. `static_tier > ceiling`,
+  but `one_step_down(static_tier) <= ceiling`), and the tool declares reversible capability (`reversible == true`
+  or `reversible_via == "backup"`), the engine MUST NOT immediately fail closed, block, or escalate.
+  Instead, the engine opportunistically creates the atomic pre-mutation file backup (copying existing file
+  content to the journal artifact or preparing an `rm -f '<path>'` undo command for newly created files)
+  in the durable rollback journal before evaluating the authority gate.
+  This marks `reversible = true`, emits `AgentLoopEvent::PreflightReversibilityApplied`, steps down
+  the required authority to `one_step_down(static_tier)`, and permits autonomous actuation if within ceiling.
+- **FR-6d.14 — Reversibility-Aware Verdict Clamping.** `clamp_verdict` MUST accept the effective
+  `reversible: bool` status. When `reversible == true`, the evaluator's raw risk assessment (e.g. `Disruptive`)
+  is stepped down by one tier (`one_step_down(verdict.tier) = Reversible`) unless it is `Catastrophic`
+  (which remains `Human`). Clamping `stricter_of(base, verdict_required)` preserves the reversibility discount
+  when the evaluator agrees with the tool's declared blast radius, preventing the monotone clamp from
+  accidentally erasing the reversibility step-down.
+- **FR-6d.15 — Evaluator Awareness of Rollback Mechanism.** In `build_evaluator_context`, when
+  reversibility has been established or declared, include `"rollback_mechanism": "atomic pre-mutation backup in durable rollback journal"`
+  in the evaluator payload so the LLM evaluator does not penalize actions under the false assumption that
+  mutations lack rollback artifacts.
+- **FR-6d.16 — Structured Safety Trace Enrichment.** Live loop tracing (`AICHAT_AGENT_LOOP_SHOW_TRACE=true`)
+  MUST emit structured safety events at each decision boundary:
+  `[safety gate passed: <tool> (tier: <tier>, required: <req>, ceiling: <ceiling>)]`,
+  `[safety preflight reversibility: atomic backup recorded in journal, required authority stepped down <from> -> <to>]`,
+  `[%assess-risk% evaluator response: tier=<tier>, reversible=<rev>, conf=<conf>, rationale=<rat>]`,
+  and escalation transitions and verdicts.
 
 ## Non-Functional Requirements
 

@@ -131,6 +131,11 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
       exactly as #6b/#6c. (NFR-1/6)
 - [x] 6d.13 Docs: full funnel diagram, the mTLS channel (topology, mutual auth, message protocol, control-vs-durability
       planes, WS-deferred-behind-trait rationale), human/Layer-3 paths, threat model, and the remote-generalization hook. (FR-6d.12)
+- [x] 6d.14 Pre-flight opportunistic remediation (Option B): upfront journal pre-mutation backup on ceiling trip when `reversible_via == "backup"`, authority step-down (`one_step_down`), and `PreflightReversibilityApplied` event emission. (FR-6d.13)
+- [x] 6d.15 Reversibility-aware verdict clamp (`clamp_verdict` preserving reversibility step-down when evaluator agrees with tool tier; pure fn + unit tests). (FR-6d.14)
+- [x] 6d.16 Evaluator context enhancement (`rollback_mechanism`) & permanent model support in `%assess-risk%` role front-matter. (FR-6d.15)
+- [x] 6d.17 Structured safety execution trace enrichment (`[safety gate passed: ...]`, `[safety preflight reversibility: ...]`, `[%assess-risk% evaluator response: ...]`). (FR-6d.16)
+- [x] 6d.18 Live demo expansion in `scripts/run-demos.nu`: Demos 17 (Happy Path), 18 (Option B Remediation), 19 (Authority Ceiling Fail-Closed), 20 (Orchestrator to Sub-Agent Multi-Process Escalation). (Verification)
 
 ## Cross-cutting / Land
 
@@ -141,7 +146,7 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
       status now lives once in the roadmap.md Status Table.
 - [x] X.3 Architecture docs updated with the decision-funnel and `src/safety.rs` module (#6a–#6c
       landed; #6d section added in 6d.13).
-- [x] X.4 Session summary entry added when #6a landed (Session 4); Session 5 covers #6b/#6c.
+- [x] X.4 Session summaries: Session 4 (#6a), Session 5 (#6b), Session 6 (#6c + #6d Part 1), Session 7 (#6d Part 2), Session 8 (%assess-risk% Code-Aware Evaluator), Session 9 (Option B Pre-flight Remediation & Demos 17-20).
 
 ## Notes
 
