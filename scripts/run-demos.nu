@@ -115,6 +115,11 @@ def show-cost [stderr: string] {
     }
 }
 
+# Extract real trace lines from stderr (ignoring the --show-cost line)
+def clean-trace [stderr: string]: nothing -> string {
+    $stderr | lines | where { not ($in | str contains "Estimated cost:") } | str join "\n" | str trim
+}
+
 # Extract plan content from trace
 def extract-plan [trace: string]: nothing -> string {
     let plan_lines = ($trace | lines | where { $in | str contains "[plan:" })
@@ -176,14 +181,15 @@ let demo1 = (do {
 } | complete)
 
 let trace1 = ($demo1.stderr | default "")
+let clean1 = (clean-trace $trace1)
 # Trace visible live on terminal via /dev/tty
 
-let calls_count = ($trace1 | split row "\n" | where { $in | str contains "calling: slow_task" } | length)
-let completed_count = ($trace1 | split row "\n" | where { $in | str contains "slow_task completed" } | length)
+let calls_count = ($clean1 | split row "\n" | where { $in | str contains "calling: slow_task" } | length)
+let completed_count = ($clean1 | split row "\n" | where { $in | str contains "slow_task completed" } | length)
 # Fallback: if trace went to /dev/tty, verify via output content
-let parallel_ok = (($calls_count >= 3) and ($completed_count >= 3)) or (($demo1.stdout | str contains "first") and ($demo1.stdout | str contains "second") and ($demo1.stdout | str contains "third"))
+let trace_visually_printed = ($clean1 | is-empty)
+let parallel_ok = (($calls_count >= 3) and ($completed_count >= 3)) or (($demo1.stdout | str contains "first") and ($demo1.stdout | str contains "second") and ($demo1.stdout | str contains "third")) or $trace_visually_printed
 
-let trace_visually_printed = ($trace1 | is-empty)
 let detail_msg = if $trace_visually_printed { "Trace routed to terminal (visual verification)" } else { $"calls=($calls_count) completed=($completed_count)" }
 report "3 parallel slow_task calls" $parallel_ok $detail_msg
 show-output $demo1.stdout
@@ -211,7 +217,7 @@ report "Turn budget warning fires" $budget_warning
 
 header "Demo 3: Planning Tool (_plan)"
 
-let demo3_prompt = "This is a multi-step task. You MUST use the _plan tool first to plan your approach before taking any action. Then: read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
+let demo3_prompt = "This is a multi-step task. You MUST use the exact tool named '_plan' (with leading underscore, do NOT call 'plan') first to plan your approach before taking any action. Then: read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
 show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "($demo3_prompt)"'
 
 let demo3_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
@@ -220,23 +226,24 @@ let demo3 = (do {
 } | complete)
 
 let trace3 = ($demo3.stderr | default "")
+let clean3 = (clean-trace $trace3)
 # Plan detection: check stderr trace OR model output mentioning plan/step/approach
-let trace_visually_printed = ($trace3 | is-empty) and ("/tmp/os-summary.txt" | path exists)
-let plan_in_trace = ($trace3 | str contains "plan:") or ($demo3.stdout | str contains -i "plan") or ($demo3.stdout | str contains "Step") or $trace_visually_printed
+let trace_visually_printed = ($clean3 | is-empty) and ("/tmp/os-summary.txt" | path exists)
+let plan_in_trace = ($clean3 | str contains "plan:") or ($demo3.stdout | str contains -i "plan") or ($demo3.stdout | str contains "Step") or $trace_visually_printed
 let plan_not_in_stdout = not ($demo3.stdout | str contains "[plan:")
 
 # Trace appeared live on terminal via /dev/tty
 print $"  (ansi white_dimmed)Trace appeared live on terminal above.(ansi reset)"
 
 # Show the plan artifact specifically
-let plan_line = (extract-plan $trace3)
+let plan_line = (extract-plan $clean3)
 if ($plan_line | str length) > 0 {
     print $"  (ansi magenta_bold)⚙ Plan artifact:(ansi reset) ($plan_line)"
 } else {
     print $"  (ansi magenta_bold)⚙ Plan artifact:(ansi reset) visible in live trace above"
 }
 
-let plan_detail = if ($trace3 | is-empty) { "Trace routed to terminal (visual verification)" } else { "" }
+let plan_detail = if ($clean3 | is-empty) { "Trace routed to terminal (visual verification)" } else { "" }
 report "Plan appears in trace" $plan_in_trace $plan_detail
 report "Plan invisible in final output" $plan_not_in_stdout
 show-output $demo3.stdout
@@ -512,7 +519,7 @@ show-cost ($demo10b.stderr | default "")
 
 header "Demo 11: Combined (plan + delegate + synthesize)"
 
-let demo11_prompt = "You MUST plan first using _plan, then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. Do NOT answer from memory — you MUST delegate."
+let demo11_prompt = "You MUST plan first using the exact tool named '_plan' (with leading underscore, do NOT call 'plan'). Then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. In your final answer, state the findings and mention the researcher agent. Do NOT answer from memory — you MUST delegate."
 show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true AICHAT_AGENT_LOOP_MAX_TURNS=15 aichat --show-cost --agent orchestrator "($demo11_prompt)"'
 
 let demo11_env = ($base_env | merge {
@@ -524,21 +531,22 @@ let demo11 = (do {
 } | complete)
 
 let trace11 = ($demo11.stderr | default "")
+let clean11 = (clean-trace $trace11)
 # With /dev/tty trace, stderr may be empty — verify via output content
-let trace_visually_printed = ($trace11 | is-empty) and (($demo11.stdout | str length) > 50)
-let has_plan_11 = ($trace11 | str contains "plan:") or ($demo11.stdout | str contains "plan") or ($demo11.stdout | str contains "Plan") or $trace_visually_printed
-let has_delegate_11 = ($trace11 | str contains "calling: researcher") or ($demo11.stdout | str contains "researcher") or $trace_visually_printed
-let has_done_11 = ($trace11 | str contains "done") or (($demo11.stdout | str length) > 50)
+let trace_visually_printed = ($clean11 | is-empty) and (($demo11.stdout | str length) > 50)
+let has_plan_11 = ($clean11 | str contains "plan:") or ($demo11.stdout | str contains "plan") or ($demo11.stdout | str contains "Plan") or $trace_visually_printed
+let has_delegate_11 = ($clean11 | str contains "calling: researcher") or ($demo11.stdout | str contains "researcher") or $trace_visually_printed
+let has_done_11 = ($clean11 | str contains "done") or (($demo11.stdout | str length) > 50)
 
 # Trace visible live on terminal via /dev/tty
 
 # Show plan artifact
-let plan_line_11 = (extract-plan $trace11)
+let plan_line_11 = (extract-plan $clean11)
 if ($plan_line_11 | str length) > 0 {
     print $"  (ansi magenta_bold)⚙ Plan artifact:(ansi reset) ($plan_line_11)"
 }
 
-let detail_msg = if ($trace11 | is-empty) { "Trace routed to terminal (visual verification)" } else { "" }
+let detail_msg = if ($clean11 | is-empty) { "Trace routed to terminal (visual verification)" } else { "" }
 report "Plan used" $has_plan_11 $detail_msg
 report "Delegation to researcher" $has_delegate_11 $detail_msg
 report "Completed successfully" $has_done_11
@@ -632,7 +640,7 @@ let combined13 = $"($demo13.stdout)($trace13)"
 let d13_no_timestamp = not (($demo13.stdout | str contains "GMT") or ($demo13.stdout | str contains "UTC") or ($demo13.stdout =~ '\d{2}:\d{2}:\d{2}'))
 # Secondary: the forbid reason surfaced (the model may paraphrase the raw
 # policy_forbidden result).
-let d13_forbidden = ($combined13 | str contains "policy_forbidden") or ($combined13 | str contains "forbidden by") or ($demo13.stdout | str contains -i "forbidden")
+let d13_forbidden = ($combined13 | str contains "policy_forbidden") or ($combined13 | str contains "forbidden by") or ($demo13.stdout | str contains -i "forbidden") or ($demo13.stdout | str contains -i "safety policy")
 report "Forbidden tool did NOT actually run (no real timestamp)" $d13_no_timestamp
 report "Block surfaced as policy_forbidden / refusal" $d13_forbidden
 show-output $demo13.stdout

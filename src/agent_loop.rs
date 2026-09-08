@@ -1920,6 +1920,7 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
     FunctionDeclaration {
         name: "_plan".to_string(),
         description: "Write your reasoning, task decomposition, or plan to a scratchpad. \
+            Always invoke this tool using its exact name '_plan' (with a leading underscore, do not call 'plan'). \
             The content will be available in your next turn's context but will not be \
             shown to the user. Use this to think through complex tasks before acting."
             .to_string(),
