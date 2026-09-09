@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -3274,7 +3275,282 @@ pub fn format_llm_response(
     }
 }
 
-/// Format a dialog trace block for rendering with hierarchical guide rails and asymmetric framing.
+/// Strip ANSI escape sequences from a string to get clean visible text.
+pub fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if let Some(&'[') = chars.peek() {
+                chars.next(); // consume '['
+                for c2 in chars.by_ref() {
+                    if ('@'..='~').contains(&c2) {
+                        break;
+                    }
+                }
+                continue;
+            } else if let Some(&']') = chars.peek() {
+                chars.next(); // consume ']'
+                for c2 in chars.by_ref() {
+                    if c2 == '\x07' || c2 == '\x1b' {
+                        break;
+                    }
+                }
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Compute visible terminal column width of a string, ignoring ANSI escape sequences.
+pub fn visible_width(s: &str) -> usize {
+    let clean = strip_ansi(s);
+    UnicodeWidthStr::width(clean.as_str())
+}
+
+/// Query active terminal width, supporting environment overrides (`AICHAT_TERMINAL_WIDTH`, `COLUMNS`)
+/// and crossterm detection, with safe default.
+pub fn get_terminal_width() -> usize {
+    if let Ok(val) = std::env::var("AICHAT_TERMINAL_WIDTH") {
+        if let Ok(w) = val.parse::<usize>() {
+            if w >= 20 {
+                return w;
+            }
+        }
+    }
+    if let Ok(val) = std::env::var("COLUMNS") {
+        if let Ok(w) = val.parse::<usize>() {
+            if w >= 20 {
+                return w;
+            }
+        }
+    }
+    if let Ok((cols, _)) = crossterm::terminal::size() {
+        if cols >= 20 {
+            return cols as usize;
+        }
+    }
+    80
+}
+
+/// Generate vertical guide rails for ancestor agents up to `depth`.
+pub fn ancestor_rails(depth: usize) -> String {
+    let mut rails = String::new();
+    for d in 0..depth {
+        let rail = match d {
+            0 => "│   ",
+            1 => "║   ",
+            _ => "╏   ",
+        };
+        rails.push_str(rail);
+    }
+    rails
+}
+
+/// Detect the ideal continuation indent for a wrapped line.
+pub fn detect_continuation_indent(line: &str) -> &'static str {
+    let stripped = strip_ansi(line);
+    let trimmed = stripped.trim_start();
+    let leading_spaces = stripped.len() - trimmed.len();
+
+    if leading_spaces >= 8 {
+        "          "
+    } else if leading_spaces >= 6 {
+        "        "
+    } else if leading_spaces >= 4 {
+        "      "
+    } else if leading_spaces >= 2
+        || trimmed.starts_with("* ")
+        || trimmed.starts_with("- ")
+        || stripped.contains('⚡')
+        || stripped.contains("[new:")
+        || stripped.contains("[history:")
+        || stripped.contains("tool_result:")
+    {
+        "    "
+    } else {
+        ""
+    }
+}
+
+/// Soft-wrap a line containing ANSI styling into chunks of at most `max_width` visible columns.
+/// Preserves active ANSI styling across line wraps and applies `continuation_indent` to wrapped chunks.
+pub fn wrap_ansi_line(line: &str, max_width: usize, continuation_indent: &str) -> Vec<String> {
+    if visible_width(line) <= max_width {
+        return vec![line.to_string()];
+    }
+
+    #[derive(Debug)]
+    struct Token<'a> {
+        text: &'a str,
+        is_escape: bool,
+        is_whitespace: bool,
+        width: usize,
+    }
+
+    let mut tokens = Vec::new();
+    let mut chars = line.char_indices().peekable();
+
+    while let Some((start, c)) = chars.next() {
+        if c == '\x1b' {
+            if let Some(&(_, '[')) = chars.peek() {
+                chars.next();
+                let mut end = line.len();
+                while let Some(&(i, c2)) = chars.peek() {
+                    chars.next();
+                    if ('@'..='~').contains(&c2) {
+                        end = i + c2.len_utf8();
+                        break;
+                    }
+                }
+                tokens.push(Token {
+                    text: &line[start..end],
+                    is_escape: true,
+                    is_whitespace: false,
+                    width: 0,
+                });
+                continue;
+            }
+        }
+        if c.is_whitespace() {
+            let mut end = start + c.len_utf8();
+            while let Some(&(i, next_c)) = chars.peek() {
+                if next_c.is_whitespace() && next_c != '\x1b' {
+                    chars.next();
+                    end = i + next_c.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let text = &line[start..end];
+            let width = text.chars().map(|ch| if ch == '\t' { 4 } else { 1 }).sum();
+            tokens.push(Token {
+                text,
+                is_escape: false,
+                is_whitespace: true,
+                width,
+            });
+        } else {
+            let mut end = start + c.len_utf8();
+            while let Some(&(i, next_c)) = chars.peek() {
+                if next_c.is_whitespace() || next_c == '\x1b' {
+                    break;
+                }
+                chars.next();
+                end = i + next_c.len_utf8();
+            }
+            let text = &line[start..end];
+            let width = UnicodeWidthStr::width(text);
+            tokens.push(Token {
+                text,
+                is_escape: false,
+                is_whitespace: false,
+                width,
+            });
+        }
+    }
+
+    let continuation_indent_width = visible_width(continuation_indent);
+    let mut result = Vec::new();
+    let mut current_line = String::new();
+    let mut current_width = 0usize;
+    let mut is_first_line = true;
+    let mut active_style: Option<String> = None;
+    let target_width = max_width.max(10);
+
+    for token in tokens {
+        if token.is_escape {
+            if token.text == "\x1b[0m" {
+                active_style = None;
+            } else {
+                active_style = Some(token.text.to_string());
+            }
+            current_line.push_str(token.text);
+            continue;
+        }
+
+        if token.is_whitespace {
+            if current_width == 0 {
+                if is_first_line {
+                    current_line.push_str(token.text);
+                    current_width += token.width;
+                }
+            } else if current_width + token.width <= target_width {
+                current_line.push_str(token.text);
+                current_width += token.width;
+            } else {
+                let trimmed = current_line.trim_end_matches(' ');
+                let mut end_line = trimmed.to_string();
+                if active_style.is_some() {
+                    end_line.push_str("\x1b[0m");
+                }
+                result.push(end_line);
+                current_line = continuation_indent.to_string();
+                current_width = continuation_indent_width;
+                if let Some(style) = &active_style {
+                    current_line.push_str(style);
+                }
+                is_first_line = false;
+            }
+            continue;
+        }
+
+        let word_width = token.width;
+        if current_width > continuation_indent_width && current_width + word_width > target_width {
+            let trimmed = current_line.trim_end_matches(' ');
+            let mut end_line = trimmed.to_string();
+            if active_style.is_some() {
+                end_line.push_str("\x1b[0m");
+            }
+            result.push(end_line);
+            current_line = continuation_indent.to_string();
+            current_width = continuation_indent_width;
+            if let Some(style) = &active_style {
+                current_line.push_str(style);
+            }
+            is_first_line = false;
+        }
+
+        if word_width > target_width.saturating_sub(current_width) {
+            for c in token.text.chars() {
+                let cw = UnicodeWidthChar::width(c).unwrap_or(1);
+                if current_width + cw > target_width && current_width > continuation_indent_width {
+                    if active_style.is_some() {
+                        current_line.push_str("\x1b[0m");
+                    }
+                    result.push(current_line);
+                    current_line = continuation_indent.to_string();
+                    current_width = continuation_indent_width;
+                    if let Some(style) = &active_style {
+                        current_line.push_str(style);
+                    }
+                }
+                current_line.push(c);
+                current_width += cw;
+            }
+        } else {
+            current_line.push_str(token.text);
+            current_width += word_width;
+        }
+    }
+
+    if !current_line.is_empty() {
+        if active_style.is_some() {
+            current_line.push_str("\x1b[0m");
+        }
+        result.push(current_line);
+    }
+
+    if result.is_empty() {
+        result.push(String::new());
+    }
+
+    result
+}
+
+/// Format a dialog trace block for rendering with hierarchical guide rails, asymmetric framing, and responsive soft-wrapping.
 pub fn format_dialog_block(
     agent: &str,
     pid: u32,
@@ -3287,25 +3563,18 @@ pub fn format_dialog_block(
     let color = agent_color(agent);
     let colored_agent = color.bold().paint(agent).to_string();
 
-    let mut outer_indent = String::new();
-    let mut inner_rails = String::new();
-
-    for d in 0..depth {
-        let rail = match d {
-            0 => "│   ",
-            1 => "║   ",
-            _ => "╏   ",
-        };
-        outer_indent.push_str(rail);
-        inner_rails.push_str(rail);
-    }
+    let outer_indent = ancestor_rails(depth);
     let active_rail = match depth {
         0 => "│ ",
         1 => "║ ",
         _ => "╏ ",
     };
     let active_rail_colored = color.bold().paint(active_rail).to_string();
-    let line_prefix = format!("{inner_rails}{active_rail_colored} ");
+    let line_prefix = format!("{outer_indent}{active_rail_colored} ");
+    let prefix_visible_width = depth * 4 + 3;
+
+    let term_width = get_terminal_width();
+    let max_content_width = term_width.saturating_sub(prefix_visible_width).max(30);
 
     let (icon, dir_str, dir_color) = match direction {
         DialogDirection::Request => ("📥", "PROMPT SUBMITTED TO LLM", nu_ansi_term::Color::Cyan),
@@ -3313,17 +3582,40 @@ pub fn format_dialog_block(
     };
 
     let header_title = format!("{icon} [{pid} {colored_agent} [turn {turn}/{max_turns}] {}]", dir_color.bold().paint(dir_str));
-    let header_bar = format!("{outer_indent}┌── {header_title} ─────────────────────────────────");
-    let footer_bar = format!("{outer_indent}└── ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
+    let outer_indent_width = depth * 4;
+    let title_vis_width = visible_width(&header_title);
+    let top_prefix_width = outer_indent_width + 4; // for "┌── "
+    let top_total_width = top_prefix_width + title_vis_width;
 
-    let indented_content: Vec<String> = content
-        .lines()
-        .map(|line| format!("{line_prefix}{line}"))
-        .collect();
+    let header_bar = if term_width > top_total_width + 2 {
+        let dashes_count = term_width - top_total_width - 2;
+        let dashes = "─".repeat(dashes_count);
+        format!("{outer_indent}┌── {header_title} {dashes}")
+    } else {
+        format!("{outer_indent}┌── {header_title}")
+    };
+
+    let footer_prefix_width = outer_indent_width + 4; // for "└── "
+    let footer_dashes_count = term_width.saturating_sub(footer_prefix_width + 1).max(10);
+    let footer_dashes = "┄".repeat(footer_dashes_count);
+    let footer_bar = format!("{outer_indent}└── {footer_dashes}");
+
+    let mut indented_lines = Vec::new();
+    for raw_line in content.lines() {
+        if raw_line.is_empty() {
+            indented_lines.push(line_prefix.clone());
+        } else {
+            let cont_indent = detect_continuation_indent(raw_line);
+            let wrapped_chunks = wrap_ansi_line(raw_line, max_content_width, cont_indent);
+            for chunk in wrapped_chunks {
+                indented_lines.push(format!("{line_prefix}{chunk}"));
+            }
+        }
+    }
 
     format!(
         "\n{header_bar}\n{}\n{footer_bar}",
-        indented_content.join("\n")
+        indented_lines.join("\n")
     )
 }
 
@@ -3732,15 +4024,34 @@ pub fn render_event(
     if config.show_trace {
         if let Some(line) = format_trace_event(event, pid) {
             let depth = current_agent_depth();
-            let indent = "    ".repeat(depth);
+            let rails = ancestor_rails(depth);
             let color = agent_color(agent_label);
             let colored_label = color.bold().paint(agent_label).to_string();
-            let output = if *trace_header_printed {
-                format!("{indent}  [{line}]")
-            } else {
+            let header_str = if !*trace_header_printed {
                 *trace_header_printed = true;
-                format!("{indent}Agent {colored_label} ({pid}) loop trace:\n{indent}  [{line}]")
+                format!("{rails}Agent {colored_label} ({pid}) loop trace:\n")
+            } else {
+                String::new()
             };
+
+            let term_width = get_terminal_width();
+            let prefix = format!("{rails}  [");
+            let prefix_width = visible_width(&prefix);
+            let max_line_width = term_width.saturating_sub(prefix_width + 2).max(30);
+            let continuation_indent = format!("{rails}   ");
+
+            let wrapped_chunks = wrap_ansi_line(&line, max_line_width, &continuation_indent);
+            let mut formatted_line = String::new();
+            for (idx, chunk) in wrapped_chunks.iter().enumerate() {
+                if idx == 0 {
+                    formatted_line.push_str(&format!("{prefix}{chunk}"));
+                } else {
+                    formatted_line.push_str(&format!("\n{chunk}"));
+                }
+            }
+            formatted_line.push(']');
+
+            let output = format!("{header_str}{formatted_line}");
             if *IS_STDOUT_TERMINAL {
                 spinner.print_line(output)?;
             } else {
@@ -6035,6 +6346,89 @@ agent_loop:
             Some(v) => std::env::set_var("AICHAT_AGENT_DEPTH", v),
             None => std::env::remove_var("AICHAT_AGENT_DEPTH"),
         }
+    }
+
+    #[test]
+    fn test_strip_ansi_and_visible_width() {
+        let plain = "hello world";
+        assert_eq!(strip_ansi(plain), "hello world");
+        assert_eq!(visible_width(plain), 11);
+
+        let styled = nu_ansi_term::Color::Red.bold().paint("alert!").to_string();
+        assert_eq!(strip_ansi(&styled), "alert!");
+        assert_eq!(visible_width(&styled), 6);
+
+        let mixed = format!(
+            "{} {}",
+            nu_ansi_term::Color::Yellow.paint("⚡"),
+            nu_ansi_term::Color::Magenta.bold().paint("[new: tool]")
+        );
+        assert_eq!(visible_width(&mixed), 14);
+    }
+
+    #[test]
+    fn test_wrap_ansi_line_plain_text() {
+        let text = "The quick brown fox jumps over the lazy dog and runs across the wide open meadow.";
+        let chunks = wrap_ansi_line(text, 30, "    ");
+        assert!(chunks.len() >= 3);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(visible_width(chunk) <= 30);
+            if i > 0 {
+                assert!(chunk.starts_with("    "));
+            }
+        }
+    }
+
+    #[test]
+    fn test_wrap_ansi_line_with_ansi_styling() {
+        let styled_lead = nu_ansi_term::Color::Yellow.bold().paint("⚡ [new: tool_result: web_search] ->").to_string();
+        let body = "The Model Context Protocol (MCP) is an open standard and open-source framework developed by Anthropic in November 2024 to standardize AI system integrations.";
+        let full = format!("{styled_lead} {body}");
+
+        let chunks = wrap_ansi_line(&full, 60, "    ");
+        assert!(chunks.len() >= 3);
+        for (i, chunk) in chunks.iter().enumerate() {
+            assert!(visible_width(chunk) <= 60);
+            if i > 0 {
+                assert!(chunk.starts_with("    "));
+            }
+        }
+        assert!(chunks[0].contains('⚡'));
+    }
+
+    #[test]
+    fn test_format_dialog_block_wraps_long_lines_with_guide_rails() {
+        std::env::set_var("AICHAT_TERMINAL_WIDTH", "80");
+        let long_line = "This is a very long line of output from a tool or an LLM response that contains more than one hundred characters and would ordinarily wrap to column zero breaking the rails.";
+        let block = format_dialog_block("orchestrator", 100, 1, 10, DialogDirection::Response, long_line);
+
+        for line in block.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            assert!(line.starts_with("┌──") || line.starts_with("└──") || line.starts_with("\x1b[") || line.starts_with('│'));
+            assert!(visible_width(line) <= 80, "line exceeded 80 columns: visible width was {}", visible_width(line));
+        }
+        std::env::remove_var("AICHAT_TERMINAL_WIDTH");
+    }
+
+    #[test]
+    fn test_format_dialog_block_nested_child_rails_and_box_containment() {
+        std::env::set_var("AICHAT_AGENT_DEPTH", "1");
+        std::env::set_var("AICHAT_TERMINAL_WIDTH", "80");
+        let long_line = "{\n  \"guidance\": \"Sub-agent 'coder' was blocked by its read-only permission mask when attempting 'fs_create' (reason: capability_denied). Pre-mutation entries were unwound.\"\n}";
+        let block = format_dialog_block("coder", 200, 2, 20, DialogDirection::Request, long_line);
+
+        for line in block.lines() {
+            if line.is_empty() {
+                continue;
+            }
+            assert!(visible_width(line) <= 80, "line exceeded 80 columns: visible width was {}", visible_width(line));
+            assert!(line.contains('│'), "nested line missing parent rail: {}", line);
+        }
+
+        std::env::remove_var("AICHAT_AGENT_DEPTH");
+        std::env::remove_var("AICHAT_TERMINAL_WIDTH");
     }
 }
 
