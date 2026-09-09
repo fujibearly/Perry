@@ -182,7 +182,7 @@ This repository maintains continuous, chronological session handoff summaries do
       * **The LLM Risk Assessment is NOT a Pardoner:** Affirmed core invariant that `%assess-risk%` is strictly an extra check to prevent dangerous actions. It can only tighten restrictions (raise tiers, require human approval or halt on concerns); it must never be used to relax permissions or policies.
       * **Hard Authority Ceiling Sandboxing (Gate 1 & Gate 2 Unification):** Sub-agents cannot escalate over mTLS to elevate authority ceilings in-flight. When an action exceeds the sub-agent's ceiling (`required > child_ceiling`), actuation is blocked immediately (`authority_exceeded`). The child unwinds pre-mutation journal entries, halts, and returns structured `status: "permission_blocked", reason: "authority_exceeded"` to the parent orchestrator.
       * **Bounded Orchestrator Re-Delegation:** The parent orchestrator ingests the structured block and re-delegates with the required ceiling upfront (subject to the 2-attempt circuit breaker) or acts directly.
-      * **Verification & Testing (`Task 6d.32`):** Updated unit tests, Demo 3 and Demo 20 verification with clean work trees.
+      * **Verification & Testing (`Task 6d.32`):** Suite **486 pass, 0 fail** (478 unit + 5 catalog + 3 web asset security); `cargo clippy --all-targets -- -D warnings` clean; `cargo build --release` clean; live Demo 16, Demo 20, and Demo 3 verified 100% green with zero downward permits and clean re-delegation. Committed in `de0f501` and `1292218`.
       * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
 
 
