@@ -168,6 +168,9 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if cli.show_dialog {
         config.write().agent_loop.show_dialog = true;
     }
+    if cli.dialog_no_truncate {
+        config.write().agent_loop.dialog_no_truncate = true;
+    }
 
     if let Some(agent) = &cli.agent {
         let session = cli.session.as_ref().map(|v| match v {

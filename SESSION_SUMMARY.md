@@ -164,3 +164,14 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification:** Suite **481 pass, 0 fail** (473 unit + 5 catalog + 3 integration); `cargo clippy --all-targets -- -D warnings` clean; live Demo 3 verified green with ground-truth bash inspection and zero redundant evaluations.
       * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
 
+  15. **Session 15: Unbiased Grounded Risk Assessment & Full Untruncated Trace Observability**
+    * **Period:** `2026-09-08` $\rightarrow$ `2026-09-09`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-08-session15.md`](.kiro/docs/session-summary-2026-09-08-session15.md)
+    * **Focus Areas:**
+      * **Unbiased, Grounded Risk Assessment (`FR-6c.11` / Task `6c.15`):** Removed anchoring bias, pre-classified outcome hints (`static_tier`, `declaration.safety`, `# @meta risk` leaks in extracted source), and prompt directives ("you may only make an action STRICTER than static_tier"). Stripped dead OpenAPI parameter schemas (`declaration.parameters`). Evaluator receives 100% concrete execution ground truth: tool name, resolved CLI invocation string, runtime argument values, operational intent, flattened script source code (with metadata tags stripped), and active rollback safeguards (`rollback_mechanism` if proven reversible).
+      * **The LLM Ranks; Rust Enforces:** The LLM acts as an unconstrained, independent auditor that ranks blast radius (`safe` $\rightarrow$ `catastrophic`) and confidence (`low` $\rightarrow$ `high`); the Rust engine mathematically enforces the non-pardonable catalog and policy base floor via `clamp_verdict`.
+      * **Full Untruncated Trace Observability (`FR-6d.23` / Task `6d.29`):** Added engine-level configuration `dialog_no_truncate` (CLI flag `--dialog-no-truncate`, env var `AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE`) to bypass payload truncation in `format_messages_dialog`, `format_llm_response`, and `truncate_payload_dialog`. Added `--no-truncate` (`-n`) flag to `scripts/run-demos.nu`, bypassing both aichat dialog payload truncation and demo runner output capping.
+      * **Verification & Testing (`Task 6d.30`):** Suite **485 pass, 0 fail** (477 unit + 5 catalog + 3 integration); `cargo clippy --all-targets -- -D warnings` clean; live Demo 3 verified green with 100% grounded facts payload and full untruncated trace.
+      * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
+
+

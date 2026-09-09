@@ -900,65 +900,96 @@ pub fn extract_shell_function(script: &str, function_name: &str) -> Option<Strin
         }
     }
 
-    Some(lines[start_idx..=end_idx].join("\n"))
+    let extracted_lines: Vec<&str> = lines[start_idx..=end_idx]
+        .iter()
+        .copied()
+        .filter(|line| !line.trim().starts_with("# @meta"))
+        .collect();
+    Some(extracted_lines.join("\n"))
 }
 
-/// Build the context payload shown to the evaluator (FR-6c.3).
+/// Build the context payload shown to the evaluator (FR-6c.3, FR-6c.11).
 ///
-/// The evaluator role receives the action's identity and arguments alongside
-/// the tool's declaration (functional description from `@describe`, parameter schemas,
-/// and environment), its local implementation source code / execution mechanism,
-/// and the resolved invocation command line.
+/// The evaluator role receives only grounded execution facts and active safeguards:
+/// tool name, resolved invocation string, concrete arguments, operational intent,
+/// flattened script source code (with metadata tags stripped) or fallback functional description,
+/// and active rollback mechanisms (when proven reversible).
+/// It receives NO static tier classifications, schema noise, or biasing anchors.
 #[allow(clippy::too_many_arguments)]
 pub fn build_evaluator_context(
     tool_name: &str,
     arguments: &serde_json::Value,
-    static_tier: BlastRadius,
     proven_reversible: bool,
     intent: &str,
     declaration: Option<&ToolDeclarationContext>,
     implementation: Option<&ToolImplementation>,
     invocation: Option<&str>,
 ) -> String {
-    let mut payload = serde_json::json!({
-        "tool": tool_name,
-        "arguments": arguments,
-        "static_tier": static_tier.as_str(),
-        "reversible": proven_reversible,
-        "intent": intent,
-    });
-    if proven_reversible {
-        payload["rollback_mechanism"] = serde_json::json!("atomic pre-mutation backup in durable rollback journal");
-    }
-    if let Some(decl) = declaration {
-        if let Ok(val) = serde_json::to_value(decl) {
-            payload["declaration"] = val;
-        }
-    }
-    if let Some(imp) = implementation {
-        if let Ok(val) = serde_json::to_value(imp) {
-            payload["implementation"] = val;
-        }
-    }
+    let mut payload = serde_json::Map::new();
+    payload.insert("tool".to_string(), serde_json::json!(tool_name));
     if let Some(inv) = invocation {
-        payload["invocation"] = serde_json::json!(inv);
+        payload.insert("invocation".to_string(), serde_json::json!(inv));
     }
+    payload.insert("arguments".to_string(), arguments.clone());
+    payload.insert("intent".to_string(), serde_json::json!(intent));
+
+    let mut has_source = false;
+    if let Some(imp) = implementation {
+        match imp {
+            ToolImplementation::Script { path, source, .. } => {
+                payload.insert("source".to_string(), serde_json::json!(source));
+                payload.insert("script_path".to_string(), serde_json::json!(path));
+                has_source = true;
+            }
+            ToolImplementation::Binary { path } => {
+                payload.insert("binary_path".to_string(), serde_json::json!(path));
+            }
+            ToolImplementation::Mcp { server, tool } => {
+                payload.insert("mcp_server".to_string(), serde_json::json!(server));
+                payload.insert("mcp_tool".to_string(), serde_json::json!(tool));
+            }
+            ToolImplementation::Builtin => {
+                payload.insert("builtin".to_string(), serde_json::json!(true));
+            }
+            ToolImplementation::Unknown => {}
+        }
+    }
+
+    if !has_source {
+        if let Some(decl) = declaration {
+            if !decl.description.is_empty() {
+                payload.insert("description".to_string(), serde_json::json!(decl.description));
+            }
+            if let Some(ref notes) = decl.functional_notes {
+                if !notes.is_empty() {
+                    payload.insert("functional_notes".to_string(), serde_json::json!(notes));
+                }
+            }
+        }
+    }
+
+    if proven_reversible {
+        payload.insert(
+            "rollback_mechanism".to_string(),
+            serde_json::json!("atomic pre-mutation backup in durable rollback journal"),
+        );
+    }
+
+    let val = serde_json::Value::Object(payload);
     // Pretty-print so the single action is legible; it is small by construction.
-    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| payload.to_string())
+    serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())
 }
 
 #[cfg(test)]
 pub fn build_evaluator_context_simple(
     tool_name: &str,
     arguments: &serde_json::Value,
-    static_tier: BlastRadius,
     proven_reversible: bool,
     intent: &str,
 ) -> String {
     build_evaluator_context(
         tool_name,
         arguments,
-        static_tier,
         proven_reversible,
         intent,
         None,
@@ -1852,17 +1883,27 @@ mod tests {
     #[test]
     fn evaluator_context_contains_only_the_allowed_fields() {
         let args = serde_json::json!({"path": "/etc/hosts", "content": "x"});
-        let ctx = build_evaluator_context_simple("fs_write", &args, Disruptive, false, "update hosts");
+        let ctx = build_evaluator_context_simple("fs_write", &args, false, "update hosts");
         let parsed: serde_json::Value = serde_json::from_str(&ctx).unwrap();
         let obj = parsed.as_object().unwrap();
-        // Exactly the five whitelisted keys when no extra context is supplied.
+        // Exactly the three grounded keys when no extra context is supplied: arguments, intent, tool.
         let mut keys: Vec<&str> = obj.keys().map(|s| s.as_str()).collect();
         keys.sort_unstable();
-        assert_eq!(keys, vec!["arguments", "intent", "reversible", "static_tier", "tool"]);
+        assert_eq!(keys, vec!["arguments", "intent", "tool"]);
         assert_eq!(obj["tool"], "fs_write");
-        assert_eq!(obj["static_tier"], "disruptive");
-        assert_eq!(obj["reversible"], false);
+        assert_eq!(obj["arguments"]["path"], "/etc/hosts");
         assert_eq!(obj["intent"], "update hosts");
+        assert!(obj.get("static_tier").is_none());
+        assert!(obj.get("reversible").is_none());
+    }
+
+    #[test]
+    fn evaluator_context_includes_rollback_when_reversible() {
+        let args = serde_json::json!({"path": "/tmp/test.txt"});
+        let ctx = build_evaluator_context_simple("fs_write", &args, true, "write file");
+        let parsed: serde_json::Value = serde_json::from_str(&ctx).unwrap();
+        assert_eq!(parsed["rollback_mechanism"], "atomic pre-mutation backup in durable rollback journal");
+        assert!(parsed.get("static_tier").is_none());
     }
 
     #[test]
@@ -1899,7 +1940,6 @@ mod tests {
         let ctx = build_evaluator_context(
             "execute_command",
             &args,
-            Destructive,
             false,
             "check repo status",
             Some(&decl),
@@ -1908,12 +1948,43 @@ mod tests {
         );
         let parsed: serde_json::Value = serde_json::from_str(&ctx).unwrap();
         assert_eq!(parsed["tool"], "execute_command");
-        assert_eq!(parsed["declaration"]["description"], "Execute the shell command.");
-        assert_eq!(parsed["declaration"]["functional_notes"], "Runs in a bash subshell.");
-        assert_eq!(parsed["declaration"]["parameters"]["command"]["required"], true);
-        assert_eq!(parsed["implementation"]["type"], "script");
-        assert_eq!(parsed["implementation"]["source"], "eval \"$argc_command\"");
+        assert_eq!(parsed["source"], "eval \"$argc_command\"");
+        assert_eq!(parsed["script_path"], "tools/execute_command.sh");
         assert_eq!(parsed["invocation"], invocation);
+        // Zero static_tier and zero schema noise
+        assert!(parsed.get("static_tier").is_none());
+        assert!(parsed.get("declaration").is_none());
+        assert!(parsed.get("implementation").is_none());
+    }
+
+    #[test]
+    fn evaluator_context_description_fallback_when_no_source() {
+        let args = serde_json::json!({});
+        let decl = ToolDeclarationContext {
+            description: "Inspect system distribution information.".into(),
+            functional_notes: Some("Reads /etc/os-release.".into()),
+            parameters: indexmap::IndexMap::new(),
+            environment: indexmap::IndexMap::new(),
+            safety: None,
+        };
+        let implementation = ToolImplementation::Binary {
+            path: "/usr/bin/sysinfo".into(),
+        };
+        let ctx = build_evaluator_context(
+            "sysinfo",
+            &args,
+            false,
+            "check os",
+            Some(&decl),
+            Some(&implementation),
+            Some("sysinfo"),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&ctx).unwrap();
+        assert_eq!(parsed["tool"], "sysinfo");
+        assert_eq!(parsed["description"], "Inspect system distribution information.");
+        assert_eq!(parsed["functional_notes"], "Reads /etc/os-release.");
+        assert_eq!(parsed["binary_path"], "/usr/bin/sysinfo");
+        assert!(parsed.get("source").is_none());
     }
 
     #[test]
@@ -2208,6 +2279,7 @@ other_tool() {
         assert!(extracted.contains("fs_create() {"));
         assert!(extracted.contains("mkdir -p"));
         assert!(!extracted.contains("other_tool"));
+        assert!(!extracted.contains("# @meta"));
     }
 
     #[test]

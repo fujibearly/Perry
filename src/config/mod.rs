@@ -285,6 +285,8 @@ pub struct AgentLoopConfig {
     pub show_trace: bool,
     /// Print full LLM prompt and response dialog to trace. Default: false.
     pub show_dialog: bool,
+    /// Do not truncate dialog trace payloads. Default: false.
+    pub dialog_no_truncate: bool,
     /// Inject the _plan pseudo-tool. Default: true.
     pub planning_tool: bool,
     /// Emit OSC 0/2 terminal title updates. Default: true.
@@ -307,6 +309,7 @@ impl Default for AgentLoopConfig {
             max_agent_depth: 3,
             show_trace: false,
             show_dialog: false,
+            dialog_no_truncate: false,
             planning_tool: true,
             osc_title: true,
             status_file: true,
@@ -2935,6 +2938,9 @@ impl Config {
         }
         if let Some(Some(v)) = read_env_bool(&get_env_name("agent_loop_show_dialog")) {
             self.agent_loop.show_dialog = v;
+        }
+        if let Some(Some(v)) = read_env_bool(&get_env_name("agent_loop_dialog_no_truncate")) {
+            self.agent_loop.dialog_no_truncate = v;
         }
         if let Some(Some(v)) = read_env_value::<f64>(&get_env_name("agent_loop_max_cost")) {
             self.agent_loop.max_cost = v;

@@ -111,12 +111,15 @@ def show-trace [trace: string] {
     }
 }
 
-# Print model output (truncated to keep readable)
-def show-output [output: string, --max-lines: int = 15] {
+# Print model output (truncated to keep readable unless no-truncate is specified)
+def show-output [output: string, --max-lines: int = 15, --no-truncate] {
     let lines = ($output | str trim | lines)
     if ($lines | length) > 0 {
         print $"  (ansi green)┄┄┄ output ┄┄┄(ansi reset)"
-        let display_lines = if ($lines | length) > $max_lines {
+        let should_not_truncate = ($no_truncate or ($env.AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE? == "true"))
+        let display_lines = if $should_not_truncate {
+            $lines
+        } else if ($lines | length) > $max_lines {
             ($lines | first $max_lines) | append $"... \(($lines | length) lines total\)"
         } else {
             $lines
@@ -174,6 +177,7 @@ def should-run-demo [demo_id: string, target_demo: string] {
 def main [
     --debug (-d),             # Execute tests one by one, waiting for user input to proceed
     --dialog,                 # Display full submitted LLM prompt and response observability trace
+    --no-truncate (-n),       # Cancel default truncation of dialog traces and output
     --demo (-t): string = "", # Run only a specific demo (e.g. --demo 3 or -t 10b)
 ] {
     let valid_demos = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21"]
@@ -181,16 +185,21 @@ def main [
         print $"(ansi red_bold)ERROR:(ansi reset) Unknown demo '($demo)'. Valid demos: ($valid_demos | str join ', ')"
         exit 1
     }
+    if $no_truncate {
+        $env.AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE = "true"
+    }
     # Base environment for all aichat invocations. AICHAT_MODEL makes every demo
     # use DEMO_MODEL as its default model without needing a per-demo -m flag;
     # WEB_SEARCH_MODEL points the researcher/web-search tooling at the same model;
     # AICHAT_AGENT_LOOP_SHOW_DIALOG enables the LLM dialog trace when --dialog is set.
+    # AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE disables dialog truncation when --no-truncate is set.
     let base_env = {
         AICHAT_FUNCTIONS_DIR: $functions_dir
         AICHAT_MODEL: $DEMO_MODEL
         WEB_SEARCH_MODEL: $DEMO_MODEL
         AICHAT_SAFETY_RISK_MODEL: $DEMO_MODEL
     } | merge (if $dialog { { AICHAT_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
+      | merge (if $no_truncate { { AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE: "true" } } else { {} })
 
     # ─── Preflight Checks ────────────────────────────────────────────────────────
 

@@ -201,8 +201,16 @@ can fall back to it.
   `permissions_ceiling`, etc.) and supervisory IPC envelopes MUST be omitted, presenting the risk
   assessor with the concrete target path, invocation CLI, and executable source code rather than
   self-reported declarative metadata.
+- **FR-6c.11 — Unbiased, Grounded Risk Assessment.** The prompt submitted to `%assess-risk%` and the
+  JSON context payload MUST NOT contain pre-classified outcome hints (`static_tier`, `declaration.safety`,
+  or `# @meta risk` tags) nor prompt directives instructing the model to be "only stricter than static_tier".
+  The evaluator MUST independently rank the proposed action on blast radius (`safe` → `catastrophic`) and
+  confidence (`low` → `high`) based strictly on objective execution ground truth (tool name, invocation CLI,
+  resolved arguments, intent, script source code, and active safeguards like rollback backups). The non-pardonable
+  safety floor is enforced exclusively in Rust via `clamp_verdict`.
 
 ### Phase #6d — Escalation & Control Protocol + Human-in-the-Loop
+
 
 > **As-built transport decision (Path 1′, supersedes the WSS specifics below).** The #6d channel
 > is implemented as **mutual-TLS over a raw loopback TCP stream with hand-rolled length-delimited
@@ -346,6 +354,8 @@ can fall back to it.
   In `handle_escalation_request`, if an incoming escalation request arrives with reason `"capability_denied"`, the supervisor MUST immediately reject it with `VerdictDecision::Halt` (`"Capability mask is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit mutating permission contract."`).
 - **FR-6d.22 — Downward Supervisory Verdict & Permit Propagation.**
   When a supervisor approves an over-ceiling escalation with `VerdictDecision::Continue`, `VerdictMsg` MUST optionally include the supervisor's evaluated `RiskVerdict` and a scoped `ExecutionPermit` token. The child agent MUST record the supervisor's verdict into its local `RiskCache` and honor the permit token, eliminating redundant local `%assess-risk%` evaluations and duplicate second-round escalations for the same tool invocation.
+- **FR-6d.23 — Full Untruncated Trace Observability.**
+  The agent loop dialog trace MUST support disabling line truncation via `AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE=true` (and `--dialog-no-truncate`), and `scripts/run-demos.nu` MUST provide a `--no-truncate` (`-n`) flag to cancel trace and output truncation across both `aichat` dialog messages and demo runner output caps.
 
 ## Non-Functional Requirements
 

@@ -93,8 +93,10 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
       - Verified via `argc test` and all 16 demos in `scripts/run-demos.nu`.
 - [x] 6c.13 Verdict-level caching (`RiskCache` storing `RiskVerdict`): Store full structured verdict (tier, confidence, rationale, concerns) rather than scalar floor. Preserves rationale for cache hits, retains dynamic act-time reversibility (`one_step_down`), and enforces catalog/policy floors via `clamp_verdict`. (FR-6c.9)
 - [x] 6c.14 Execution-level inspection: Update `resolve_tool_implementation` to extract function bodies from multi-tool scripts (`tools.sh`); strip parameter schema definitions (`permissions_*`, etc.) and IPC envelopes from evaluator context to focus assessor on executable code. (FR-6c.10)
+- [x] 6c.15 Unbiased, Grounded Risk Assessment: Eliminate `static_tier`, `declaration.safety`, `# @meta risk` leakage, and prompt outcome hints ("only make stricter"). Update `build_evaluator_context` to provide pure execution ground truth (tool, invocation, arguments, intent, script source, active rollback safeguard) while Rust strictly enforces non-pardonable floors. (FR-6c.11)
 
 ## Phase #6d — Escalation & Control Protocol + Human-in-the-Loop (branch `feat/tool-safety-6d`)
+
 
 > **Transport (Path 1′):** mutual-TLS over a raw loopback TCP stream + hand-rolled length-delimited
 > JSON framing (via `tokio-rustls`, already in the tree; only `rcgen` added). NOT WebSocket — WS
@@ -148,6 +150,8 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 - [x] 6d.26 Specs & documentation: add Decision B as-built note to `design.md`, update `roadmap.md`, and record session summary.
 - [x] 6d.27 Downward supervisory verdict & permit propagation: In `VerdictMsg`, include `risk_verdict: Option<RiskVerdict>` and `ExecutionPermit` token when supervisor approves over-ceiling action; child seeds local `RiskCache` and skips redundant second risk evaluation and duplicate escalation. (FR-6d.22)
 - [x] 6d.28 Unit tests, verification & docs for Sessions 12-13: Add unit tests for verdict propagation and permit validation; update roadmap and session logs.
+- [x] 6d.29 Full Untruncated Trace Observability: Add `dialog_no_truncate` to `AgentLoopConfig`, CLI `--dialog-no-truncate`, and env var `AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE`; add `--no-truncate` (`-n`) flag in `scripts/run-demos.nu` to bypass trace line capping and dialog truncation. (FR-6d.23)
+- [x] 6d.30 Unit testing, verification, and documentation updates for Session 15.
 
 ## Cross-cutting / Land
 

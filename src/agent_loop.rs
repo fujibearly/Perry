@@ -1183,7 +1183,6 @@ async fn risk_evaluator_denied_result(
     let context = build_evaluator_context(
         &call.name,
         &call.arguments,
-        base_tier,
         reversible,
         &intent,
         decl_ctx.as_ref(),
@@ -1272,10 +1271,11 @@ async fn run_risk_evaluator(
 
     let input = Input::from_str(config, context, Some(role.to_role()));
     let show_dialog = config.read().agent_loop.show_dialog;
+    let no_truncate = config.read().agent_loop.dialog_no_truncate;
     let pid = std::process::id();
     if show_dialog {
         let prompt_display = match input.build_messages() {
-            Ok(msgs) => format_messages_dialog(&msgs),
+            Ok(msgs) => format_messages_dialog(&msgs, no_truncate),
             Err(_) => context.to_string(),
         };
         if let Some(p) = progress {
@@ -1302,6 +1302,7 @@ async fn run_risk_evaluator(
     match &res {
         Ok(text) => {
             if show_dialog {
+                let response_content = truncate_payload_dialog(text, 20, 20, no_truncate);
                 if let Some(p) = progress {
                     p.emit(AgentLoopEvent::DialogBlock {
                         agent: ASSESS_RISK_ROLE.to_string(),
@@ -1309,7 +1310,7 @@ async fn run_risk_evaluator(
                         turn: 1,
                         max_turns: 1,
                         direction: DialogDirection::Response,
-                        content: text.clone(),
+                        content: response_content.clone(),
                     });
                 } else {
                     emit_dialog_block(
@@ -1318,7 +1319,7 @@ async fn run_risk_evaluator(
                         1,
                         1,
                         DialogDirection::Response,
-                        text,
+                        &response_content,
                     );
                 }
             }
@@ -1809,7 +1810,6 @@ async fn handle_escalation_request(
             let eval_context_str = crate::safety::build_evaluator_context(
                 tool_name,
                 &args,
-                effective_blast_radius,
                 reversible,
                 &supervisory_intent,
                 decl_ctx.as_ref(),
@@ -2706,10 +2706,11 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
         }
 
         if params.config.read().agent_loop.show_dialog {
+            let no_truncate = params.config.read().agent_loop.dialog_no_truncate;
             let prompt_display = match current_input.build_messages() {
                 Ok(mut msgs) => {
                     crate::client::patch_messages(&mut msgs, &model);
-                    format_messages_dialog(&msgs)
+                    format_messages_dialog(&msgs, no_truncate)
                 }
                 Err(e) => format!("(failed to format messages: {e})"),
             };
@@ -2728,7 +2729,8 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
         let (output, tool_calls) = match call_res {
             Ok(val) => {
                 if params.config.read().agent_loop.show_dialog {
-                    let response_display = format_llm_response(&val.0, &val.1);
+                    let no_truncate = params.config.read().agent_loop.dialog_no_truncate;
+                    let response_display = format_llm_response(&val.0, &val.1, no_truncate);
                     params.progress.emit(AgentLoopEvent::DialogBlock {
                         agent: agent_name.clone(),
                         pid,
@@ -3125,8 +3127,11 @@ fn truncate_line_width(line: &str, max_len: usize) -> String {
 }
 
 /// Truncates payload text for dialog observability trace to at most top N lines and bottom N lines.
-/// Preserves full content if lines <= top + bottom.
-pub fn truncate_payload_dialog(text: &str, top: usize, bottom: usize) -> String {
+/// Preserves full content if lines <= top + bottom or if no_truncate is true.
+pub fn truncate_payload_dialog(text: &str, top: usize, bottom: usize, no_truncate: bool) -> String {
+    if no_truncate {
+        return text.to_string();
+    }
     let lines: Vec<&str> = text.lines().collect();
     if lines.len() > top + bottom {
         let omitted = lines.len() - top - bottom;
@@ -3154,8 +3159,8 @@ pub fn truncate_payload_dialog(text: &str, top: usize, bottom: usize) -> String 
 
 /// Format messages submitted to LLM for dialog observability trace.
 /// The instruction portion (system prompt) is shown in full.
-/// Payloads (user messages, assistant messages, tool results) are truncated to at most top 20 and last 20 lines.
-pub fn format_messages_dialog(messages: &[crate::client::Message]) -> String {
+/// Payloads (user messages, assistant messages, tool results) are truncated to at most top 20 and last 20 lines unless no_truncate is true.
+pub fn format_messages_dialog(messages: &[crate::client::Message], no_truncate: bool) -> String {
     use crate::client::{MessageContent, MessageContentPart, MessageRole};
     let mut out = String::new();
     for (i, msg) in messages.iter().enumerate() {
@@ -3170,7 +3175,7 @@ pub fn format_messages_dialog(messages: &[crate::client::Message]) -> String {
                 if msg.role == MessageRole::System {
                     t.clone()
                 } else {
-                    truncate_payload_dialog(t, 20, 20)
+                    truncate_payload_dialog(t, 20, 20, no_truncate)
                 }
             }
             MessageContent::Array(parts) => {
@@ -3185,13 +3190,13 @@ pub fn format_messages_dialog(messages: &[crate::client::Message]) -> String {
                 if msg.role == MessageRole::System {
                     text
                 } else {
-                    truncate_payload_dialog(&text, 20, 20)
+                    truncate_payload_dialog(&text, 20, 20, no_truncate)
                 }
             }
             MessageContent::ToolCalls(tc) => {
                 let mut parts = Vec::new();
                 if !tc.text.is_empty() {
-                    parts.push(truncate_payload_dialog(&tc.text, 20, 20));
+                    parts.push(truncate_payload_dialog(&tc.text, 20, 20, no_truncate));
                 }
                 for res in &tc.tool_results {
                     let output_str = if let Some(s) = res.output.as_str() {
@@ -3203,7 +3208,7 @@ pub fn format_messages_dialog(messages: &[crate::client::Message]) -> String {
                     } else {
                         res.output.to_string()
                     };
-                    let truncated_output = truncate_payload_dialog(&output_str, 20, 20);
+                    let truncated_output = truncate_payload_dialog(&output_str, 20, 20, no_truncate);
                     parts.push(format!("tool_result: {} -> {}", res.call.name, truncated_output));
                 }
                 parts.join("\n")
@@ -3221,10 +3226,11 @@ pub fn format_messages_dialog(messages: &[crate::client::Message]) -> String {
 pub fn format_llm_response(
     output: &ChatCompletionsOutput,
     tool_calls: &[crate::client::ToolCall],
+    no_truncate: bool,
 ) -> String {
     let mut parts = Vec::new();
     if !output.text.trim().is_empty() {
-        parts.push(truncate_payload_dialog(output.text.trim(), 20, 20));
+        parts.push(truncate_payload_dialog(output.text.trim(), 20, 20, no_truncate));
     }
     if !tool_calls.is_empty() {
         let calls_val: Vec<_> = tool_calls
@@ -3237,7 +3243,7 @@ pub fn format_llm_response(
             })
             .collect();
         if let Ok(calls_str) = serde_json::to_string_pretty(&calls_val) {
-            parts.push(format!("tool_calls:\n{}", truncate_payload_dialog(&calls_str, 20, 20)));
+            parts.push(format!("tool_calls:\n{}", truncate_payload_dialog(&calls_str, 20, 20, no_truncate)));
         } else {
             parts.push(format!("tool_calls: {:?}", tool_calls));
         }
@@ -5437,7 +5443,6 @@ agent_loop:
         let context = crate::safety::build_evaluator_context(
             tool_name,
             &call_args,
-            crate::function::BlastRadius::Destructive,
             false,
             "execute tool 'my_tool'",
             decl_ctx.as_ref(),
@@ -5446,9 +5451,8 @@ agent_loop:
         );
         let parsed: serde_json::Value = serde_json::from_str(&context).unwrap();
         assert_eq!(parsed["tool"], "my_tool");
-        assert_eq!(parsed["declaration"]["description"], "Test tool.");
-        assert_eq!(parsed["implementation"]["type"], "script");
-        assert!(parsed["implementation"]["source"].as_str().unwrap().contains("eval"));
+        assert!(parsed["source"].as_str().unwrap().contains("eval"));
+        assert!(parsed["script_path"].as_str().unwrap().contains("my_tool.sh"));
 
         match prev {
             Some(v) => std::env::set_var("AICHAT_FUNCTIONS_DIR", v),
@@ -5811,14 +5815,14 @@ agent_loop:
     #[test]
     fn test_truncate_payload_dialog_under_limit() {
         let text = (1..=20).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        let result = truncate_payload_dialog(&text, 20, 20);
+        let result = truncate_payload_dialog(&text, 20, 20, false);
         assert_eq!(result, text);
     }
 
     #[test]
     fn test_truncate_payload_dialog_over_limit() {
         let text = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
-        let result = truncate_payload_dialog(&text, 20, 20);
+        let result = truncate_payload_dialog(&text, 20, 20, false);
         assert!(result.starts_with("line 1\nline 2\n"));
         assert!(result.ends_with("\nline 99\nline 100"));
         assert!(result.contains("... (payload truncated: 60 lines omitted) ..."));
@@ -5833,6 +5837,14 @@ agent_loop:
     }
 
     #[test]
+    fn test_truncate_payload_dialog_no_truncate() {
+        let text = (1..=100).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let result = truncate_payload_dialog(&text, 20, 20, true);
+        assert_eq!(result, text);
+        assert!(!result.contains("omitted"));
+    }
+
+    #[test]
     fn test_format_messages_dialog_preserves_system_instructions() {
         use crate::client::{Message, MessageContent, MessageRole};
         // 60 lines of system instructions
@@ -5843,7 +5855,7 @@ agent_loop:
             Message::new(MessageRole::System, MessageContent::Text(sys_text.clone())),
             Message::new(MessageRole::User, MessageContent::Text(user_text)),
         ];
-        let dialog = format_messages_dialog(&msgs);
+        let dialog = format_messages_dialog(&msgs, false);
         // System instructions must be preserved in full
         assert!(dialog.contains(&format!("[system]\n{sys_text}")));
         // User payload must be truncated
@@ -5853,6 +5865,22 @@ agent_loop:
         assert!(dialog.contains("data 41"));
         assert!(dialog.contains("data 60"));
         assert!(!dialog.contains("data 25"));
+    }
+
+    #[test]
+    fn test_format_messages_dialog_no_truncate() {
+        use crate::client::{Message, MessageContent, MessageRole};
+        let sys_text = (1..=60).map(|i| format!("instruction {i}")).collect::<Vec<_>>().join("\n");
+        let user_text = (1..=60).map(|i| format!("data {i}")).collect::<Vec<_>>().join("\n");
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text(sys_text.clone())),
+            Message::new(MessageRole::User, MessageContent::Text(user_text)),
+        ];
+        let dialog = format_messages_dialog(&msgs, true);
+        assert!(dialog.contains(&format!("[system]\n{sys_text}")));
+        assert!(!dialog.contains("omitted"));
+        assert!(dialog.contains("data 25"));
+        assert!(dialog.contains("data 60"));
     }
 
     #[test]
