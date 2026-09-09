@@ -409,7 +409,7 @@ pub enum VerdictConfidence {
 /// Deliberately small. `tier` is the evaluator's assessed blast radius; `reversible`
 /// its reversibility opinion (only ever used to *withhold* a credit, never grant
 /// one); `confidence` gates whether the verdict is trusted at all.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RiskVerdict {
     pub tier: BlastRadius,
     pub reversible: bool,
@@ -419,6 +419,36 @@ pub struct RiskVerdict {
 }
 
 impl RiskVerdict {
+    /// Monotonically merge two verdicts, keeping the stricter blast radius,
+    /// demanding agreement on reversibility, and failing toward caution (Low confidence).
+    pub fn merge_stricter(&self, other: &RiskVerdict) -> RiskVerdict {
+        let confidence = match (self.confidence, other.confidence) {
+            (VerdictConfidence::High, VerdictConfidence::High) => VerdictConfidence::High,
+            (VerdictConfidence::Low, _) | (_, VerdictConfidence::Low) => VerdictConfidence::Low,
+            _ => VerdictConfidence::Medium,
+        };
+        let rationale = if self.rationale.is_empty() {
+            other.rationale.clone()
+        } else if other.rationale.is_empty() || self.rationale == other.rationale {
+            self.rationale.clone()
+        } else {
+            format!("{}; {}", self.rationale, other.rationale)
+        };
+        let mut concerns = self.concerns.clone();
+        for c in &other.concerns {
+            if !concerns.contains(c) {
+                concerns.push(c.clone());
+            }
+        }
+        RiskVerdict {
+            tier: self.tier.max(other.tier),
+            reversible: self.reversible && other.reversible,
+            confidence,
+            rationale,
+            concerns,
+        }
+    }
+
     /// A conservative fallback verdict: keep the deterministic tier, no
     /// reversibility credit, low confidence. Used when the model output cannot
     /// be trusted (FR-6c.4/6c.8) so the caller fails toward escalation.
@@ -629,7 +659,10 @@ pub fn parse_script_header_comments(
         }
 
         let comment = trimmed.trim_start_matches('#').trim();
-        if let Some(rest) = comment.strip_prefix("@describe") {
+        if let Some(rest) = comment
+            .strip_prefix("@describe")
+            .or_else(|| comment.strip_prefix("@cmd"))
+        {
             let d = rest.trim();
             if !d.is_empty() {
                 desc = d.to_string();
@@ -706,6 +739,11 @@ pub fn extract_declaration_context(
     if let Some(d) = decl {
         if let Some(props) = &d.parameters.properties {
             for (name, prop) in props {
+                // Filter out declarative schema noise (permissions_mask, permissions_ceiling, etc.)
+                // so the evaluator receives only the tool's actual functional arguments.
+                if name.starts_with("permissions") || name.starts_with("__") {
+                    continue;
+                }
                 let required = d
                     .parameters
                     .required
@@ -743,6 +781,9 @@ pub fn extract_declaration_context(
         }
         if parameters.is_empty() {
             for (name, doc) in parsed_options {
+                if name.starts_with("permissions") || name.starts_with("__") {
+                    continue;
+                }
                 parameters.insert(name, doc);
             }
         }
@@ -764,6 +805,102 @@ pub fn extract_declaration_context(
         environment,
         safety,
     })
+}
+
+/// Extract a named shell function definition (and any preceding doc comments)
+/// from a multi-tool shell script (e.g. `tools.sh`).
+pub fn extract_shell_function(script: &str, function_name: &str) -> Option<String> {
+    let lines: Vec<&str> = script.lines().collect();
+    let mut def_line_idx = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim_start();
+        let rest = if let Some(stripped) = t.strip_prefix("function ") {
+            stripped.trim_start()
+        } else {
+            t
+        };
+        if let Some(after_name) = rest.strip_prefix(function_name) {
+            let after = after_name.trim_start();
+            if after.starts_with("()") || after.starts_with('{') {
+                def_line_idx = Some(i);
+                break;
+            }
+        }
+    }
+
+    let def_idx = def_line_idx?;
+
+    // Look backwards from def_idx to find preceding doc comments (# @cmd, # @option, etc.)
+    let mut start_idx = def_idx;
+    for i in (0..def_idx).rev() {
+        let trimmed = lines[i].trim();
+        if trimmed.starts_with('#') {
+            start_idx = i;
+        } else {
+            break;
+        }
+    }
+
+    // Scan forward from def_idx to find the end of the function body
+    let mut end_idx = def_idx;
+    let mut depth: i32 = 0;
+    let mut seen_open = false;
+
+    for (i, line) in lines.iter().enumerate().skip(def_idx) {
+        let trimmed = line.trim();
+        if seen_open && depth <= 1 && (trimmed == "}" || trimmed.starts_with("};")) {
+            end_idx = i;
+            break;
+        }
+
+        let mut in_single = false;
+        let mut in_double = false;
+        let mut escaped = false;
+
+        for ch in line.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if ch == '\\' && !in_single {
+                escaped = true;
+                continue;
+            }
+            if ch == '\'' && !in_double {
+                in_single = !in_single;
+                continue;
+            }
+            if ch == '"' && !in_single {
+                in_double = !in_double;
+                continue;
+            }
+            if in_single {
+                continue;
+            }
+            if !in_double && ch == '#' {
+                break;
+            }
+
+            if ch == '{' {
+                depth += 1;
+                seen_open = true;
+            } else if ch == '}' {
+                depth -= 1;
+                if seen_open && depth <= 0 {
+                    end_idx = i;
+                    break;
+                }
+            }
+        }
+
+        if seen_open && depth <= 0 {
+            end_idx = i;
+            break;
+        }
+    }
+
+    Some(lines[start_idx..=end_idx].join("\n"))
 }
 
 /// Build the context payload shown to the evaluator (FR-6c.3).
@@ -900,7 +1037,7 @@ pub fn stricter_of(a: RequiredAuthority, b: RequiredAuthority) -> RequiredAuthor
 /// never pre-clear (green-light) — the act-time floor is untouched.
 #[derive(Debug, Clone, Default)]
 pub struct RiskCache {
-    entries: std::collections::HashMap<String, RequiredAuthority>,
+    entries: std::collections::HashMap<String, RiskVerdict>,
 }
 
 impl RiskCache {
@@ -921,27 +1058,26 @@ impl RiskCache {
         format!("{tool_name}\u{1f}{canon}")
     }
 
-    /// The strictest authority recorded for this exact action, if any.
+    /// The strictest risk verdict recorded for this exact action, if any.
     pub fn get(
         &self,
         tool_name: &str,
         arguments: &serde_json::Value,
-    ) -> Option<RequiredAuthority> {
-        self.entries.get(&Self::key(tool_name, arguments)).copied()
+    ) -> Option<RiskVerdict> {
+        self.entries.get(&Self::key(tool_name, arguments)).cloned()
     }
 
-    /// Record an authority for an action, keeping only the **strictest** seen.
-    /// Recording a value no stricter than the current entry is a no-op.
+    /// Record a risk verdict for an action, keeping only the **strictest** seen.
     pub fn raise(
         &mut self,
         tool_name: &str,
         arguments: &serde_json::Value,
-        authority: RequiredAuthority,
+        verdict: RiskVerdict,
     ) {
         let k = Self::key(tool_name, arguments);
         let merged = match self.entries.get(&k) {
-            Some(existing) => stricter_of(*existing, authority),
-            None => authority,
+            Some(existing) => existing.merge_stricter(&verdict),
+            None => verdict,
         };
         self.entries.insert(k, merged);
     }
@@ -1037,6 +1173,12 @@ pub struct VerdictMsg {
     /// Optional context the parent adds to guide a `Continue` retry.
     #[serde(default)]
     pub added_context: Option<serde_json::Value>,
+    /// Optional permit token granting execution if Continue is authorized.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Evaluated risk verdict if assessed by the parent/supervisor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub risk_verdict: Option<RiskVerdict>,
 }
 
 /// Cooperative cancellation sent **parent → child** (generalizes HALT beyond an
@@ -1947,38 +2089,58 @@ main() {
 
     #[test]
     fn risk_cache_is_raise_only_and_keyed_by_action() {
-        use RequiredAuthority::*;
         let mut cache = RiskCache::new();
         let args = serde_json::json!({"path": "/etc/hosts"});
 
         assert_eq!(cache.get("fs_write", &args), None);
 
-        // First record establishes the entry.
-        cache.raise("fs_write", &args, Tier(Disruptive));
-        assert_eq!(cache.get("fs_write", &args), Some(Tier(Disruptive)));
+        let v_disruptive = RiskVerdict {
+            tier: BlastRadius::Disruptive,
+            reversible: true,
+            confidence: VerdictConfidence::High,
+            rationale: "disruptive write".into(),
+            concerns: vec![],
+        };
+        cache.raise("fs_write", &args, v_disruptive.clone());
+        assert_eq!(cache.get("fs_write", &args), Some(v_disruptive));
 
         // A more permissive record is a NO-OP (raise-only).
-        cache.raise("fs_write", &args, Tier(Safe));
-        assert_eq!(cache.get("fs_write", &args), Some(Tier(Disruptive)));
+        let v_safe = RiskVerdict {
+            tier: BlastRadius::Safe,
+            reversible: true,
+            confidence: VerdictConfidence::High,
+            rationale: "safe read".into(),
+            concerns: vec![],
+        };
+        cache.raise("fs_write", &args, v_safe);
+        assert_eq!(cache.get("fs_write", &args).unwrap().tier, BlastRadius::Disruptive);
 
         // A stricter record raises it.
-        cache.raise("fs_write", &args, Tier(Destructive));
-        assert_eq!(cache.get("fs_write", &args), Some(Tier(Destructive)));
-
-        // Human is the ceiling and cannot be lowered afterward.
-        cache.raise("fs_write", &args, Human);
-        assert_eq!(cache.get("fs_write", &args), Some(Human));
-        cache.raise("fs_write", &args, Tier(Safe));
-        assert_eq!(cache.get("fs_write", &args), Some(Human));
+        let v_destructive = RiskVerdict {
+            tier: BlastRadius::Destructive,
+            reversible: false,
+            confidence: VerdictConfidence::High,
+            rationale: "destructive overwrite".into(),
+            concerns: vec![],
+        };
+        cache.raise("fs_write", &args, v_destructive);
+        assert_eq!(cache.get("fs_write", &args).unwrap().tier, BlastRadius::Destructive);
+        assert!(!cache.get("fs_write", &args).unwrap().reversible);
     }
 
     #[test]
     fn risk_cache_distinguishes_tools_and_args_but_ignores_key_order() {
-        use RequiredAuthority::*;
         let mut cache = RiskCache::new();
         let a = serde_json::json!({"path": "/a"});
         let b = serde_json::json!({"path": "/b"});
-        cache.raise("fs_write", &a, Tier(Destructive));
+        let v_destructive = RiskVerdict {
+            tier: BlastRadius::Destructive,
+            reversible: false,
+            confidence: VerdictConfidence::High,
+            rationale: "destructive".into(),
+            concerns: vec![],
+        };
+        cache.raise("fs_write", &a, v_destructive);
 
         // Different args → separate entry (cache does not apply).
         assert_eq!(cache.get("fs_write", &b), None);
@@ -1988,8 +2150,88 @@ main() {
         // Same logical args in a different key order → same entry (canonicalized).
         let a1 = serde_json::json!({"path": "/x", "mode": "w"});
         let a2 = serde_json::json!({"mode": "w", "path": "/x"});
-        cache.raise("fs_write", &a1, Tier(Disruptive));
-        assert_eq!(cache.get("fs_write", &a2), Some(Tier(Disruptive)));
+        let v_disruptive = RiskVerdict {
+            tier: BlastRadius::Disruptive,
+            reversible: true,
+            confidence: VerdictConfidence::High,
+            rationale: "disruptive".into(),
+            concerns: vec![],
+        };
+        cache.raise("fs_write", &a1, v_disruptive);
+        assert_eq!(cache.get("fs_write", &a2).unwrap().tier, BlastRadius::Disruptive);
+    }
+
+    #[test]
+    fn risk_verdict_merge_stricter_logic() {
+        let v1 = RiskVerdict {
+            tier: BlastRadius::Disruptive,
+            reversible: true,
+            confidence: VerdictConfidence::High,
+            rationale: "v1 rationale".into(),
+            concerns: vec!["concern 1".into()],
+        };
+        let v2 = RiskVerdict {
+            tier: BlastRadius::Destructive,
+            reversible: false,
+            confidence: VerdictConfidence::Medium,
+            rationale: "v2 rationale".into(),
+            concerns: vec!["concern 2".into()],
+        };
+        let merged = v1.merge_stricter(&v2);
+        assert_eq!(merged.tier, BlastRadius::Destructive);
+        assert!(!merged.reversible);
+        assert_eq!(merged.confidence, VerdictConfidence::Medium);
+        assert_eq!(merged.rationale, "v1 rationale; v2 rationale");
+        assert_eq!(merged.concerns, vec!["concern 1".to_string(), "concern 2".to_string()]);
+    }
+
+    #[test]
+    fn extract_shell_function_extracts_function_and_preceding_docs() {
+        let script = r#"#!/usr/bin/env bash
+set -e
+
+# @cmd Create a new file
+# @meta mode mutating
+# @option --path! The path
+fs_create() {
+    echo "creating"
+    mkdir -p "$(dirname "$1")"
+}
+
+# @cmd Another tool
+other_tool() {
+    echo "other"
+}
+"#;
+        let extracted = extract_shell_function(script, "fs_create").expect("must extract fs_create");
+        assert!(extracted.contains("# @cmd Create a new file"));
+        assert!(extracted.contains("fs_create() {"));
+        assert!(extracted.contains("mkdir -p"));
+        assert!(!extracted.contains("other_tool"));
+    }
+
+    #[test]
+    fn extract_declaration_context_filters_permission_and_internal_noise() {
+        let decl_json = serde_json::json!({
+            "name": "my_tool",
+            "description": "A test tool",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "target path" },
+                    "permissions_mask": { "type": "string", "description": "noise mask" },
+                    "permissions_ceiling": { "type": "string", "description": "noise ceiling" },
+                    "__internal_debug": { "type": "boolean", "description": "internal flag" }
+                },
+                "required": ["path"]
+            }
+        });
+        let decl: FunctionDeclaration = serde_json::from_value(decl_json).unwrap();
+        let ctx = extract_declaration_context(Some(&decl), None).expect("must produce context");
+        assert!(ctx.parameters.contains_key("path"));
+        assert!(!ctx.parameters.contains_key("permissions_mask"));
+        assert!(!ctx.parameters.contains_key("permissions_ceiling"));
+        assert!(!ctx.parameters.contains_key("__internal_debug"));
     }
 
     // --- Backlog #6b: reserved #6d message schema (round-trips now) ---
@@ -2023,11 +2265,21 @@ main() {
                 escalation_id: "esc-1".into(),
                 decision: verb,
                 added_context: None,
+                token: Some("tok-123".into()),
+                risk_verdict: Some(RiskVerdict {
+                    tier: BlastRadius::Disruptive,
+                    reversible: true,
+                    confidence: VerdictConfidence::High,
+                    rationale: "authorized".into(),
+                    concerns: vec![],
+                }),
             };
             let s = serde_json::to_string(&v).unwrap();
             assert!(s.contains(&format!("\"{wire}\"")), "verb {verb:?} serializes as {wire}");
             let back: VerdictMsg = serde_json::from_str(&s).unwrap();
             assert_eq!(back.decision, verb);
+            assert_eq!(back.token.as_deref(), Some("tok-123"));
+            assert_eq!(back.risk_verdict.unwrap().tier, BlastRadius::Disruptive);
         }
     }
 
@@ -2075,6 +2327,8 @@ main() {
             escalation_id: "e1".into(),
             decision: VerdictDecision::Revert,
             added_context: Some(serde_json::json!({"note": "undo it"})),
+            token: None,
+            risk_verdict: None,
         });
         let cancel = DownstreamMsg::Cancel(CancelMsg {
             reason: "sibling failed".into(),

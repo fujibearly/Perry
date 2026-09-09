@@ -137,6 +137,7 @@ pub enum AgentLoopEvent {
     RiskAssessmentCacheHit {
         name: String,
         cached_floor: String,
+        rationale: Option<String>,
     },
     EscalationDispatched {
         name: String,
@@ -538,6 +539,7 @@ fn find_tool_declaration(
 fn resolve_tool_implementation(
     config: &GlobalConfig,
     tool_name: &str,
+    agent_hint: Option<&str>,
 ) -> crate::safety::ToolImplementation {
     use crate::safety::ToolImplementation;
 
@@ -558,23 +560,57 @@ fn resolve_tool_implementation(
     let mut candidate_paths: Vec<std::path::PathBuf> = Vec::new();
     let config_read = config.read();
 
-    // Agent tools directory
+    let mut agents_to_check: Vec<String> = Vec::new();
+    if let Some(agent) = agent_hint {
+        agents_to_check.push(agent.to_string());
+    }
     if let Some(agent) = &config_read.agent {
-        let agent_tools_dir = Config::agent_functions_dir(agent.name()).join("tools");
+        let name = agent.name().to_string();
+        if !agents_to_check.contains(&name) {
+            agents_to_check.push(name);
+        }
+    }
+
+    // Agent functions directory (including multi-tool scripts like tools.sh)
+    for agent_name in agents_to_check {
+        let agent_dir = Config::agent_functions_dir(&agent_name);
+        for ext in &["sh", "bash", "nu", "py", "js"] {
+            candidate_paths.push(agent_dir.join(format!("tools.{ext}")));
+        }
+        let agent_tools_dir = agent_dir.join("tools");
         if agent_tools_dir.exists() {
             for ext in &["sh", "py", "js", "bash", "nu", "rb"] {
                 candidate_paths.push(agent_tools_dir.join(format!("{tool_name}.{ext}")));
             }
             candidate_paths.push(agent_tools_dir.join(tool_name));
         }
-        let agent_bin_file = Config::agent_functions_dir(agent.name()).join("bin").join(tool_name);
+        let agent_bin_file = agent_dir.join("bin").join(tool_name);
         if agent_bin_file.exists() {
             candidate_paths.push(agent_bin_file);
         }
     }
 
-    // Global functions tools directory
-    let functions_tools_dir = Config::functions_dir().join("tools");
+    // Check all subdirectories in agents_functions_dir
+    let agents_dir = Config::agents_functions_dir();
+    if agents_dir.is_dir() {
+        if let Ok(entries) = std::fs::read_dir(&agents_dir) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    for ext in &["sh", "bash", "nu", "py", "js"] {
+                        candidate_paths.push(p.join(format!("tools.{ext}")));
+                    }
+                }
+            }
+        }
+    }
+
+    // Global functions tools directory & multi-tool scripts
+    let fn_dir = Config::functions_dir();
+    for ext in &["sh", "bash", "nu", "py", "js"] {
+        candidate_paths.push(fn_dir.join(format!("tools.{ext}")));
+    }
+    let functions_tools_dir = fn_dir.join("tools");
     if functions_tools_dir.exists() {
         for ext in &["sh", "py", "js", "bash", "nu", "rb"] {
             candidate_paths.push(functions_tools_dir.join(format!("{tool_name}.{ext}")));
@@ -638,6 +674,34 @@ fn resolve_tool_implementation(
             }
 
             if let Ok(text) = std::str::from_utf8(&bytes) {
+                let is_multi_tool = resolved_path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map(|s| s == "tools")
+                    .unwrap_or(false);
+
+                if is_multi_tool {
+                    if let Some(func_source) = crate::safety::extract_shell_function(text, tool_name) {
+                        let language = match resolved_path.extension().and_then(|e| e.to_str()) {
+                            Some("sh" | "bash") => "bash".to_string(),
+                            Some("py") => "python".to_string(),
+                            Some("js") => "javascript".to_string(),
+                            Some("nu") => "nushell".to_string(),
+                            Some(other) => other.to_string(),
+                            None => "text".to_string(),
+                        };
+                        return ToolImplementation::Script {
+                            path: resolved_path.display().to_string(),
+                            language,
+                            source: func_source,
+                            truncated: false,
+                        };
+                    } else {
+                        // Function not in this multi-tool script; continue searching candidates
+                        continue;
+                    }
+                }
+
                 let language = match resolved_path.extension().and_then(|e| e.to_str()) {
                     Some("sh" | "bash") => "bash".to_string(),
                     Some("py") => "python".to_string(),
@@ -1073,30 +1137,38 @@ async fn risk_evaluator_denied_result(
     }
     let ceiling = current_authority_ceiling(config);
 
-    // #6c two-phase (FR-6c.7): consult the monotonic, raise-only cache first. A
-    // hit means this exact action was already assessed this run (act-time here,
-    // or — once the structured planner lands — a plan-time pre-pass). The cached
-    // authority is a *floor*: it can only have raised the base, never lowered it,
-    // so reusing it skips a redundant model call without ever weakening the gate.
+    // #6c two-phase (FR-6c.7, FR-6c.9): consult the monotonic, raise-only cache first.
+    // By caching RiskVerdict instead of scalar authority, we preserve evaluator rationale
+    // and dynamically re-clamp against act-time reversibility.
     if let Some(cache) = cache {
-        if let Some(cached) = cache.lock().get(&call.name, &call.arguments) {
-            let effective = crate::safety::stricter_of(base, cached);
+        if let Some(cached_verdict) = cache.lock().get(&call.name, &call.arguments) {
+            let clamped = clamp_verdict(base, &cached_verdict, reversible);
+            let effective = if cached_verdict.confidence == crate::safety::VerdictConfidence::Low {
+                RequiredAuthority::Human
+            } else {
+                clamped
+            };
+            let floor_str = match effective {
+                RequiredAuthority::Human => "human".to_string(),
+                RequiredAuthority::Tier(t) => t.as_str().to_string(),
+            };
             if let Some(p) = progress {
-                let floor_str = match cached {
-                    RequiredAuthority::Human => "human".to_string(),
-                    RequiredAuthority::Tier(t) => t.as_str().to_string(),
-                };
                 p.emit(AgentLoopEvent::RiskAssessmentCacheHit {
                     name: call.name.clone(),
                     cached_floor: floor_str,
+                    rationale: if cached_verdict.rationale.is_empty() {
+                        None
+                    } else {
+                        Some(cached_verdict.rationale.clone())
+                    },
                 });
             }
-            // A cached low-confidence outcome is already folded into `effective`
-            // as a floor (see below), so the ceiling check alone is sufficient here.
-            if ceiling.permits(effective) {
+            if ceiling.permits(effective)
+                && cached_verdict.confidence != crate::safety::VerdictConfidence::Low
+            {
                 return None;
             }
-            return risk_blocked_result(&call.name, ceiling, None);
+            return risk_blocked_result(&call.name, ceiling, Some(&cached_verdict.rationale));
         }
     }
 
@@ -1104,7 +1176,8 @@ async fn risk_evaluator_denied_result(
     // fallback (fail-toward), never a silent pass.
     let intent = format!("execute tool '{}'", call.name);
     let decl = find_tool_declaration(config, &call.name);
-    let impl_info = resolve_tool_implementation(config, &call.name);
+    let agent_name = config.read().agent.as_ref().map(|a| a.name().to_string());
+    let impl_info = resolve_tool_implementation(config, &call.name, agent_name.as_deref());
     let decl_ctx = crate::safety::extract_declaration_context(decl.as_ref(), impl_info.source());
     let invocation = format_tool_invocation(&call.name, &call.arguments);
     let context = build_evaluator_context(
@@ -1149,19 +1222,8 @@ async fn risk_evaluator_denied_result(
         }
     };
 
-    // Fold the verdict into a cacheable authority *floor*. The clamp is
-    // stricter-only; a low-confidence verdict is escalation-worthy, so we record
-    // it as at least `Human` (the strictest floor) — that way a later reuse of
-    // this action re-blocks without re-calling the model, matching the immediate
-    // fail-toward decision below.
-    let clamped = clamp_verdict(base, &verdict, reversible);
-    let cacheable = if verdict.confidence == crate::safety::VerdictConfidence::Low {
-        RequiredAuthority::Human
-    } else {
-        clamped
-    };
     if let Some(cache) = cache {
-        cache.lock().raise(&call.name, &call.arguments, cacheable);
+        cache.lock().raise(&call.name, &call.arguments, verdict.clone());
     }
 
     risk_denied_from_verdict(&call.name, base, ceiling, &verdict, reversible)
@@ -1473,6 +1535,7 @@ async fn escalate_and_handle_verdict(
     parent_info: &crate::escalation::ParentConnInfo,
     reason: &str,
     progress: Option<&AgentLoopProgress>,
+    risk_cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
 ) -> Option<serde_json::Value> {
     if let Some(p) = progress {
         p.emit(AgentLoopEvent::EscalationDispatched {
@@ -1488,6 +1551,13 @@ async fn escalate_and_handle_verdict(
                     name: call.name.clone(),
                     decision: format!("{:?}", verdict.decision),
                 });
+            }
+            if verdict.decision == crate::safety::VerdictDecision::Continue {
+                if let Some(cache) = risk_cache {
+                    if let Some(rv) = &verdict.risk_verdict {
+                        cache.lock().raise(&call.name, &call.arguments, rv.clone());
+                    }
+                }
             }
             match handle_verdict_outcome(config, call, verdict).await {
                 Ok(res) => res, // Some(...) on Halt/Revert, None on Continue
@@ -1658,6 +1728,8 @@ async fn handle_escalation_request(
                     "message": "Capability mask is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit mutating permission contract."
                 }
             })),
+            token: None,
+            risk_verdict: None,
         };
     }
 
@@ -1691,6 +1763,8 @@ async fn handle_escalation_request(
                     )
                 }
             })),
+            token: None,
+            risk_verdict: None,
         };
     }
 
@@ -1725,14 +1799,14 @@ async fn handle_escalation_request(
 
     if effective_blast_radius != crate::function::BlastRadius::Safe {
         if let Some(ref rm) = risk_model {
-            let impl_info = resolve_tool_implementation(config, tool_name);
+            let impl_info = resolve_tool_implementation(config, tool_name, Some(&hello.agent_id));
             let decl_ctx = crate::safety::extract_declaration_context(decl.as_ref(), impl_info.source());
             let invocation = format_tool_invocation(tool_name, &args);
             let supervisory_intent = format!(
                 "Supervisory authorization: child agent '{}' (depth {}) requested permission to execute tool '{}'. Child reason: '{}'",
                 hello.agent_id, hello.depth, tool_name, esc.reason
             );
-            let raw_context = crate::safety::build_evaluator_context(
+            let eval_context_str = crate::safety::build_evaluator_context(
                 tool_name,
                 &args,
                 effective_blast_radius,
@@ -1742,15 +1816,6 @@ async fn handle_escalation_request(
                 Some(&impl_info),
                 invocation.as_deref(),
             );
-            let mut payload: serde_json::Value =
-                serde_json::from_str(&raw_context).unwrap_or_else(|_| serde_json::json!({}));
-            payload["supervisory_request"] = serde_json::json!({
-                "child_agent_id": hello.agent_id,
-                "child_depth": hello.depth,
-                "child_stated_reason": esc.reason,
-                "child_enrichment": esc.enrichment,
-            });
-            let eval_context_str = serde_json::to_string_pretty(&payload).unwrap_or(raw_context);
 
             if show_trace {
                 eprintln!(
@@ -1799,15 +1864,18 @@ async fn handle_escalation_request(
                 hello.agent_id, tool_name, required, current_ceiling.tier()
             );
         }
-        let added_context = evaluator_verdict.map(|v| serde_json::json!({
+        let added_context = evaluator_verdict.as_ref().map(|v| serde_json::json!({
             "supervisor": "approved",
             "evaluator_tier": v.tier.as_str(),
             "evaluator_rationale": v.rationale,
         }));
+        let token = Some(format!("permit-{}", uuid::Uuid::new_v4()));
         return crate::safety::VerdictMsg {
             escalation_id,
             decision: crate::safety::VerdictDecision::Continue,
             added_context,
+            token,
+            risk_verdict: evaluator_verdict,
         };
     }
 
@@ -1833,6 +1901,8 @@ async fn handle_escalation_request(
                         escalation_id,
                         decision: crate::safety::VerdictDecision::Halt,
                         added_context: Some(serde_json::json!({"error": format!("Re-escalation to parent failed: {e}")})),
+                        token: None,
+                        risk_verdict: None,
                     };
                 }
             }
@@ -1852,6 +1922,8 @@ async fn handle_escalation_request(
                         escalation_id,
                         decision: crate::safety::VerdictDecision::Halt,
                         added_context: None,
+                        token: None,
+                        risk_verdict: None,
                     };
                 }
             }
@@ -1872,10 +1944,18 @@ async fn handle_escalation_request(
     let decision = prompt_human_verdict(tool_name, &args, effective_blast_radius, &prompt_reason, None)
         .unwrap_or(crate::safety::VerdictDecision::Halt);
 
+    let token = if decision == crate::safety::VerdictDecision::Continue {
+        Some(format!("permit-{}", uuid::Uuid::new_v4()))
+    } else {
+        None
+    };
+
     crate::safety::VerdictMsg {
         escalation_id,
         decision,
         added_context: None,
+        token,
+        risk_verdict: evaluator_verdict,
     }
 }
 
@@ -1960,6 +2040,7 @@ async fn eval_single_tool(
         return Ok(denied);
     }
 
+    let mut supervisory_approved = false;
     let mut proven_reversible_applied = false;
     // Backlog #6b: blast-radius authority gate.
     if let Some(denied) = authority_denied_result(config, call, progress, Some(&mut proven_reversible_applied)) {
@@ -1972,8 +2053,10 @@ async fn eval_single_tool(
             return Ok(denied);
         }
         if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-            if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, err_type, progress).await {
+            if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, err_type, progress, risk_cache).await {
                 return Ok(res);
+            } else {
+                supervisory_approved = true;
             }
         } else {
             let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
@@ -2006,13 +2089,17 @@ async fn eval_single_tool(
     }
 
     // Backlog #6c: `%assess-risk%` LLM evaluator overlay.
-    if let Some(denied) = risk_evaluator_denied_result(config, call, proven_reversible_applied, risk_cache, progress).await {
-        if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-            if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, "risk_blocked", progress).await {
-                return Ok(res);
+    // If the supervisor already authorized this action during Gate 2 escalation,
+    // Gate 3 is satisfied by the supervisory permit (FR-6d.22).
+    if !supervisory_approved {
+        if let Some(denied) = risk_evaluator_denied_result(config, call, proven_reversible_applied, risk_cache, progress).await {
+            if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
+                if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, "risk_blocked", progress, risk_cache).await {
+                    return Ok(res);
+                }
+            } else {
+                return Ok(denied);
             }
-        } else {
-            return Ok(denied);
         }
     }
 
@@ -3299,8 +3386,21 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
         AgentLoopEvent::RiskAssessmentError { name, error } => {
             Some(format!("{pid} assess-risk: error for {name}: {error}"))
         }
-        AgentLoopEvent::RiskAssessmentCacheHit { name, cached_floor } => {
-            Some(format!("{pid} assess-risk: cache hit for {name} (floor: {cached_floor})"))
+        AgentLoopEvent::RiskAssessmentCacheHit {
+            name,
+            cached_floor,
+            rationale,
+        } => {
+            if let Some(r) = rationale.as_deref().filter(|r| !r.is_empty()) {
+                let preview = if r.len() > 60 {
+                    format!("{}...", &r[..57])
+                } else {
+                    r.to_string()
+                };
+                Some(format!("{pid} assess-risk: cache hit for {name} (floor: {cached_floor}): \"{preview}\""))
+            } else {
+                Some(format!("{pid} assess-risk: cache hit for {name} (floor: {cached_floor})"))
+            }
         }
         AgentLoopEvent::EscalationDispatched { name, target, reason } => {
             Some(format!("{pid} escalation: {name} -> {target} ({reason})"))
@@ -3928,9 +4028,18 @@ agent_loop:
         let event = AgentLoopEvent::RiskAssessmentCacheHit {
             name: "fs_write".to_string(),
             cached_floor: "Destructive".to_string(),
+            rationale: None,
         };
         let line = format_trace_event(&event, pid).unwrap();
         assert_eq!(line, "12345 assess-risk: cache hit for fs_write (floor: Destructive)");
+
+        let event_with_rat = AgentLoopEvent::RiskAssessmentCacheHit {
+            name: "fs_write".to_string(),
+            cached_floor: "Destructive".to_string(),
+            rationale: Some("cached rationale".into()),
+        };
+        let line = format_trace_event(&event_with_rat, pid).unwrap();
+        assert_eq!(line, "12345 assess-risk: cache hit for fs_write (floor: Destructive): \"cached rationale\"");
 
         let event = AgentLoopEvent::EscalationDispatched {
             name: "wipe_disk".to_string(),
@@ -5225,22 +5334,34 @@ agent_loop:
 
     #[tokio::test]
     async fn risk_cache_hit_blocks_without_calling_the_model() {
-        // Pre-seed the cache with a Human floor for a specific action. With a
+        // Pre-seed the cache with a Human/Catastrophic verdict for a specific action. With a
         // bogus risk_model configured, a cache MISS would attempt the model and
         // fail-toward; but a cache HIT must decide from the cached floor alone
-        // (no model call). We assert it blocks via the cached Human floor.
+        // (no model call). We assert it blocks via the cached floor and preserves rationale.
         let config = config_with_tiers();
         config.write().safety.risk_model = Some("nonexistent:model".into());
         let cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
         let c = call("restart_svc");
-        cache
-            .lock()
-            .raise(&c.name, &c.arguments, crate::safety::RequiredAuthority::Human);
+        cache.lock().raise(
+            &c.name,
+            &c.arguments,
+            crate::safety::RiskVerdict {
+                tier: crate::function::BlastRadius::Catastrophic,
+                reversible: false,
+                confidence: crate::safety::VerdictConfidence::High,
+                rationale: "catastrophic restart".into(),
+                concerns: vec![],
+            },
+        );
 
         let denied = risk_evaluator_denied_result(&config, &c, false, Some(&cache), None)
             .await
             .expect("a cached Human floor must block");
         assert_eq!(denied["error"]["type"], "risk_blocked");
+        assert!(denied["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Evaluator rationale: catastrophic restart."));
     }
 
     #[tokio::test]
@@ -5255,7 +5376,13 @@ agent_loop:
         cache.lock().raise(
             &c.name,
             &c.arguments,
-            crate::safety::RequiredAuthority::Tier(crate::function::BlastRadius::Disruptive),
+            crate::safety::RiskVerdict {
+                tier: crate::function::BlastRadius::Disruptive,
+                reversible: true,
+                confidence: crate::safety::VerdictConfidence::High,
+                rationale: "disruptive restart".into(),
+                concerns: vec![],
+            },
         );
 
         assert!(
@@ -5279,7 +5406,7 @@ agent_loop:
     #[test]
     fn resolve_tool_implementation_handles_unknown_gracefully() {
         let config = config_with_tiers();
-        let res = resolve_tool_implementation(&config, "nonexistent_tool_xyz");
+        let res = resolve_tool_implementation(&config, "nonexistent_tool_xyz", None);
         assert_eq!(res, crate::safety::ToolImplementation::Unknown);
     }
 
@@ -5301,7 +5428,7 @@ agent_loop:
         let tool_name = "my_tool";
         let call_args = json!({"cmd": "whoami"});
         let decl = find_tool_declaration(&config, tool_name);
-        let impl_info = resolve_tool_implementation(&config, tool_name);
+        let impl_info = resolve_tool_implementation(&config, tool_name, None);
         assert!(matches!(impl_info, crate::safety::ToolImplementation::Script { .. }));
         let decl_ctx = crate::safety::extract_declaration_context(decl.as_ref(), impl_info.source());
         assert_eq!(decl_ctx.as_ref().unwrap().description, "Test tool.");
@@ -5365,14 +5492,20 @@ agent_loop:
         cache.lock().raise(
             &c.name,
             &c.arguments,
-            crate::safety::RequiredAuthority::Tier(crate::function::BlastRadius::Disruptive),
+            crate::safety::RiskVerdict {
+                tier: crate::function::BlastRadius::Disruptive,
+                reversible: true,
+                confidence: crate::safety::VerdictConfidence::High,
+                rationale: "disruptive".into(),
+                concerns: vec![],
+            },
         );
 
         let result = risk_evaluator_denied_result(&config, &c, false, Some(&cache), Some(&progress)).await;
         assert!(result.is_none());
 
         let ev = rx.try_recv().expect("must emit RiskAssessmentCacheHit");
-        assert!(matches!(ev, AgentLoopEvent::RiskAssessmentCacheHit { ref name, ref cached_floor } if name == "restart_svc" && cached_floor == "disruptive"));
+        assert!(matches!(ev, AgentLoopEvent::RiskAssessmentCacheHit { ref name, ref cached_floor, ref rationale } if name == "restart_svc" && cached_floor == "disruptive" && rationale.as_deref() == Some("disruptive")));
     }
 
     #[tokio::test]
@@ -5604,6 +5737,7 @@ agent_loop:
 
         let verdict = handle_escalation_request(&config, &hello, esc).await;
         assert_eq!(verdict.decision, crate::safety::VerdictDecision::Continue);
+        assert!(verdict.token.is_some());
 
         match prev_ceiling {
             Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
@@ -5614,6 +5748,37 @@ agent_loop:
             None => std::env::remove_var("AICHAT_ROLES_DIR"),
         }
         let _ = std::fs::remove_dir_all(&empty_dir);
+    }
+
+    #[tokio::test]
+    async fn test_supervisory_approval_seeds_risk_cache() {
+        let _config = config_with_tiers();
+        let cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
+        let call = ToolCall::new("fs_create".to_string(), json!({"path": "foo.txt"}), None);
+        let supervisory_verdict = crate::safety::VerdictMsg {
+            escalation_id: "esc-123".to_string(),
+            decision: crate::safety::VerdictDecision::Continue,
+            added_context: None,
+            token: Some("permit-abc".to_string()),
+            risk_verdict: Some(crate::safety::RiskVerdict {
+                tier: crate::function::BlastRadius::Disruptive,
+                reversible: false,
+                confidence: crate::safety::VerdictConfidence::High,
+                rationale: "supervisor approved creating file".to_string(),
+                concerns: vec![],
+            }),
+        };
+
+        // Simulating the receipt of Continue verdict in escalate_and_handle_verdict:
+        if supervisory_verdict.decision == crate::safety::VerdictDecision::Continue {
+            if let Some(rv) = &supervisory_verdict.risk_verdict {
+                cache.lock().raise(&call.name, &call.arguments, rv.clone());
+            }
+        }
+
+        let cached = cache.lock().get(&call.name, &call.arguments).expect("must be cached");
+        assert_eq!(cached.tier, crate::function::BlastRadius::Disruptive);
+        assert_eq!(cached.rationale, "supervisor approved creating file");
     }
 
     #[tokio::test]

@@ -154,5 +154,13 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Roadmap & Spec Crosswalk:** Added FR-6c.9, FR-6c.10, FR-6d.22 to `requirements.md` and Tasks 6c.13, 6c.14, 6d.27, 6d.28 to `tasks.md`.
       * **State:** Working tree clean (`aichat` and `llm-functions` both clean on `feat/tool-safety-permission-boundary`), local-only.
 
-
+  14. **Session 14: Verdict-Level Caching, Execution-Level Ground Truth Inspection & Downward Supervisory Propagation**
+    * **Period:** `2026-09-08`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-08-session14.md`](.kiro/docs/session-summary-2026-09-08-session14.md)
+    * **Focus Areas:**
+      * **Verdict-Level Caching (`FR-6c.9` / Task `6c.13`):** Caches full structured `RiskVerdict` (tier, reversible, confidence, rationale, concerns) in `RiskCache` instead of scalar floor. Preserves evaluator rationale for observability previews, enables dynamic act-time reversibility discounting via `clamp_verdict`, and maintains non-pardonable monotonic floors.
+      * **Execution-Level Ground Truth Inspection (`FR-6c.10` / Task `6c.14`):** Replaced `"type": "unknown"` fallback for multi-tool scripts (e.g. `agents/<agent>/tools.sh`) by adding `extract_shell_function` and `resolve_tool_implementation` agent routing. Assessor inspects the exact target bash function code and doc comments, stripping out OpenAPI schema noise (`permissions_*`, `__*`).
+      * **Downward Supervisory Verdict & Permit Propagation (`FR-6d.22` / Task `6d.27` & `6d.28`):** Supervisor passes `token` (permit) and `risk_verdict: Option<RiskVerdict>` in `VerdictMsg`. Child seeds `RiskCache` on `Continue` verdict and satisfies Gate 3 autonomously without duplicate risk evaluations or second-round escalations.
+      * **Verification:** Suite **481 pass, 0 fail** (473 unit + 5 catalog + 3 integration); `cargo clippy --all-targets -- -D warnings` clean; live Demo 3 verified green with ground-truth bash inspection and zero redundant evaluations.
+      * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
 
