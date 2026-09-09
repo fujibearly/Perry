@@ -154,6 +154,8 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 - [x] 6d.30 Unit testing, verification, and documentation updates for Session 15.
 - [x] 6d.31 Elimination of Downward Permits & Hard Authority Ceiling Sandboxing: Remove `token: Option<String>` and `risk_verdict: Option<RiskVerdict>` from `VerdictMsg`; eliminate `supervisory_approved` in-flight bypass in `eval_single_tool`; treat `authority_exceeded` as hard process sandbox boundary for child agents (`parent_info.is_some()`) triggering journal unwind and structured `permission_blocked` (`reason: authority_exceeded`); enforce tightening-only risk evaluation. (FR-6d.24)
 - [x] 6d.32 Demo 3 & Demo 20 Alignment and Verification: Align Demo 3 and Demo 20 to demonstrate hard authority ceiling blocks, clean orchestrator re-delegation or direct execution, zero downward permits; verify full test suite and clean build. (Verification)
+- [ ] 6d.33 Hierarchical Guide Rails, Semantic Role Badging & Turn Delta Observability: Update `format_dialog_block` to render colored vertical guide rails based on recursion depth and agent palette, with asymmetric `📥 PROMPT` vs `📤 RESPONSE` framing; update `format_messages_dialog` with semantic role coloring, system prompt dimming/folding on turn > 1, and `⚡ [new]` delta highlighting vs `[history]` dimming. (FR-6d.25)
+- [ ] 6d.34 Verification, Testing & Demo Observability Validation: Add/update unit tests for dialog formatting, guide rails, and message delta highlighting; run full test suite, clippy, and live demos (Demo 3, 4, 5) with `--dialog --no-truncate` to verify visual readability and absence of repetition illusion. (Verification)
 
 
 ## Cross-cutting / Land

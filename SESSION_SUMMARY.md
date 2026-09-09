@@ -183,7 +183,14 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Hard Authority Ceiling Sandboxing (Gate 1 & Gate 2 Unification):** Sub-agents cannot escalate over mTLS to elevate authority ceilings in-flight. When an action exceeds the sub-agent's ceiling (`required > child_ceiling`), actuation is blocked immediately (`authority_exceeded`). The child unwinds pre-mutation journal entries, halts, and returns structured `status: "permission_blocked", reason: "authority_exceeded"` to the parent orchestrator.
       * **Bounded Orchestrator Re-Delegation:** The parent orchestrator ingests the structured block and re-delegates with the required ceiling upfront (subject to the 2-attempt circuit breaker) or acts directly.
       * **Verification & Testing (`Task 6d.32`):** Suite **486 pass, 0 fail** (478 unit + 5 catalog + 3 web asset security); `cargo clippy --all-targets -- -D warnings` clean; `cargo build --release` clean; live Demo 16, Demo 20, and Demo 3 verified 100% green with zero downward permits and clean re-delegation. Committed in `de0f501` and `1292218`.
+  17. **Session 17: Hierarchical Guide Rails, Semantic Role Badging & Turn Delta Observability**
+    * **Period:** `2026-09-09`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-09-session17.md`](.kiro/docs/session-summary-2026-09-09-session17.md)
+    * **Focus Areas:**
+      * **Hierarchical Guide Rails (`FR-6d.25` / Task `6d.33`):** Draw colored vertical guide rails matching the agent palette across all lines of dialog output to anchor recursion depth visually.
+      * **Asymmetric Framing:** Differentiate prompts (`📥 PROMPT`) from generations (`📤 RESPONSE`) with directional headers and frames.
+      * **Semantic Role Badging & Boilerplate Dimming:** Style role headers semantically (`[user]`, `[assistant]`, `tool_calls:`, `tool_result:`) and dim static instructions.
+      * **Multi-Turn System Prompt Folding:** Collapse static unchanged system prompts on `turn > 1` (`[system: <N> lines instructions unchanged]`).
+      * **Turn Delta Highlighting:** Highlight `⚡ [new]` inputs while dimming `[history]`.
+      * **Verification & Testing (`Task 6d.34`):** Update unit tests, verify `cargo test`, `cargo clippy`, and live Demos 3, 4, 5.
       * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
-
-
-
