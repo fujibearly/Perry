@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-09  
 **Branch:** `feat/tool-safety-permission-boundary`  
-**Test Suite Status:** 486 tests passing baseline; refactoring in progress for FR-6d.25.  
+**Test Suite Status:** 489 tests passing (481 unit/integration + 5 catalog override + 3 web assets, 0 failed); clippy clean; release binary built.  
 **Specification:** `.kiro/specs/tool-safety-modes/requirements.md` (`FR-6d.25`), `tasks.md` (`Task 6d.33`, `Task 6d.34`)
 
 ---
@@ -41,18 +41,48 @@ All styling uses `nu_ansi_term` and respects terminal detection:
 
 ---
 
-## 3. Implementation Tasks Planned
+## 3. Implementation Details
 
 1. **`src/agent_loop.rs` (`format_dialog_block`, `emit_dialog_block`):**
-   - Draw colored vertical guide rails based on recursion depth and `agent_color`.
-   - Implement asymmetric framing for `DialogDirection::Request` (`📥 PROMPT`) vs `DialogDirection::Response` (`📤 RESPONSE`).
-2. **`src/agent_loop.rs` (`format_messages_dialog`):**
-   - Accept `turn: usize` context.
-   - Fold static system prompt on `turn > 1` (`[system: <N> lines instructions unchanged]`).
-   - Dim static instructions on `turn == 1`.
-   - Apply semantic color badging for roles (`[user]`, `[assistant]`, `tool_calls:`, `tool_result:`).
-   - Differentiate `[history]` from `⚡ [new]` messages.
-3. **Testing & Verification:**
-   - Update unit tests in `src/agent_loop.rs`.
-   - Verify `cargo test` (486 tests) and `cargo clippy`.
-   - Run live demos (`Demo 3`, `Demo 4`, `Demo 5`) with `--dialog --no-truncate` to visually confirm clean, scannable traces without repetition.
+   - Renders multi-tier vertical guide rails (`│`, `║`, `╏`) matching `agent_color`.
+   - Distinguishes requests (`📥 [pid agent [turn N/M] PROMPT SUBMITTED TO LLM]`) from responses (`📤 [pid agent [turn N/M] RESPONSE FROM LLM]`).
+   - Frames dialog with crisp top/bottom box delimiters (`┌── ... ───` and `└── ┄┄┄`).
+2. **`src/agent_loop.rs` (`format_messages_dialog`, `format_messages_dialog_with_turn`):**
+   - Contextualizes formatting using loop `turn`.
+   - Folds static system prompt boilerplate on `turn > 1` (`[system: <N> lines instructions unchanged]`).
+   - Dims static instructions on `turn == 1`.
+   - Semantic color badging for roles (`[user]`, `[assistant]`, `tool_calls:`, `tool_result:`).
+   - Labels prior turn messages as `[history: ...]` while highlighting new turn deltas with `⚡ [new: tool_result: <tool>] ->`.
+3. **`src/agent_loop.rs` (`format_llm_response`):**
+   - Highlights tool call dispatches in light blue (`tool_calls: [name(...)]`).
+   - Dims empty generation notices.
+
+---
+
+## 4. Verification & Validation Results
+
+1. **Unit & Integration Test Suite:**
+   - Run: `cargo test --all-targets`
+   - Result: **489 passed, 0 failed** (481 binary tests + 5 catalog override tests + 3 web asset tests).
+   - Validated tests:
+     - `test_format_messages_dialog_preserves_system_instructions`
+     - `test_format_messages_dialog_no_truncate`
+     - `test_format_messages_dialog_system_folding_on_turn_2`
+     - `test_format_messages_dialog_turn_delta_highlighting`
+     - `test_format_dialog_block_rails_and_asymmetric_framing`
+2. **Clippy Quality Check:**
+   - Run: `cargo clippy --all-targets -- -D warnings`
+   - Result: Clean exit (0 warnings, 0 errors).
+3. **Optimized Release Build:**
+   - Run: `cargo build --release`
+   - Result: Successful compilation of release artifact `target/release/aichat`.
+4. **Live Terminal Demos:**
+   - `nu scripts/run-demos.nu --demo 3 --dialog --no-truncate`:
+     - System prompt folded to `[system: 37 lines instructions unchanged]` on turn 2.
+     - New tool results highlighted (`⚡ [new: tool_result: fs_create]`).
+     - Distinct guide rails clearly delineated nested sub-agent `coder` execution under `orchestrator`.
+   - `nu scripts/run-demos.nu --demo 4 --dialog --no-truncate`:
+     - Researcher agent web search results rendered with clear distinction between past turns and new tool results.
+     - Repetition illusion completely resolved.
+   - `nu scripts/run-demos.nu --demo 5 --dialog --no-truncate`:
+     - Dual researcher calls and synthesis rendered cleanly across turns without visual clutter.

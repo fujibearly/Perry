@@ -192,5 +192,5 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Semantic Role Badging & Boilerplate Dimming:** Style role headers semantically (`[user]`, `[assistant]`, `tool_calls:`, `tool_result:`) and dim static instructions.
       * **Multi-Turn System Prompt Folding:** Collapse static unchanged system prompts on `turn > 1` (`[system: <N> lines instructions unchanged]`).
       * **Turn Delta Highlighting:** Highlight `⚡ [new]` inputs while dimming `[history]`.
-      * **Verification & Testing (`Task 6d.34`):** Update unit tests, verify `cargo test`, `cargo clippy`, and live Demos 3, 4, 5.
+      * **Verification & Testing (`Task 6d.34`):** Suite **489 pass, 0 fail** (481 unit/integration + 5 catalog + 3 web asset security); `cargo clippy --all-targets -- -D warnings` clean; `cargo build --release` clean; live Demos 3, 4, and 5 verified 100% green with visual guide rails, folded prompts, and zero repetition illusion.
       * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.

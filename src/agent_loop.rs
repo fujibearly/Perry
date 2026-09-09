@@ -2596,7 +2596,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             let prompt_display = match current_input.build_messages() {
                 Ok(mut msgs) => {
                     crate::client::patch_messages(&mut msgs, &model);
-                    format_messages_dialog(&msgs, no_truncate)
+                    format_messages_dialog_with_turn(&msgs, no_truncate, turn)
                 }
                 Err(e) => format!("(failed to format messages: {e})"),
             };
@@ -3062,66 +3062,180 @@ pub fn truncate_payload_dialog(text: &str, top: usize, bottom: usize, no_truncat
 }
 
 /// Format messages submitted to LLM for dialog observability trace.
-/// The instruction portion (system prompt) is shown in full.
+/// The instruction portion (system prompt) is shown in full on turn 1, or folded to a summary on turn > 1 if unchanged and > 3 lines.
 /// Payloads (user messages, assistant messages, tool results) are truncated to at most top 20 and last 20 lines unless no_truncate is true.
 pub fn format_messages_dialog(messages: &[crate::client::Message], no_truncate: bool) -> String {
+    format_messages_dialog_with_turn(messages, no_truncate, 1)
+}
+
+/// Format messages submitted to LLM for dialog observability trace with turn awareness and semantic styling.
+pub fn format_messages_dialog_with_turn(
+    messages: &[crate::client::Message],
+    no_truncate: bool,
+    turn: usize,
+) -> String {
     use crate::client::{MessageContent, MessageContentPart, MessageRole};
     let mut out = String::new();
+    let num_messages = messages.len();
+
     for (i, msg) in messages.iter().enumerate() {
-        let role_str = match msg.role {
-            MessageRole::System => "system",
-            MessageRole::User => "user",
-            MessageRole::Assistant => "assistant",
-            MessageRole::Tool => "tool",
-        };
-        let content_str = match &msg.content {
-            MessageContent::Text(t) => {
-                if msg.role == MessageRole::System {
-                    t.clone()
+        let is_last = i == num_messages - 1;
+        let is_history = num_messages > 2 && !is_last && i > 0;
+
+        let (role_header, content_str) = match msg.role {
+            MessageRole::System => {
+                let raw_text = match &msg.content {
+                    MessageContent::Text(t) => t.clone(),
+                    MessageContent::Array(parts) => parts
+                        .iter()
+                        .map(|p| match p {
+                            MessageContentPart::Text { text } => text.as_str(),
+                            MessageContentPart::ImageUrl { .. } => "[image]",
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    _ => String::new(),
+                };
+                let line_count = raw_text.lines().count();
+                if turn > 1 && line_count > 3 {
+                    (
+                        nu_ansi_term::Style::new()
+                            .dimmed()
+                            .paint(format!("[system: {line_count} lines instructions unchanged]"))
+                            .to_string(),
+                        String::new(),
+                    )
                 } else {
-                    truncate_payload_dialog(t, 20, 20, no_truncate)
+                    let badge = nu_ansi_term::Style::new().dimmed().paint("[system]").to_string();
+                    (badge, raw_text)
                 }
             }
-            MessageContent::Array(parts) => {
-                let text = parts
-                    .iter()
-                    .map(|p| match p {
-                        MessageContentPart::Text { text } => text.as_str(),
-                        MessageContentPart::ImageUrl { .. } => "[image]",
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if msg.role == MessageRole::System {
-                    text
+            MessageRole::User => {
+                let text = match &msg.content {
+                    MessageContent::Text(t) => truncate_payload_dialog(t, 20, 20, no_truncate),
+                    MessageContent::Array(parts) => {
+                        let combined = parts
+                            .iter()
+                            .map(|p| match p {
+                                MessageContentPart::Text { text } => text.as_str(),
+                                MessageContentPart::ImageUrl { .. } => "[image]",
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        truncate_payload_dialog(&combined, 20, 20, no_truncate)
+                    }
+                    _ => String::new(),
+                };
+                if is_history {
+                    (
+                        nu_ansi_term::Style::new().dimmed().paint("[history: user]").to_string(),
+                        nu_ansi_term::Style::new().dimmed().paint(&text).to_string(),
+                    )
                 } else {
-                    truncate_payload_dialog(&text, 20, 20, no_truncate)
+                    (
+                        nu_ansi_term::Color::Cyan.bold().paint("[user]").to_string(),
+                        text,
+                    )
                 }
             }
-            MessageContent::ToolCalls(tc) => {
-                let mut parts = Vec::new();
-                if !tc.text.is_empty() {
-                    parts.push(truncate_payload_dialog(&tc.text, 20, 20, no_truncate));
+            MessageRole::Assistant => {
+                let text = match &msg.content {
+                    MessageContent::Text(t) => truncate_payload_dialog(t, 20, 20, no_truncate),
+                    MessageContent::Array(parts) => {
+                        let combined = parts
+                            .iter()
+                            .map(|p| match p {
+                                MessageContentPart::Text { text } => text.as_str(),
+                                MessageContentPart::ImageUrl { .. } => "[image]",
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        truncate_payload_dialog(&combined, 20, 20, no_truncate)
+                    }
+                    _ => String::new(),
+                };
+                if is_history {
+                    (
+                        nu_ansi_term::Style::new().dimmed().paint("[history: assistant]").to_string(),
+                        nu_ansi_term::Style::new().dimmed().paint(&text).to_string(),
+                    )
+                } else {
+                    (
+                        nu_ansi_term::Color::Yellow.bold().paint("[assistant]").to_string(),
+                        text,
+                    )
                 }
-                for res in &tc.tool_results {
-                    let output_str = if let Some(s) = res.output.as_str() {
-                        s.to_string()
-                    } else if let Some(s) = res.output.get("output").and_then(|v| v.as_str()) {
-                        s.to_string()
-                    } else if let Ok(s) = serde_json::to_string_pretty(&res.output) {
-                        s
-                    } else {
-                        res.output.to_string()
-                    };
-                    let truncated_output = truncate_payload_dialog(&output_str, 20, 20, no_truncate);
-                    parts.push(format!("tool_result: {} -> {}", res.call.name, truncated_output));
+            }
+            MessageRole::Tool => {
+                let text = match &msg.content {
+                    MessageContent::Text(t) => truncate_payload_dialog(t, 20, 20, no_truncate),
+                    _ => String::new(),
+                };
+                if is_history {
+                    (
+                        nu_ansi_term::Style::new().dimmed().paint("[history: tool]").to_string(),
+                        nu_ansi_term::Style::new().dimmed().paint(&text).to_string(),
+                    )
+                } else {
+                    let badge = format!(
+                        "{} {}",
+                        nu_ansi_term::Color::Yellow.bold().paint("⚡"),
+                        nu_ansi_term::Color::Magenta.bold().paint("[new: tool]")
+                    );
+                    (badge, text)
                 }
-                parts.join("\n")
             }
         };
+
+        let (role_header, final_content) = if let MessageContent::ToolCalls(tc) = &msg.content {
+            let mut parts = Vec::new();
+            if !tc.text.is_empty() {
+                let text_trunc = truncate_payload_dialog(&tc.text, 20, 20, no_truncate);
+                if is_history {
+                    parts.push(nu_ansi_term::Style::new().dimmed().paint(&text_trunc).to_string());
+                } else {
+                    parts.push(text_trunc);
+                }
+            }
+            for res in &tc.tool_results {
+                let output_str = if let Some(s) = res.output.as_str() {
+                    s.to_string()
+                } else if let Some(s) = res.output.get("output").and_then(|v| v.as_str()) {
+                    s.to_string()
+                } else if let Ok(s) = serde_json::to_string_pretty(&res.output) {
+                    s
+                } else {
+                    res.output.to_string()
+                };
+                let truncated_output = truncate_payload_dialog(&output_str, 20, 20, no_truncate);
+                if is_history {
+                    parts.push(format!(
+                        "{} {}",
+                        nu_ansi_term::Style::new().dimmed().paint(format!("tool_result: {} ->", res.call.name)),
+                        nu_ansi_term::Style::new().dimmed().paint(&truncated_output)
+                    ));
+                } else {
+                    let badge = format!(
+                        "{} {}",
+                        nu_ansi_term::Color::Yellow.bold().paint("⚡"),
+                        nu_ansi_term::Color::Magenta.bold().paint(format!("[new: tool_result: {}] ->", res.call.name))
+                    );
+                    parts.push(format!("{badge} {truncated_output}"));
+                }
+            }
+            (role_header, parts.join("\n"))
+        } else {
+            (role_header, content_str)
+        };
+
         if i > 0 {
-            out.push_str("\n---\n");
+            out.push_str(&nu_ansi_term::Style::new().dimmed().paint("\n───\n").to_string());
         }
-        out.push_str(&format!("[{role_str}]\n{content_str}"));
+        if final_content.is_empty() {
+            out.push_str(&role_header);
+        } else {
+            out.push_str(&format!("{role_header}\n{final_content}"));
+        }
     }
     out
 }
@@ -3146,20 +3260,21 @@ pub fn format_llm_response(
                 })
             })
             .collect();
+        let tc_badge = nu_ansi_term::Color::LightBlue.bold().paint("tool_calls:").to_string();
         if let Ok(calls_str) = serde_json::to_string_pretty(&calls_val) {
-            parts.push(format!("tool_calls:\n{}", truncate_payload_dialog(&calls_str, 20, 20, no_truncate)));
+            parts.push(format!("{tc_badge}\n{}", truncate_payload_dialog(&calls_str, 20, 20, no_truncate)));
         } else {
-            parts.push(format!("tool_calls: {:?}", tool_calls));
+            parts.push(format!("{tc_badge} {:?}", tool_calls));
         }
     }
     if parts.is_empty() {
-        "(empty response)".to_string()
+        nu_ansi_term::Style::new().dimmed().paint("(empty response)").to_string()
     } else {
         parts.join("\n\n")
     }
 }
 
-/// Format a dialog trace block for rendering.
+/// Format a dialog trace block for rendering with hierarchical guide rails and asymmetric framing.
 pub fn format_dialog_block(
     agent: &str,
     pid: u32,
@@ -3169,21 +3284,45 @@ pub fn format_dialog_block(
     content: &str,
 ) -> String {
     let depth = current_agent_depth();
-    let indent = "    ".repeat(depth);
     let color = agent_color(agent);
     let colored_agent = color.bold().paint(agent).to_string();
-    let (arrow, dir_str) = match direction {
-        DialogDirection::Request => (">>>", "PROMPT SUBMITTED TO LLM"),
-        DialogDirection::Response => ("<<<", "RESPONSE FROM LLM"),
+
+    let mut outer_indent = String::new();
+    let mut inner_rails = String::new();
+
+    for d in 0..depth {
+        let rail = match d {
+            0 => "│   ",
+            1 => "║   ",
+            _ => "╏   ",
+        };
+        outer_indent.push_str(rail);
+        inner_rails.push_str(rail);
+    }
+    let active_rail = match depth {
+        0 => "│ ",
+        1 => "║ ",
+        _ => "╏ ",
     };
-    let header = format!("{indent}[{pid} {colored_agent} [turn {turn}/{max_turns}] {arrow} {dir_str}:]");
-    let bar = format!("{indent}  ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
+    let active_rail_colored = color.bold().paint(active_rail).to_string();
+    let line_prefix = format!("{inner_rails}{active_rail_colored} ");
+
+    let (icon, dir_str, dir_color) = match direction {
+        DialogDirection::Request => ("📥", "PROMPT SUBMITTED TO LLM", nu_ansi_term::Color::Cyan),
+        DialogDirection::Response => ("📤", "RESPONSE FROM LLM", nu_ansi_term::Color::Green),
+    };
+
+    let header_title = format!("{icon} [{pid} {colored_agent} [turn {turn}/{max_turns}] {}]", dir_color.bold().paint(dir_str));
+    let header_bar = format!("{outer_indent}┌── {header_title} ─────────────────────────────────");
+    let footer_bar = format!("{outer_indent}└── ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄");
+
     let indented_content: Vec<String> = content
         .lines()
-        .map(|line| format!("{indent}  {line}"))
+        .map(|line| format!("{line_prefix}{line}"))
         .collect();
+
     format!(
-        "\n  {header}\n{bar}\n{}\n{bar}",
+        "\n{header_bar}\n{}\n{footer_bar}",
         indented_content.join("\n")
     )
 }
@@ -5784,7 +5923,8 @@ agent_loop:
         ];
         let dialog = format_messages_dialog(&msgs, false);
         // System instructions must be preserved in full
-        assert!(dialog.contains(&format!("[system]\n{sys_text}")));
+        assert!(dialog.contains("[system]"));
+        assert!(dialog.contains(&sys_text));
         // User payload must be truncated
         assert!(dialog.contains("... (payload truncated: 20 lines omitted) ..."));
         assert!(dialog.contains("data 1"));
@@ -5804,10 +5944,68 @@ agent_loop:
             Message::new(MessageRole::User, MessageContent::Text(user_text)),
         ];
         let dialog = format_messages_dialog(&msgs, true);
-        assert!(dialog.contains(&format!("[system]\n{sys_text}")));
+        assert!(dialog.contains("[system]"));
+        assert!(dialog.contains(&sys_text));
         assert!(!dialog.contains("omitted"));
         assert!(dialog.contains("data 25"));
         assert!(dialog.contains("data 60"));
+    }
+
+    #[test]
+    fn test_format_messages_dialog_system_folding_on_turn_2() {
+        use crate::client::{Message, MessageContent, MessageRole};
+        let sys_text = (1..=60).map(|i| format!("instruction {i}")).collect::<Vec<_>>().join("\n");
+        let user_text = "hello".to_string();
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text(sys_text.clone())),
+            Message::new(MessageRole::User, MessageContent::Text(user_text)),
+        ];
+        let dialog = format_messages_dialog_with_turn(&msgs, false, 2);
+        assert!(dialog.contains("instructions unchanged"));
+        assert!(!dialog.contains("instruction 1"));
+        assert!(dialog.contains("hello"));
+    }
+
+    #[test]
+    fn test_format_messages_dialog_turn_delta_highlighting() {
+        use crate::client::{Message, MessageContent, MessageContentToolCalls, MessageRole, ToolCall};
+        use crate::function::ToolResult;
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text("sys".to_string())),
+            Message::new(MessageRole::User, MessageContent::Text("initial prompt".to_string())),
+            Message::new(MessageRole::Assistant, MessageContent::Text("thinking...".to_string())),
+            Message::new(
+                MessageRole::Tool,
+                MessageContent::ToolCalls(MessageContentToolCalls {
+                    text: "".to_string(),
+                    sequence: false,
+                    tool_results: vec![ToolResult {
+                        call: ToolCall::new("web_search".to_string(), serde_json::json!({}), None),
+                        output: serde_json::json!("search result payload"),
+                    }],
+                }),
+            ),
+        ];
+        let dialog = format_messages_dialog_with_turn(&msgs, false, 2);
+        assert!(dialog.contains("[history: user]"));
+        assert!(dialog.contains("[history: assistant]"));
+        assert!(dialog.contains("[new: tool_result: web_search]"));
+        assert!(dialog.contains("search result payload"));
+    }
+
+    #[test]
+    fn test_format_dialog_block_rails_and_asymmetric_framing() {
+        let req = format_dialog_block("orchestrator", 1234, 1, 10, DialogDirection::Request, "hello world");
+        assert!(req.contains("📥"));
+        assert!(req.contains("PROMPT SUBMITTED TO LLM"));
+        assert!(req.contains("│"));
+        assert!(req.contains("hello world"));
+
+        let resp = format_dialog_block("orchestrator", 1234, 1, 10, DialogDirection::Response, "model answer");
+        assert!(resp.contains("📤"));
+        assert!(resp.contains("RESPONSE FROM LLM"));
+        assert!(resp.contains("│"));
+        assert!(resp.contains("model answer"));
     }
 
     #[test]
