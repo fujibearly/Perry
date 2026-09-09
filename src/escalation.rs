@@ -442,6 +442,7 @@ pub struct ParentConnInfo {
     pub addr: String,
     pub fingerprint: String,
     pub tree_secret: String,
+    #[allow(dead_code)]
     pub tree_id: String,
 }
 
@@ -897,8 +898,6 @@ mod tests {
             escalation_id: "e1".into(),
             decision: VerdictDecision::Continue,
             added_context: None,
-            token: None,
-            risk_verdict: None,
         });
         let m2 = DownstreamMsg::Cancel(CancelMsg { reason: "stop".into() });
         write_frame(&mut a, &m1).await.unwrap();
@@ -1114,8 +1113,6 @@ mod tests {
                             escalation_id: esc.id,
                             decision: VerdictDecision::Continue,
                             added_context: Some(serde_json::json!({"note": "approved"})),
-                            token: None,
-                            risk_verdict: None,
                         }))
                         .await
                         .unwrap();
@@ -1326,8 +1323,6 @@ mod tests {
                         escalation_id: esc.id,
                         decision: VerdictDecision::Continue,
                         added_context: Some(serde_json::json!({"ok": true})),
-                        token: None,
-                        risk_verdict: None,
                     }))
                     .await
                     .unwrap();
@@ -1403,8 +1398,6 @@ mod tests {
                         escalation_id: esc.id.clone(),
                         decision: VerdictDecision::Continue,
                         added_context: Some(serde_json::json!({"id": esc.id})),
-                        token: None,
-                        risk_verdict: None,
                     }))
                     .await
                     .unwrap();

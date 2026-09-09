@@ -1450,135 +1450,6 @@ fn prompt_human_verdict(
     }
 }
 
-/// Transmit an escalation upstream when a gate is tripped (#6d).
-async fn escalate_tool_call(
-    config: &GlobalConfig,
-    call: &ToolCall,
-    parent_info: &crate::escalation::ParentConnInfo,
-    reason: &str,
-) -> Result<crate::safety::VerdictMsg> {
-    let (static_tier, reversible) = tool_tier_and_reversibility(config, &call.name);
-    let blast_radius = match static_tier {
-        crate::function::StaticTier::Tier(t) => t,
-        crate::function::StaticTier::Unclassified => crate::function::BlastRadius::Catastrophic,
-    };
-    let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| format!("agent-d{current_depth}"));
-
-    let esc = crate::safety::EscalationMsg {
-        id: format!("esc-{}", uuid::Uuid::new_v4()),
-        agent_id: agent_id.clone(),
-        tree_id: parent_info.tree_id.clone(),
-        action: serde_json::json!({
-            "tool": call.name.clone(),
-            "arguments": call.arguments.clone(),
-        }),
-        reason: reason.to_string(),
-        enrichment: serde_json::json!({
-            "depth": current_depth,
-            "static_tier": blast_radius.as_str(),
-            "reversible": reversible,
-        }),
-        blast_radius,
-        reversible,
-        challenge: "challenge".into(),
-    };
-
-    let timeout_secs = config.read().safety.verdict_timeout_secs;
-    if let Some(client) = get_or_init_child_client().await {
-        client.escalate(esc, timeout_secs).await
-    } else {
-        crate::escalation::escalate_to_parent(parent_info, &agent_id, current_depth, esc, timeout_secs).await
-    }
-}
-
-/// Handle a verdict outcome received from an escalation (#6d).
-async fn handle_verdict_outcome(
-    config: &GlobalConfig,
-    _call: &ToolCall,
-    verdict: crate::safety::VerdictMsg,
-) -> Result<Option<serde_json::Value>> {
-    match verdict.decision {
-        crate::safety::VerdictDecision::Continue => Ok(None),
-        crate::safety::VerdictDecision::Halt => {
-            let msg = match verdict.added_context {
-                Some(ctx) => format!("Execution halted by parent verdict: {ctx}"),
-                None => "Execution halted by parent verdict".to_string(),
-            };
-            Ok(Some(json!({"error": {"type": "escalation_halted", "message": msg}})))
-        }
-        crate::safety::VerdictDecision::Revert => {
-            let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
-            let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "agent".into());
-            let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
-            if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
-                let outcome = journal.replay_last().await?;
-                return Ok(Some(json!({
-                    "error": {
-                        "type": "escalation_reverted",
-                        "details": outcome.details,
-                    }
-                })));
-            }
-            Ok(Some(json!({"error": {"type": "escalation_reverted", "message": "Rollback journal replayed on parent revert verdict"}})))
-        }
-    }
-}
-
-/// Transmit an escalation upstream, await the verdict, and map the outcome (#6d).
-/// Fails closed to a structured `escalation_failed` block on transport error/timeout.
-async fn escalate_and_handle_verdict(
-    config: &GlobalConfig,
-    call: &ToolCall,
-    parent_info: &crate::escalation::ParentConnInfo,
-    reason: &str,
-    progress: Option<&AgentLoopProgress>,
-    risk_cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
-) -> Option<serde_json::Value> {
-    if let Some(p) = progress {
-        p.emit(AgentLoopEvent::EscalationDispatched {
-            name: call.name.clone(),
-            target: "parent".to_string(),
-            reason: reason.to_string(),
-        });
-    }
-    match escalate_tool_call(config, call, parent_info, reason).await {
-        Ok(verdict) => {
-            if let Some(p) = progress {
-                p.emit(AgentLoopEvent::EscalationVerdictReceived {
-                    name: call.name.clone(),
-                    decision: format!("{:?}", verdict.decision),
-                });
-            }
-            if verdict.decision == crate::safety::VerdictDecision::Continue {
-                if let Some(cache) = risk_cache {
-                    if let Some(rv) = &verdict.risk_verdict {
-                        cache.lock().raise(&call.name, &call.arguments, rv.clone());
-                    }
-                }
-            }
-            match handle_verdict_outcome(config, call, verdict).await {
-                Ok(res) => res, // Some(...) on Halt/Revert, None on Continue
-                Err(err) => Some(json!({
-                    "error": {
-                        "type": "escalation_failed",
-                        "message": format!("Handling verdict failed: {err}")
-                    }
-                })),
-            }
-        }
-        Err(err) => Some(json!({
-            "error": {
-                "type": "escalation_failed",
-                "message": format!("Escalation to parent failed: {err}")
-            }
-        })),
-    }
-}
-
 static CHILD_CLIENT: tokio::sync::OnceCell<Option<Arc<crate::escalation::ChildEscalationClient>>> =
     tokio::sync::OnceCell::const_new();
 
@@ -1712,25 +1583,29 @@ async fn handle_escalation_request(
         );
     }
 
-    // Defense-in-depth (FR-6d.21): capability mask cannot be elevated in-flight over mTLS
-    if esc.reason == "capability_denied" {
+    // Defense-in-depth (FR-6d.21 & FR-6d.24): neither capability mask nor authority ceiling
+    // can be elevated in-flight over mTLS. Sub-agents must be re-delegated with upfront permissions.
+    if esc.reason == "capability_denied" || esc.reason == "authority_exceeded" {
         if show_trace {
             eprintln!(
-                "  [supervisor] rejected in-flight capability elevation for child '{}' tool '{}'",
-                hello.agent_id, tool_name
+                "  [supervisor] rejected in-flight permission elevation ({}) for child '{}' tool '{}'",
+                esc.reason, hello.agent_id, tool_name
             );
         }
+        let msg = if esc.reason == "capability_denied" {
+            "Capability mask is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit mutating permission contract."
+        } else {
+            "Authority ceiling is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit permission contract or execute directly."
+        };
         return crate::safety::VerdictMsg {
             escalation_id,
             decision: crate::safety::VerdictDecision::Halt,
             added_context: Some(serde_json::json!({
                 "error": {
-                    "type": "capability_denied",
-                    "message": "Capability mask is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit mutating permission contract."
+                    "type": esc.reason,
+                    "message": msg,
                 }
             })),
-            token: None,
-            risk_verdict: None,
         };
     }
 
@@ -1764,8 +1639,6 @@ async fn handle_escalation_request(
                     )
                 }
             })),
-            token: None,
-            risk_verdict: None,
         };
     }
 
@@ -1869,13 +1742,10 @@ async fn handle_escalation_request(
             "evaluator_tier": v.tier.as_str(),
             "evaluator_rationale": v.rationale,
         }));
-        let token = Some(format!("permit-{}", uuid::Uuid::new_v4()));
         return crate::safety::VerdictMsg {
             escalation_id,
             decision: crate::safety::VerdictDecision::Continue,
             added_context,
-            token,
-            risk_verdict: evaluator_verdict,
         };
     }
 
@@ -1901,8 +1771,6 @@ async fn handle_escalation_request(
                         escalation_id,
                         decision: crate::safety::VerdictDecision::Halt,
                         added_context: Some(serde_json::json!({"error": format!("Re-escalation to parent failed: {e}")})),
-                        token: None,
-                        risk_verdict: None,
                     };
                 }
             }
@@ -1922,8 +1790,6 @@ async fn handle_escalation_request(
                         escalation_id,
                         decision: crate::safety::VerdictDecision::Halt,
                         added_context: None,
-                        token: None,
-                        risk_verdict: None,
                     };
                 }
             }
@@ -1944,18 +1810,10 @@ async fn handle_escalation_request(
     let decision = prompt_human_verdict(tool_name, &args, effective_blast_radius, &prompt_reason, None)
         .unwrap_or(crate::safety::VerdictDecision::Halt);
 
-    let token = if decision == crate::safety::VerdictDecision::Continue {
-        Some(format!("permit-{}", uuid::Uuid::new_v4()))
-    } else {
-        None
-    };
-
     crate::safety::VerdictMsg {
         escalation_id,
         decision,
         added_context: None,
-        token,
-        risk_verdict: evaluator_verdict,
     }
 }
 
@@ -2040,66 +1898,83 @@ async fn eval_single_tool(
         return Ok(denied);
     }
 
-    let mut supervisory_approved = false;
     let mut proven_reversible_applied = false;
-    // Backlog #6b: blast-radius authority gate.
+    // Backlog #6b: blast-radius authority gate — a hard process sandbox boundary for sub-agents (FR-6d.24).
+    // Sub-agents CANNOT elevate authority ceiling in-flight over mTLS.
+    // Return the denial immediately so the child loop can unwind and report `permission_blocked`.
     if let Some(denied) = authority_denied_result(config, call, progress, Some(&mut proven_reversible_applied)) {
         let err_type = denied
             .get("error")
             .and_then(|e| e.get("type"))
             .and_then(|t| t.as_str())
             .unwrap_or("authority_exceeded");
-        if err_type == "policy_forbidden" {
+        let is_child = current_agent_depth() > 0 || crate::escalation::ParentConnInfo::from_env().is_some();
+        if err_type == "policy_forbidden" || is_child {
             return Ok(denied);
         }
-        if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-            if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, err_type, progress, risk_cache).await {
-                return Ok(res);
-            } else {
-                supervisory_approved = true;
+
+        let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
+        let blast_radius = match static_tier {
+            crate::function::StaticTier::Tier(t) => t,
+            crate::function::StaticTier::Unclassified => crate::function::BlastRadius::Catastrophic,
+        };
+        if *IS_STDOUT_TERMINAL {
+            let decision = prompt_human_verdict(&call.name, &call.arguments, blast_radius, "authority_exceeded", progress)?;
+            match decision {
+                crate::safety::VerdictDecision::Continue => {}
+                crate::safety::VerdictDecision::Halt => {
+                    return Ok(json!({"error": {"type": "escalation_halted", "message": "Action halted by human operator"}}));
+                }
+                crate::safety::VerdictDecision::Revert => {
+                    let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
+                    let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "orchestrator".into());
+                    let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
+                    if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
+                        let outcome = journal.replay_last().await?;
+                        return Ok(json!({"error": {"type": "escalation_reverted", "details": outcome.details}}));
+                    }
+                    return Ok(json!({"error": {"type": "escalation_reverted", "message": "No journal found to replay"}}));
+                }
             }
         } else {
-            let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
-            let blast_radius = match static_tier {
-                crate::function::StaticTier::Tier(t) => t,
-                crate::function::StaticTier::Unclassified => crate::function::BlastRadius::Catastrophic,
-            };
-            if *IS_STDOUT_TERMINAL {
-                let decision = prompt_human_verdict(&call.name, &call.arguments, blast_radius, "authority_exceeded", progress)?;
-                match decision {
-                    crate::safety::VerdictDecision::Continue => {}
-                    crate::safety::VerdictDecision::Halt => {
-                        return Ok(json!({"error": {"type": "escalation_halted", "message": "Action halted by human operator"}}));
-                    }
-                    crate::safety::VerdictDecision::Revert => {
-                        let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
-                        let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "orchestrator".into());
-                        let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
-                        if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
-                            let outcome = journal.replay_last().await?;
-                            return Ok(json!({"error": {"type": "escalation_reverted", "details": outcome.details}}));
-                        }
-                        return Ok(json!({"error": {"type": "escalation_reverted", "message": "No journal found to replay"}}));
-                    }
-                }
-            } else {
-                return Ok(denied);
-            }
+            return Ok(denied);
         }
     }
 
     // Backlog #6c: `%assess-risk%` LLM evaluator overlay.
-    // If the supervisor already authorized this action during Gate 2 escalation,
-    // Gate 3 is satisfied by the supervisory permit (FR-6d.22).
-    if !supervisory_approved {
-        if let Some(denied) = risk_evaluator_denied_result(config, call, proven_reversible_applied, risk_cache, progress).await {
-            if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-                if let Some(res) = escalate_and_handle_verdict(config, call, &parent_info, "risk_blocked", progress, risk_cache).await {
-                    return Ok(res);
+    // The evaluator can only TIGHTEN restrictions, never relax them ("the LLM is not a Pardoner").
+    // Mandatory for all non-safe actions.
+    if let Some(denied) = risk_evaluator_denied_result(config, call, proven_reversible_applied, risk_cache, progress).await {
+        let is_child = current_agent_depth() > 0 || crate::escalation::ParentConnInfo::from_env().is_some();
+        if is_child {
+            // Sub-agents fail closed on risk denial; cannot elevate ceiling or bypass risk over mTLS
+            return Ok(denied);
+        }
+        let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
+        let blast_radius = match static_tier {
+            crate::function::StaticTier::Tier(t) => t,
+            crate::function::StaticTier::Unclassified => crate::function::BlastRadius::Catastrophic,
+        };
+        if *IS_STDOUT_TERMINAL {
+            let decision = prompt_human_verdict(&call.name, &call.arguments, blast_radius, "risk_blocked", progress)?;
+            match decision {
+                crate::safety::VerdictDecision::Continue => {}
+                crate::safety::VerdictDecision::Halt => {
+                    return Ok(json!({"error": {"type": "escalation_halted", "message": "Action halted by human operator"}}));
                 }
-            } else {
-                return Ok(denied);
+                crate::safety::VerdictDecision::Revert => {
+                    let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
+                    let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "orchestrator".into());
+                    let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
+                    if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
+                        let outcome = journal.replay_last().await?;
+                        return Ok(json!({"error": {"type": "escalation_reverted", "details": outcome.details}}));
+                    }
+                    return Ok(json!({"error": {"type": "escalation_reverted", "message": "No journal found to replay"}}));
+                }
             }
+        } else {
+            return Ok(denied);
         }
     }
 
@@ -2308,13 +2183,24 @@ async fn eval_agent_tool_subprocess(
                     .and_then(|p| p.get("ceiling"))
                     .and_then(|c| c.as_str())
                     .unwrap_or("disruptive");
-                let guidance = format!(
-                    "Sub-agent '{}' was blocked by its read-only permission mask when attempting '{}' (reason: {}). \
-                     Pre-mutation entries were unwound. If this action is authorized and within your ceiling, \
-                     re-delegate to '{}' with permissions: {{ mask: \"mutating\", ceiling: \"{}\" }} \
-                     (or flat args permissions_mask=\"mutating\", permissions_ceiling=\"{}\").",
-                    agent_name, attempted_tool, reason, agent_name, suggested_ceiling, suggested_ceiling
-                );
+                let guidance = if reason == "authority_exceeded" {
+                    format!(
+                        "Sub-agent '{}' was blocked because tool '{}' requires authority ceiling '{}', \
+                         which exceeds its provisioned ceiling. Pre-mutation entries were unwound. \
+                         If this action is authorized and within your ceiling, re-delegate to '{}' with \
+                         permissions: {{ mask: \"mutating\", ceiling: \"{}\" }} \
+                         (or flat args permissions_mask=\"mutating\", permissions_ceiling=\"{}\") or execute directly.",
+                        agent_name, attempted_tool, suggested_ceiling, agent_name, suggested_ceiling, suggested_ceiling
+                    )
+                } else {
+                    format!(
+                        "Sub-agent '{}' was blocked by its read-only permission mask when attempting '{}' (reason: {}). \
+                         Pre-mutation entries were unwound. If this action is authorized and within your ceiling, \
+                         re-delegate to '{}' with permissions: {{ mask: \"mutating\", ceiling: \"{}\" }} \
+                         (or flat args permissions_mask=\"mutating\", permissions_ceiling=\"{}\").",
+                        agent_name, attempted_tool, reason, agent_name, suggested_ceiling, suggested_ceiling
+                    )
+                };
                 return Ok((
                     json!({
                         "status": "permission_blocked",
@@ -2914,50 +2800,69 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             tool_results.extend(real_results);
         }
 
-        // Backlog #6d (FR-6d.19): If running under a readonly capability mask and a mutating
-        // tool was blocked, halt actuation immediately, unwind durable journal entries,
-        // and exit cleanly with status: "permission_blocked".
-        if under_readonly_mask() {
-            if let Some(denied_res) = tool_results.iter().find(|r| {
-                r.output
-                    .get("error")
-                    .and_then(|e| e.get("type"))
-                    .and_then(|t| t.as_str())
-                    == Some("capability_denied")
-            }) {
-                let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
-                let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "agent".into());
-                let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&params.config.read().safety.escalation_dir);
-                let unwound = if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
-                    journal.replay_last().await.is_ok()
-                } else {
-                    false
-                };
+        // Backlog #6d (FR-6d.19 & FR-6d.24): Unified process sandbox boundary for sub-agents.
+        // If running under a readonly capability mask (capability_denied) or as a child process
+        // with an authority ceiling violation (authority_exceeded), halt actuation immediately,
+        // unwind durable journal entries, and exit cleanly with status: "permission_blocked".
+        let blocked_denial = tool_results.iter().find(|r| {
+            if let Some(err_type) = r.output.get("error").and_then(|e| e.get("type")).and_then(|t| t.as_str()) {
+                if err_type == "capability_denied" && under_readonly_mask() {
+                    return true;
+                }
+                let is_child = current_agent_depth() > 0 || crate::escalation::ParentConnInfo::from_env().is_some();
+                if (err_type == "authority_exceeded" || err_type == "risk_blocked") && is_child {
+                    return true;
+                }
+            }
+            false
+        });
 
-                params.progress.emit(AgentLoopEvent::CapabilityBlocked {
-                    name: denied_res.call.name.clone(),
-                    unwound,
-                });
+        if let Some(denied_res) = blocked_denial {
+            let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
+            let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "agent".into());
+            let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&params.config.read().safety.escalation_dir);
+            let unwound = if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
+                journal.replay_last().await.is_ok()
+            } else {
+                false
+            };
 
-                let tool_decl = find_tool_declaration(params.config, &denied_res.call.name);
-                let required_ceiling = tool_decl
-                    .as_ref()
-                    .and_then(|d| d.risk)
-                    .map(|r| r.as_str())
-                    .unwrap_or("safe");
+            params.progress.emit(AgentLoopEvent::CapabilityBlocked {
+                name: denied_res.call.name.clone(),
+                unwound,
+            });
 
-                let payload = json!({
-                    "status": "permission_blocked",
-                    "attempted_tool": denied_res.call.name,
-                    "arguments": denied_res.call.arguments,
-                    "required_permission": {
-                        "mask": "mutating",
-                        "ceiling": required_ceiling,
-                    },
-                    "reason": "capability_denied",
-                    "rollback_executed": unwound,
-                    "triage_summary": output.text,
-                });
+            let tool_decl = find_tool_declaration(params.config, &denied_res.call.name);
+            let (static_tier, _) = tool_tier_and_reversibility(params.config, &denied_res.call.name);
+            let static_tier_str = match static_tier {
+                crate::function::StaticTier::Tier(t) => t.as_str(),
+                crate::function::StaticTier::Unclassified => "catastrophic",
+            };
+            let required_ceiling = tool_decl
+                .as_ref()
+                .and_then(|d| d.risk)
+                .map(|r| r.as_str())
+                .unwrap_or(static_tier_str);
+
+            let reason = denied_res
+                .output
+                .get("error")
+                .and_then(|e| e.get("type"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("capability_denied");
+
+            let payload = json!({
+                "status": "permission_blocked",
+                "attempted_tool": denied_res.call.name,
+                "arguments": denied_res.call.arguments,
+                "required_permission": {
+                    "mask": "mutating",
+                    "ceiling": required_ceiling,
+                },
+                "reason": reason,
+                "rollback_executed": unwound,
+                "triage_summary": output.text,
+            });
 
                 let payload_str = payload.to_string();
 
@@ -2991,7 +2896,6 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                     usage: total_usage,
                     final_text: payload_str,
                 });
-            }
         }
 
         // If all real calls were tripped and no executable calls ran, give the model
@@ -5741,7 +5645,6 @@ agent_loop:
 
         let verdict = handle_escalation_request(&config, &hello, esc).await;
         assert_eq!(verdict.decision, crate::safety::VerdictDecision::Continue);
-        assert!(verdict.token.is_some());
 
         match prev_ceiling {
             Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
@@ -5755,34 +5658,30 @@ agent_loop:
     }
 
     #[tokio::test]
-    async fn test_supervisory_approval_seeds_risk_cache() {
-        let _config = config_with_tiers();
-        let cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
-        let call = ToolCall::new("fs_create".to_string(), json!({"path": "foo.txt"}), None);
-        let supervisory_verdict = crate::safety::VerdictMsg {
-            escalation_id: "esc-123".to_string(),
-            decision: crate::safety::VerdictDecision::Continue,
-            added_context: None,
-            token: Some("permit-abc".to_string()),
-            risk_verdict: Some(crate::safety::RiskVerdict {
-                tier: crate::function::BlastRadius::Disruptive,
-                reversible: false,
-                confidence: crate::safety::VerdictConfidence::High,
-                rationale: "supervisor approved creating file".to_string(),
-                concerns: vec![],
-            }),
+    async fn handle_escalation_request_rejects_authority_exceeded_defense_in_depth() {
+        let config = config_with_tiers();
+        let hello = crate::safety::HelloMsg {
+            agent_id: "child-coder".to_string(),
+            depth: 1,
+            capabilities: vec![],
+        };
+        let esc = crate::safety::EscalationMsg {
+            id: "esc-auth-1".to_string(),
+            agent_id: "child-coder".to_string(),
+            tree_id: "tree-test".to_string(),
+            action: json!({"tool": "write_file", "arguments": {"path": "/tmp/test.txt"}}),
+            reason: "authority_exceeded".to_string(),
+            enrichment: json!({}),
+            blast_radius: crate::function::BlastRadius::Disruptive,
+            reversible: false,
+            challenge: "chall".to_string(),
         };
 
-        // Simulating the receipt of Continue verdict in escalate_and_handle_verdict:
-        if supervisory_verdict.decision == crate::safety::VerdictDecision::Continue {
-            if let Some(rv) = &supervisory_verdict.risk_verdict {
-                cache.lock().raise(&call.name, &call.arguments, rv.clone());
-            }
-        }
-
-        let cached = cache.lock().get(&call.name, &call.arguments).expect("must be cached");
-        assert_eq!(cached.tier, crate::function::BlastRadius::Disruptive);
-        assert_eq!(cached.rationale, "supervisor approved creating file");
+        let verdict = handle_escalation_request(&config, &hello, esc).await;
+        assert_eq!(verdict.decision, crate::safety::VerdictDecision::Halt);
+        assert!(verdict.added_context.is_some());
+        let err_obj = verdict.added_context.unwrap();
+        assert_eq!(err_obj["error"]["type"], "authority_exceeded");
     }
 
     #[tokio::test]
@@ -5810,6 +5709,34 @@ agent_loop:
         assert!(verdict.added_context.is_some());
         let err_obj = verdict.added_context.unwrap();
         assert_eq!(err_obj["error"]["type"], "capability_denied");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_eval_single_tool_child_process_authority_exceeded_fails_closed_without_escalating() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev_ceiling = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let prev_depth = std::env::var("AICHAT_AGENT_DEPTH").ok();
+
+        // Set up child environment with depth 1 and safe ceiling
+        std::env::set_var("AICHAT_AUTHORITY_CEILING", "safe");
+        std::env::set_var("AICHAT_AGENT_DEPTH", "1");
+
+        let config = config_with_tiers();
+        // restart_svc is disruptive, exceeding the safe ceiling
+        let call = ToolCall::new("restart_svc".to_string(), json!({}), None);
+
+        let res = eval_single_tool(&config, &call, None, None).await.unwrap();
+        assert_eq!(res["error"]["type"], "authority_exceeded");
+
+        match prev_ceiling {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
+        match prev_depth {
+            Some(v) => std::env::set_var("AICHAT_AGENT_DEPTH", v),
+            None => std::env::remove_var("AICHAT_AGENT_DEPTH"),
+        }
     }
 
     #[test]

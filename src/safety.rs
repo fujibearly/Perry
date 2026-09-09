@@ -1204,12 +1204,6 @@ pub struct VerdictMsg {
     /// Optional context the parent adds to guide a `Continue` retry.
     #[serde(default)]
     pub added_context: Option<serde_json::Value>,
-    /// Optional permit token granting execution if Continue is authorized.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub token: Option<String>,
-    /// Evaluated risk verdict if assessed by the parent/supervisor.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub risk_verdict: Option<RiskVerdict>,
 }
 
 /// Cooperative cancellation sent **parent → child** (generalizes HALT beyond an
@@ -2337,21 +2331,11 @@ other_tool() {
                 escalation_id: "esc-1".into(),
                 decision: verb,
                 added_context: None,
-                token: Some("tok-123".into()),
-                risk_verdict: Some(RiskVerdict {
-                    tier: BlastRadius::Disruptive,
-                    reversible: true,
-                    confidence: VerdictConfidence::High,
-                    rationale: "authorized".into(),
-                    concerns: vec![],
-                }),
             };
             let s = serde_json::to_string(&v).unwrap();
             assert!(s.contains(&format!("\"{wire}\"")), "verb {verb:?} serializes as {wire}");
             let back: VerdictMsg = serde_json::from_str(&s).unwrap();
             assert_eq!(back.decision, verb);
-            assert_eq!(back.token.as_deref(), Some("tok-123"));
-            assert_eq!(back.risk_verdict.unwrap().tier, BlastRadius::Disruptive);
         }
     }
 
@@ -2399,8 +2383,6 @@ other_tool() {
             escalation_id: "e1".into(),
             decision: VerdictDecision::Revert,
             added_context: Some(serde_json::json!({"note": "undo it"})),
-            token: None,
-            risk_verdict: None,
         });
         let cancel = DownstreamMsg::Cancel(CancelMsg {
             reason: "sibling failed".into(),

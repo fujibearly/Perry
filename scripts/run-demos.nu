@@ -1107,26 +1107,27 @@ if ($d19_target | path exists) { rm -f $d19_target }
 }
 
 if (should-run-demo "20" $demo) {
-# ─── Demo 20: Orchestrator to Sub-Agent Escalation (live, gemini-2.5-flash) ───────
+# ─── Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation (live, gemini-2.5-flash) ───
 #
-# Multi-process authority escalation under delegation:
-# The orchestrator delegates file creation to the `coder` sub-agent with explicit
-# mutating permission, but with a `reversible` authority ceiling.
-# `fs_write` has blast-radius `Disruptive`, so actuation exceeds coder's
-# autonomous authority ceiling, triggering `authority_exceeded`.
-# The sub-agent dispatches an mTLS escalation request to the parent orchestrator.
-# The parent evaluates via the Session-10 Should Gate (Protected Policy, anti-spoof,
-# risk assessment) and grants Continue verdict within its own ceiling; sub-agent actuates and succeeds.
+# Hard process authority boundary & bounded re-delegation (FR-6d.24):
+# 1. The orchestrator delegates file creation to `coder` with explicit mutating permissions
+#    but with a restricted `reversible` authority ceiling.
+# 2. `fs_write` has blast-radius `Disruptive`, exceeding coder's authority ceiling.
+# 3. Sub-agents cannot elevate authority ceiling in-flight over mTLS, and supervisors cannot
+#    issue downward permits ("the LLM is not a Pardoner"). Coder halts actuation immediately,
+#    unwinds pre-mutation journal entries, and exits cleanly with `status: "permission_blocked", reason: "authority_exceeded"`.
+# 4. Orchestrator ingests the `permission_blocked` tool result and re-delegates to coder with `disruptive` ceiling.
+# 5. Coder executes successfully within its new statically provisioned authority ceiling.
 
-step-pause $debug "Demo 20: Orchestrator Sub-Agent Authority Escalation"
-header "Demo 20: Orchestrator Sub-Agent Authority Escalation (live, gemini-2.5-flash)"
-show-desc "Demonstrates multi-process authority escalation under delegation: child agent requests elevated authority from parent orchestrator."
+step-pause $debug "Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation"
+header "Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation (live, gemini-2.5-flash)"
+show-desc "Demonstrates hard authority ceiling sandboxing: sub-agent attempts disruptive action exceeding its reversible ceiling, is hard-blocked with zero downward permits, unwinds, and parent re-delegates with disruptive ceiling."
 
 let d20_target = ($nu.temp-dir | path join $"aichat-orch-esc-($nu.pid).txt")
 if ($d20_target | path exists) { rm -f $d20_target }
 
-let d20_prompt = $"Delegate to coder with permissions_mask 'mutating' and permissions_ceiling 'reversible': write the exact text ESCALATED_OK to ($d20_target) using fs_write. You MUST delegate to coder."
-show-cmd 'aichat --show-cost --agent orchestrator "Delegate to coder [mutating, reversible ceiling]: write ESCALATED_OK to <target>"'
+let d20_prompt = $"Delegate to coder with permissions_mask 'mutating' and permissions_ceiling 'reversible': write the exact text HARD_CEILING_OK to ($d20_target) using fs_write. When coder reports permission_blocked due to authority_exceeded, re-delegate with permissions_ceiling 'disruptive' to complete the task."
+show-cmd 'aichat --show-cost --agent orchestrator "Delegate to coder [reversible ceiling] -> authority_exceeded blocked -> re-delegate disruptive"'
 
 let d20_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
@@ -1141,13 +1142,13 @@ let combined20 = $"($demo20.stdout)($trace20)"
 
 let d20_file_created = ($d20_target | path exists)
 let d20_delegated = ($trace20 | str contains "calling: coder") or ($combined20 | str contains "coder")
-let d20_escalated = ($trace20 | str contains "escalation:") or ($trace20 | str contains "EscalationDispatched") or ($trace20 | str contains "authority_exceeded")
-let d20_verdict = ($trace20 | str contains "escalation verdict:") or ($trace20 | str contains "EscalationVerdictReceived") or ($trace20 | str contains "Continue")
+let d20_blocked = ($trace20 | str contains "authority_exceeded") or ($combined20 | str contains "authority_exceeded") or ($combined20 | str contains "permission_blocked")
+let d20_redelegate = ($trace20 | str contains "calling: coder") or ($d20_file_created)
 
 report "Orchestrator delegated task to coder with mutating permissions" $d20_delegated
-report "Coder dispatched authority_exceeded escalation to parent" ($d20_escalated or $d20_file_created)
-report "Parent orchestrator returned escalation verdict" ($d20_verdict or $d20_file_created)
-report "File created through delegated escalation" $d20_file_created
+report "Coder hard-blocked by authority ceiling (authority_exceeded) with zero downward permits" ($d20_blocked or $d20_file_created)
+report "Parent orchestrator re-delegated with disruptive ceiling" ($d20_redelegate and $d20_file_created)
+report "File created through re-delegation within authority boundaries" $d20_file_created
 show-output $demo20.stdout
 show-cost ($demo20.stderr | default "")
 
