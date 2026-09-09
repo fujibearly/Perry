@@ -82,6 +82,18 @@ Gate 3 runs only when an action is already within the agent's deterministic mask
 3. **`scripts/run-demos.nu`:**
    - Update Demo 20 to test hard authority ceiling block and orchestrator re-delegation.
    - Verify Demo 3 passes with clean re-delegation and zero downward permits.
-4. **Verification:**
-   - Run `cargo test` and `cargo clippy`.
-   - Verify clean work trees.
+## 4. Verification & Results
+
+- **Unit & Integration Tests:**
+  - 478 unit tests + 5 catalog override tests + 3 web asset security tests = **486 passed, 0 failed**.
+- **Static Analysis:**
+  - `cargo clippy --all-targets -- -D warnings`: passed with 0 warnings.
+- **Binary Build:**
+  - `cargo build --release`: clean build.
+- **Live Demo Verification:**
+  - **Demo 16 (Deterministic Offline Escalation & Journal):** 100% passed (fail-closed timeout, 0600 permissions, rollback replay).
+  - **Demo 20 (Hard Authority Ceiling Sandboxing & Re-Delegation):** 100% passed (coder blocked by reversible ceiling with zero downward permits, parent re-delegated with disruptive ceiling).
+  - **Demo 3 (Planning Tool & Sub-agent Delegation):** 100% passed (coder blocked on disruptive `fs_create`, orchestrator updated plan and re-delegated with disruptive ceiling, task completed cleanly).
+- **Git Commit:**
+  - Committed in `de0f501`: `feat: prohibit downward permit propagation and enforce hard child authority ceilings (FR-6d.24)`.
+
