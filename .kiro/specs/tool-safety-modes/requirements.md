@@ -345,17 +345,25 @@ can fall back to it.
   2. The child engine MUST immediately halt actuation of the tool.
   3. The child MUST unwind any pre-mutation journal entries recorded in that execution session.
   4. The child process MUST exit cleanly with a structured `status: "permission_blocked"` payload reporting the attempted tool, arguments, required permission, and triage findings.
-  5. The `#6b` authority ceiling (`authority_exceeded`) MUST NOT be routed through this hard-block path; it continues through the FR-6d.17 Should Gate via mTLS.
+  5. *(Superseded by FR-6d.24)* The `#6b` authority ceiling (`authority_exceeded`) is unified with Gate 1 into the hard process sandbox boundary.
 - **FR-6d.20 — Orchestrator Loop Ingestion & Bounded Re-Delegation.**
   When an invoking orchestrator receives a sub-agent tool result containing `status: "permission_blocked"`:
   1. The engine MUST surface the structured block and unwound state as a tool result in the conversation context, guiding the orchestrator to assess user intent and re-delegate with explicit permissions if authorized and within its own ceiling.
   2. The engine MUST enforce a per-`(agent, task)` re-delegation attempt cap (circuit breaker) to prevent unbounded `permission_blocked → re-delegate → permission_blocked` cycles.
 - **FR-6d.21 — Escalation Handler Defense-in-Depth.**
   In `handle_escalation_request`, if an incoming escalation request arrives with reason `"capability_denied"`, the supervisor MUST immediately reject it with `VerdictDecision::Halt` (`"Capability mask is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit mutating permission contract."`).
-- **FR-6d.22 — Downward Supervisory Verdict & Permit Propagation.**
-  When a supervisor approves an over-ceiling escalation with `VerdictDecision::Continue`, `VerdictMsg` MUST optionally include the supervisor's evaluated `RiskVerdict` and a scoped `ExecutionPermit` token. The child agent MUST record the supervisor's verdict into its local `RiskCache` and honor the permit token, eliminating redundant local `%assess-risk%` evaluations and duplicate second-round escalations for the same tool invocation.
+- **FR-6d.22 — [SUPERSEDED by FR-6d.24] Downward Supervisory Verdict & Permit Propagation.**
+  *(Superseded: All downward permit tokens and supervisor-approved bypasses are eliminated to enforce that LLM risk assessment cannot pardon ceiling violations or relax permissions).*
 - **FR-6d.23 — Full Untruncated Trace Observability.**
   The agent loop dialog trace MUST support disabling line truncation via `AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE=true` (and `--dialog-no-truncate`), and `scripts/run-demos.nu` MUST provide a `--no-truncate` (`-n`) flag to cancel trace and output truncation across both `aichat` dialog messages and demo runner output caps.
+- **FR-6d.24 — Prohibition of Downward Permit Propagation & Hard Child Authority Ceilings.**
+  1. **Zero Downward Permit Propagation:** Downward execution permits are strictly prohibited. `VerdictMsg` contains only `decision: VerdictDecision`, `reason: Option<String>`, and `added_context: Option<String>`. The fields `token: Option<String>` (`ExecutionPermit`) and `risk_verdict: Option<RiskVerdict>` are completely eliminated. The `supervisory_approved` in-flight bypass is permanently deleted.
+  2. **Tightening-Only Risk Assessment ("The LLM is Not a Pardoner"):** The `%assess-risk%` evaluator is strictly an extra check to stop dangerous actions from taking place. It can only *tighten* restrictions (raise tiers, require human approval, or halt on low confidence / concerns). It MUST NEVER be used by an agent, supervisor, or orchestrator as a pass-through approval or permission elevation mechanism to relax any existing policies, authority ceilings, or capability masks.
+  3. **Unified Process Sandbox Boundary:** Gate 1 (`capability_denied`) and Gate 2 (`authority_exceeded`) are unified as hard, immutable process sandbox boundaries for child sub-agents. A child agent executes strictly within its upfront provisioned `DelegatedPermissions` (`mask` and `ceiling`). Sub-agents MUST NOT escalate over mTLS to elevate either their capability mask or their authority ceiling in-flight.
+  4. **Unwind & Bounded Re-Delegation on Authority Trip:** When a child process attempts an action that exceeds its authority ceiling (`required_authority > child_ceiling`), actuation MUST NOT proceed. The child engine MUST immediately replay `journal.replay_last()` to unwind any pre-mutation journal entries recorded in that execution session, and exit cleanly with structured payload:
+     `{"status": "permission_blocked", "reason": "authority_exceeded", "required_permission": {"mask": "mutating", "ceiling": "<tier>"}, "rollback_executed": true, ...}`.
+     The parent orchestrator ingests this structured tool result into its conversation context and, subject to the per-(agent, task) circuit breaker (FR-6d.20), may re-delegate with the required ceiling (if permitted by the parent's own ceiling) or execute the action directly.
+  5. **Root Orchestrator Human Escalation Only:** Only the root orchestrator (depth 0, `parent_info.is_none()`), operating under direct human supervision, may prompt the human operator (`prompt_human_verdict`) for an authority tier elevation when an action exceeds the root's authority ceiling. Sub-agents (`parent_info.is_some()`) always fail-closed immediately.
 
 ## Non-Functional Requirements
 

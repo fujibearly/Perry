@@ -152,6 +152,9 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 - [x] 6d.28 Unit tests, verification & docs for Sessions 12-13: Add unit tests for verdict propagation and permit validation; update roadmap and session logs.
 - [x] 6d.29 Full Untruncated Trace Observability: Add `dialog_no_truncate` to `AgentLoopConfig`, CLI `--dialog-no-truncate`, and env var `AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE`; add `--no-truncate` (`-n`) flag in `scripts/run-demos.nu` to bypass trace line capping and dialog truncation. (FR-6d.23)
 - [x] 6d.30 Unit testing, verification, and documentation updates for Session 15.
+- [ ] 6d.31 Elimination of Downward Permits & Hard Authority Ceiling Sandboxing: Remove `token: Option<String>` and `risk_verdict: Option<RiskVerdict>` from `VerdictMsg`; eliminate `supervisory_approved` in-flight bypass in `eval_single_tool`; treat `authority_exceeded` as hard process sandbox boundary for child agents (`parent_info.is_some()`) triggering journal unwind and structured `permission_blocked` (`reason: authority_exceeded`); enforce tightening-only risk evaluation. (FR-6d.24)
+- [ ] 6d.32 Demo 3 & Demo 20 Alignment and Verification: Align Demo 3 and Demo 20 to demonstrate hard authority ceiling blocks, clean orchestrator re-delegation or direct execution, zero downward permits; verify full test suite and clean build. (Verification)
+
 
 ## Cross-cutting / Land
 
