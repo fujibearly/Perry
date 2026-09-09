@@ -91,6 +91,8 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
       - All 31 root tools annotated with `# @meta mode` and `# @meta risk` (`fs_patch`, `fs_rm`, `fs_write` have `reversible-via backup`).
       - All agent subcommands (`coder`, `demo`, `json-viewer`, `orchestrator`, `researcher`, `sql`, `todo`) classified.
       - Verified via `argc test` and all 16 demos in `scripts/run-demos.nu`.
+- [ ] 6c.13 Verdict-level caching (`RiskCache` storing `RiskVerdict`): Store full structured verdict (tier, confidence, rationale, concerns) rather than scalar floor. Preserves rationale for cache hits, retains dynamic act-time reversibility (`one_step_down`), and enforces catalog/policy floors via `clamp_verdict`. (FR-6c.9)
+- [ ] 6c.14 Execution-level inspection: Update `resolve_tool_implementation` to extract function bodies from multi-tool scripts (`tools.sh`); strip parameter schema definitions (`permissions_*`, etc.) and IPC envelopes from evaluator context to focus assessor on executable code. (FR-6c.10)
 
 ## Phase #6d — Escalation & Control Protocol + Human-in-the-Loop (branch `feat/tool-safety-6d`)
 
@@ -144,6 +146,8 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 - [x] 6d.24 Escalation handler defense-in-depth in `src/agent_loop.rs`: reject any incoming `capability_denied` escalation with `VerdictDecision::Halt`. Preserve all existing FR-6d.17 Should Gate behavior for `authority_exceeded`. (FR-6d.21)
 - [x] 6d.25 Unit tests & demos: add unit tests for `DelegatedPermissions` clamping/validation, child unwind, and Should Gate preservation; add Demo 21 in `scripts/run-demos.nu`; assert Demo 20 passes. (Verification)
 - [x] 6d.26 Specs & documentation: add Decision B as-built note to `design.md`, update `roadmap.md`, and record session summary.
+- [ ] 6d.27 Downward supervisory verdict & permit propagation: In `VerdictMsg`, include `risk_verdict: Option<RiskVerdict>` and `ExecutionPermit` token when supervisor approves over-ceiling action; child seeds local `RiskCache` and skips redundant second risk evaluation and duplicate escalation. (FR-6d.22)
+- [ ] 6d.28 Unit tests, verification & docs for Sessions 12-13: Add unit tests for verdict propagation and permit validation; update roadmap and session logs.
 
 ## Cross-cutting / Land
 

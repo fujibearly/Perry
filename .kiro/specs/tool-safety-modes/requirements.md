@@ -190,6 +190,17 @@ can fall back to it.
   **raise-only `RiskCache`** that reuses assessed authority floors across turns without redundant model calls.
 - **FR-6c.8 — Fail toward escalation/block.** Evaluator unreachable, timeout, malformed output, or
   `confidence: low` MUST NOT permit the action. With #6d present it escalates; without #6d it blocks.
+- **FR-6c.9 — Verdict-Level Caching (RiskVerdict vs. Scalar Floor).** `RiskCache` MUST store the
+  full structured `RiskVerdict` (`tier`, `confidence`, `rationale`, `concerns`) rather than the
+  synthesized scalar `RequiredAuthority` floor. On a cache hit, the engine retains the model's
+  rationale for observability, preserves dynamic act-time reversibility discounting (`one_step_down`),
+  and enforces the non-pardonable catalog and policy base via act-time `clamp_verdict`.
+- **FR-6c.10 — Execution-Level Inspection (Eliminating Metadata Noise).** Tool implementation resolution
+  (`resolve_tool_implementation`) MUST support extracting function bodies from multi-tool scripts
+  (`tools.sh`). When constructing the evaluator context, internal parameter schemas (`permissions_mask`,
+  `permissions_ceiling`, etc.) and supervisory IPC envelopes MUST be omitted, presenting the risk
+  assessor with the concrete target path, invocation CLI, and executable source code rather than
+  self-reported declarative metadata.
 
 ### Phase #6d — Escalation & Control Protocol + Human-in-the-Loop
 
@@ -333,6 +344,8 @@ can fall back to it.
   2. The engine MUST enforce a per-`(agent, task)` re-delegation attempt cap (circuit breaker) to prevent unbounded `permission_blocked → re-delegate → permission_blocked` cycles.
 - **FR-6d.21 — Escalation Handler Defense-in-Depth.**
   In `handle_escalation_request`, if an incoming escalation request arrives with reason `"capability_denied"`, the supervisor MUST immediately reject it with `VerdictDecision::Halt` (`"Capability mask is a hard process sandbox boundary and cannot be elevated in-flight. Re-delegate the sub-agent with an explicit mutating permission contract."`).
+- **FR-6d.22 — Downward Supervisory Verdict & Permit Propagation.**
+  When a supervisor approves an over-ceiling escalation with `VerdictDecision::Continue`, `VerdictMsg` MUST optionally include the supervisor's evaluated `RiskVerdict` and a scoped `ExecutionPermit` token. The child agent MUST record the supervisor's verdict into its local `RiskCache` and honor the permit token, eliminating redundant local `%assess-risk%` evaluations and duplicate second-round escalations for the same tool invocation.
 
 ## Non-Functional Requirements
 

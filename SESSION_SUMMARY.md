@@ -143,4 +143,16 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Live Verification:** Unit suite **469 pass, 0 fail**; verified with live Demos 1, 3, 5, 10b; debug and release builds fully up to date.
       * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
 
+  13. **Session 13: Safety Evaluation Architecture Audit, RiskCache Data Model & Execution Ground Truth**
+    * **Period:** `2026-09-08`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-08-session13.md`](.kiro/docs/session-summary-2026-09-08-session13.md)
+    * **Focus Areas:**
+      * **RiskCache Data Model Deep-Dive:** Formalized exact specification of `RiskCache`: an in-memory `HashMap<String, RequiredAuthority>` acting as a raise-only authority floor (not an execution permit or raw LLM output).
+      * **Architectural Tradeoff: Caching `RiskVerdict` vs. Scalar Floor (FR-6c.9):** Proved that caching the structured `RiskVerdict` (`tier`, `confidence`, `rationale`, `concerns`) is strictly superior to caching the scalar floor. Retains evaluator rationale on cache hits (fixing `rationale: None`), maintains dynamic reversibility at act-time, and preserves monotonic safety invariants via act-time `clamp_verdict`.
+      * **Demo 3 Forensic Trace Analysis & Double-Evaluation Elimination (FR-6d.22):** Dissected the Demo 3 execution where `coder` and `orchestrator` executed two near-identical consecutive `%assess-risk%` prompts. Proved that the net difference is superficial supervisory metadata (`intent` and `supervisory_request`), and designed downward propagation of `RiskVerdict` and `ExecutionPermit` in `VerdictMsg` to eliminate redundant second-round evaluations.
+      * **Actuation Ground Truth vs. Declarative Metadata Noise (FR-6c.10):** Addressed the security anti-pattern of flooding the risk assessor with OpenAPI parameter schemas (`permissions_mask`, `permissions_ceiling`, etc.) while reporting `implementation: {"type": "unknown"}`. Designed multi-tool script extraction for `tools.sh` so the assessor audits the actual bash function code and target paths directly.
+      * **Roadmap & Spec Crosswalk:** Added FR-6c.9, FR-6c.10, FR-6d.22 to `requirements.md` and Tasks 6c.13, 6c.14, 6d.27, 6d.28 to `tasks.md`.
+      * **State:** Working tree clean (`aichat` and `llm-functions` both clean on `feat/tool-safety-permission-boundary`), local-only.
+
+
 
