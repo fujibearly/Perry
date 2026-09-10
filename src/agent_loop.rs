@@ -3009,7 +3009,7 @@ async fn call_llm_raw(
     let extract_code = !*IS_STDOUT_TERMINAL && params.code_mode;
 
     let mut retries = 0;
-    const MAX_EMPTY_RETRIES: usize = 2;
+    const MAX_EMPTY_RETRIES: usize = 3;
 
     loop {
         if params.abort_signal.aborted() {
@@ -3035,13 +3035,26 @@ async fn call_llm_raw(
                 if output.text.trim().is_empty() && tool_calls.is_empty() {
                     if retries < MAX_EMPTY_RETRIES && !params.abort_signal.aborted() {
                         retries += 1;
+                        let (base_ms, jitter_range_ms) = match retries {
+                            1 => (1000, 200),
+                            2 => (2500, 300),
+                            _ => (5000, 500),
+                        };
+                        let random_u32 = u32::from_le_bytes(
+                            uuid::Uuid::new_v4().as_bytes()[0..4]
+                                .try_into()
+                                .unwrap(),
+                        );
+                        let jitter = (random_u32 % (2 * jitter_range_ms + 1)) as i64 - jitter_range_ms as i64;
+                        let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
+
                         log::debug!(
                             "LLM returned empty response (attempt {}/{}), retrying in {}ms...",
                             retries,
                             MAX_EMPTY_RETRIES,
-                            500 * retries
+                            delay_ms
                         );
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries as u64)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
                     bail!("LLM returned an empty response with no text and no tool calls");

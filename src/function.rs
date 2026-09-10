@@ -895,10 +895,17 @@ pub fn run_llm_function(
     if *IS_STDOUT_TERMINAL {
         println!("{}", dimmed_text(&prompt));
     }
-    let exit_code = run_command(&cmd_name, &cmd_args, Some(envs))
+    let (success, stdout, stderr) = run_command_with_output(&cmd_name, &cmd_args, Some(envs))
         .map_err(|err| anyhow!("Unable to run {cmd_name}, {err}"))?;
-    if exit_code != 0 {
-        bail!("Tool call exit with {exit_code}");
+    if !success {
+        let err_msg = if !stderr.trim().is_empty() {
+            stderr.trim().to_string()
+        } else if !stdout.trim().is_empty() {
+            stdout.trim().to_string()
+        } else {
+            "Tool call exited with non-zero status".to_string()
+        };
+        bail!("{err_msg}");
     }
     let mut output = None;
     if temp_file.exists() {
@@ -908,6 +915,9 @@ pub fn run_llm_function(
             output = Some(contents);
         }
     };
+    if output.is_none() && !stdout.trim().is_empty() {
+        output = Some(stdout);
+    }
     Ok(output)
 }
 
