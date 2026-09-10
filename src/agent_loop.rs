@@ -2163,6 +2163,9 @@ async fn eval_agent_tool_subprocess(
     // Pass depth to child
     cmd.env("AICHAT_AGENT_DEPTH", (current_depth + 1).to_string());
     cmd.env("AICHAT_AGENT_NAME", &agent_name);
+    if let Ok(start_ms) = std::env::var("AICHAT_START_TIME_MS") {
+        cmd.env("AICHAT_START_TIME_MS", start_ms);
+    }
 
     // Backlog #6d (FR-6d.18): hierarchical upfront permission provisioning.
     let parent_is_readonly = under_readonly_mask();
@@ -4479,6 +4482,76 @@ fn notification_for_event(event: &AgentLoopEvent) -> Option<(&'static str, &'sta
     }
 }
 
+/// Compute the elapsed seconds since the agent run began.
+///
+/// Reads `AICHAT_START_TIME_MS` from the process environment if available,
+/// allowing child/sub-agent processes to measure seconds from the root orchestrator's start.
+/// If not set or invalid, falls back to `snapshot.elapsed`.
+pub fn get_trace_elapsed_seconds(snapshot: &AgentLoopSnapshot) -> f64 {
+    if let Ok(val) = std::env::var("AICHAT_START_TIME_MS") {
+        if let Ok(start_ms) = val.parse::<u128>() {
+            if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+                let now_ms = now.as_millis();
+                if now_ms >= start_ms {
+                    return (now_ms - start_ms) as f64 / 1000.0;
+                }
+            }
+        }
+    }
+    snapshot.elapsed.as_secs_f64()
+}
+
+/// Format a trace event item with guide rails and a leftmost elapsed seconds timestamp.
+///
+/// Each trace event item has exactly one timestamp placed at the left (before the bracket).
+/// Format: `+X.Xs  [<event content>]`
+/// Continuation lines for wrapped or multi-line items indent past the timestamp and opening bracket.
+pub fn format_trace_item_with_timestamp(
+    rails: &str,
+    line: &str,
+    elapsed: f64,
+    term_width: usize,
+) -> String {
+    let ts_raw = format!("+{:.1}s", elapsed);
+    let ts_pad = if ts_raw.len() < 6 {
+        format!("{:>6}", ts_raw)
+    } else {
+        ts_raw.clone()
+    };
+    let ts_styled = nu_ansi_term::Color::DarkGray.paint(&ts_pad).to_string();
+
+    let first_prefix = format!("{rails}  {ts_styled}  [");
+    let cont_spaces = " ".repeat(ts_pad.len() + 5);
+    let continuation_indent = format!("{rails}{cont_spaces}");
+
+    let prefix_width = visible_width(rails) + ts_pad.len() + 5;
+    let max_line_width = term_width.saturating_sub(prefix_width + 2).max(20);
+
+    // Fast path: Single line that fits entirely without wrapping.
+    if !line.contains('\n') && visible_width(line) <= max_line_width {
+        return format!("{first_prefix}{line}]");
+    }
+
+    let mut formatted = String::new();
+    let lines_vec: Vec<&str> = line.lines().collect();
+
+    for (sub_idx, sub_line) in lines_vec.iter().enumerate() {
+        let wrapped_chunks = wrap_ansi_line(sub_line, max_line_width, &continuation_indent);
+        for (chunk_idx, chunk) in wrapped_chunks.iter().enumerate() {
+            if sub_idx == 0 && chunk_idx == 0 {
+                formatted.push_str(&format!("{first_prefix}{chunk}"));
+            } else if chunk_idx == 0 {
+                formatted.push_str(&format!("\n{continuation_indent}{chunk}"));
+            } else {
+                formatted.push_str(&format!("\n{chunk}"));
+            }
+        }
+    }
+
+    formatted.push(']');
+    formatted
+}
+
 /// Process a single agent loop event through all observability channels.
 ///
 /// Called by the rendering loop in the caller (run_directive / ask_inner).
@@ -4511,31 +4584,9 @@ pub fn render_event(
             };
 
             let term_width = get_terminal_width();
-            let continuation_indent = format!("{rails}     ");
-
-            let mut formatted_line = String::new();
-            let mut is_first = true;
-            for sub_line in line.lines() {
-                let this_prefix = if is_first {
-                    format!("{rails}    [")
-                } else {
-                    format!("{rails}     ")
-                };
-                let prefix_width = visible_width(&this_prefix);
-                let max_line_width = term_width.saturating_sub(prefix_width + 2).max(30);
-                let wrapped_chunks = wrap_ansi_line(sub_line, max_line_width, &continuation_indent);
-                for (idx, chunk) in wrapped_chunks.iter().enumerate() {
-                    if is_first && idx == 0 {
-                        formatted_line.push_str(&format!("{this_prefix}{chunk}"));
-                    } else if !is_first && idx == 0 {
-                        formatted_line.push_str(&format!("\n{this_prefix}{chunk}"));
-                    } else {
-                        formatted_line.push_str(&format!("\n{chunk}"));
-                    }
-                }
-                is_first = false;
-            }
-            formatted_line.push(']');
+            let elapsed_secs = get_trace_elapsed_seconds(snapshot);
+            let formatted_line =
+                format_trace_item_with_timestamp(&rails, &line, elapsed_secs, term_width);
 
             let output = format!("{header_str}{formatted_line}");
             if *IS_STDOUT_TERMINAL {
@@ -7243,6 +7294,83 @@ agent_loop:
         write_atomic_terminal_output("test trace line with newline\n");
         write_atomic_terminal_output("line 1\nline 2\n");
     }
+
+    #[test]
+    fn test_get_trace_elapsed_seconds_fallback_and_env() {
+        let snapshot = AgentLoopSnapshot {
+            current_turn: 1,
+            max_turns: 10,
+            active_tools: vec![],
+            elapsed: Duration::from_secs_f64(3.45),
+            accumulated_cost: 0.0,
+        };
+
+        // Without env var, falls back to snapshot.elapsed
+        std::env::remove_var("AICHAT_START_TIME_MS");
+        let elapsed = get_trace_elapsed_seconds(&snapshot);
+        assert!((elapsed - 3.45).abs() < 0.001);
+
+        // With env var set to 2500ms ago
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let start_ms = now_ms.saturating_sub(2500);
+        std::env::set_var("AICHAT_START_TIME_MS", start_ms.to_string());
+        let elapsed_env = get_trace_elapsed_seconds(&snapshot);
+        assert!((2.4..=3.0).contains(&elapsed_env), "expected ~2.5s elapsed, got {elapsed_env}");
+        std::env::remove_var("AICHAT_START_TIME_MS");
+    }
+
+    #[test]
+    fn test_format_trace_item_with_timestamp_single_line_leftmost() {
+        let term_width = 80;
+        let formatted = format_trace_item_with_timestamp("", "orchestrator [turn 1/20] starting", 0.5, term_width);
+        // Single line output
+        assert_eq!(formatted.lines().count(), 1);
+        let stripped = strip_ansi(&formatted);
+        // Leftmost timestamp format: `  +0.5s  [orchestrator [turn 1/20] starting]`
+        assert!(stripped.starts_with("   +0.5s  ["));
+        assert!(stripped.contains("orchestrator [turn 1/20] starting]"));
+        assert!(stripped.ends_with(']'));
+    }
+
+    #[test]
+    fn test_format_trace_item_with_timestamp_with_rails() {
+        let term_width = 90;
+        let rails = "│     ";
+        let formatted = format_trace_item_with_timestamp(rails, "researcher calling: web_search", 12.3, term_width);
+        assert_eq!(formatted.lines().count(), 1);
+        let stripped = strip_ansi(&formatted);
+        assert!(stripped.starts_with("│       +12.3s  ["));
+        assert!(stripped.contains("researcher calling: web_search]"));
+        assert!(stripped.ends_with(']'));
+    }
+
+    #[test]
+    fn test_format_trace_item_with_timestamp_multiline_wrapping() {
+        let term_width = 60;
+        let long_line = "orchestrator plan: \"I will delegate TWO separate research tasks (call the researcher agent twice in parallel) to synthesize both results.\"";
+        let formatted = format_trace_item_with_timestamp("", long_line, 1.2, term_width);
+        let lines: Vec<&str> = formatted.lines().collect();
+        assert!(lines.len() >= 2, "expected multiple lines, got {}", lines.len());
+
+        // First line has the timestamp at left: `   +1.2s  [`
+        let stripped_line0 = strip_ansi(lines[0]);
+        assert!(stripped_line0.starts_with("   +1.2s  ["));
+
+        // Continuation lines do NOT have the timestamp
+        for (idx, line) in lines.iter().enumerate().skip(1) {
+            let stripped = strip_ansi(line);
+            assert!(!stripped.contains("+1.2s"), "line {} must not contain timestamp: {}", idx, line);
+            // Indents past the timestamp and opening bracket (at least 11 spaces)
+            assert!(stripped.starts_with("           "), "line {} must indent past timestamp: '{}'", idx, line);
+        }
+
+        // Final line closes with ']'
+        assert!(lines.last().unwrap().ends_with(']'));
+    }
 }
+
 
 

@@ -52,6 +52,11 @@ use std::{
 #[tokio::main]
 async fn main() -> Result<()> {
     load_env_file()?;
+    if std::env::var("AICHAT_START_TIME_MS").is_err() {
+        if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            std::env::set_var("AICHAT_START_TIME_MS", duration.as_millis().to_string());
+        }
+    }
     let cli = Cli::parse();
     set_spinners_enabled(!cli.no_spinner);
     let text = cli.text()?;

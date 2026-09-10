@@ -96,7 +96,7 @@ async fn markdown_stream_inner(
                         match cursor::position() {
                             Ok(pos) => break pos,
                             Err(_) if attempts < 3 => attempts += 1,
-                            Err(e) => return Err(e.into()),
+                            Err(_) => break (0, 0),
                         }
                     };
 

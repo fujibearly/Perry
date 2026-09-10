@@ -736,6 +736,10 @@ impl ToolCall {
             None => self.extract_call_config_from_config(config)?,
         };
 
+        if let Ok(start_ms) = std::env::var("AICHAT_START_TIME_MS") {
+            envs.insert("AICHAT_START_TIME_MS".into(), start_ms);
+        }
+
         let is_nano_tool = config
             .read()
             .agent
@@ -757,6 +761,11 @@ impl ToolCall {
             .as_ref()
             .map(|a| a.name().to_string())
             .or_else(|| {
+                std::env::var("AICHAT_INVOKING_AGENT")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            })
+            .or_else(|| {
                 std::env::var("AICHAT_AGENT_NAME")
                     .ok()
                     .and_then(|name| {
@@ -772,7 +781,7 @@ impl ToolCall {
 
         if is_nano_tool && !invoking_agent.is_empty() {
             envs.insert("AICHAT_INVOKING_AGENT".into(), invoking_agent.clone());
-            envs.insert("AICHAT_AGENT_NAME".into(), invoking_agent.clone());
+            envs.insert("AICHAT_AGENT_NAME".into(), format!("nano-{}", self.name));
             let current_depth = crate::agent_loop::current_agent_depth();
             envs.insert("AICHAT_AGENT_DEPTH".into(), (current_depth + 1).to_string());
 

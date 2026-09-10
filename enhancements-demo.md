@@ -138,7 +138,7 @@ Agent researcher (67890) loop trace:
   [12345 done]
 ```
 
-The researcher agent runs as a separate process with its own tools (`web_search_aichat`, `fetch_url_via_curl`).
+The researcher agent runs as a separate process with its own tools (`web_search_aichat`, `fetch_and_summarize`).
 
 ---
 
@@ -236,9 +236,9 @@ aichat -r %functions% "You MUST call the fetch_and_summarize tool with url 'http
 ```
 
 Behind the scenes:
-1. `fetch_and_summarize` fetches the URL → raw HTML
-2. Output is piped to `summarize_text` → digest (word count, line count, preview)
-3. Model sees only the digest, not the full HTML
+1. `fetch_and_summarize` fetches the URL → converts to clean Markdown via `html-to-markdown`
+2. Output is piped to `summarize_text` → digest (5-8 bullet points)
+3. Model sees only the digest, not the full Markdown
 
 This saves tokens: a 50 KB page becomes a 200-byte summary in context.
 
@@ -298,7 +298,7 @@ What happens:
 1. Orchestrator plans (via `_plan`)
 2. Delegates research to `researcher` agent (subprocess with own PID)
 3. Researcher tries `web_search_aichat`, circuit breaker trips after 3 failures
-4. Researcher pivots to `fetch_url_via_curl` (direct URL fetches)
+4. Researcher pivots to `fetch_and_summarize` (URL fetches with piped summarization)
 5. Results return to orchestrator
 6. Orchestrator synthesizes a final answer
 7. Bell rings when done, title shows `done | orchestrator:12345`

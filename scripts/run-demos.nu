@@ -528,7 +528,7 @@ if (should-run-demo "8" $demo) {
 # ─── Demo 8: Pipe Routing ────────────────────────────────────────────────────
 
 header "Demo 8: Pipe Routing (fetch_and_summarize)"
-show-desc "Demonstrates pipe routing: executes fetch_and_summarize tool pipeline where raw HTML is piped directly to summarizer without LLM token consumption."
+show-desc "Demonstrates pipe routing: executes fetch_and_summarize tool pipeline where fetched web content is parsed to Markdown via html-to-markdown and piped directly to summarizer without LLM token consumption."
 
 let demo8_prompt = "You MUST call the fetch_and_summarize tool with url 'https://example.com'. Do not use any other tool."
 show-cmd $'aichat --show-cost -r %functions% "($demo8_prompt)"'

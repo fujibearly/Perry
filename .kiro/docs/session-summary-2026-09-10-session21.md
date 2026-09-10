@@ -68,20 +68,41 @@ We introduce **Nanoworker Traceability** with parent petname inheritance, compac
 - Replaced multi-syscall `writeln!(tty, ...)` with `write_atomic_terminal_output`, ensuring that line buffers and terminating newlines are written in a single atomic `write_all` syscall.
 - Hardened `spinner.print_line`, `emit_dialog_block`, and `notify_terminal` to prevent partial escapes and line splits.
 
+### I. Nanoworker Tool-Specific Labeling (`nano-<tool_name>`)
+- Updated `eval_shell` (`src/function.rs`) to label nanoworkers as `nano-<tool_name>` (e.g., `Agent nano-web_search`, `Agent nano-summarize_text`) rather than echoing the invoking agent's name (`researcher`).
+- Stored the invoking parent agent in `AICHAT_INVOKING_AGENT` to preserve color palette inheritance and petname hierarchy (`nano-<ParentPetname>-<Seq>`).
+
+### J. Global Leftmost Elapsed Seconds Timestamp
+- Added a global, monotonically increasing elapsed seconds timestamp `+X.Xs` right-aligned within a 6-character slot (`format!("{:>6}", "+X.Xs")`) styled in Dark Gray, positioned immediately before the opening bracket of each trace item (`  +1.2s  [agent [turn 1/20] starting]`).
+- Established root startup epoch (`AICHAT_START_TIME_MS`) in `main.rs`, propagating it across all sub-agent and nanoworker process boundaries so sub-agents never reset to `+0.0s`.
+- Designed for zero terminal width dependency, avoiding margin arithmetic, line-wrap collisions on terminal resize, and excess padding whitespace when piping to logs.
+- Continuation lines for multi-line trace items indent past the timestamp and opening bracket, preserving clean visual alignment.
+
+### K. Tool Pipeline Rationalization (`fetch_and_summarize` vs `fetch_url_via_curl`)
+- Rationalized tool redundancy between `fetch_and_summarize` and `fetch_url_via_curl | summarize_text`.
+- Restored `fetch_url_via_curl` as a pure URL fetcher returning full Markdown directly to caller context without output piping.
+- Upgraded `fetch_and_summarize` to native `html-to-markdown` with aggressive extraction (`-p --preset aggressive --skip-images`) and modern browser User-Agent header, declared with pipe output routing to `summarize_text`.
+- Updated `researcher` specialist agent definition (`tools.txt` and `index.yaml`) to use `fetch_and_summarize` for page fetches, ensuring compact summaries reach the agent turn loop. Rebuilt agent function declarations.
+
+### L. Non-Interactive Stream Resilience (`IS_STDIN_TERMINAL`)
+- Added `IS_STDIN_TERMINAL` check to `render_stream` (`src/render/mod.rs`), ensuring `markdown_stream` is only used when both stdout and stdin are interactive terminals.
+- When stdin is redirected (pipes, automated test runners, subshells), falls back cleanly to `raw_stream` instead of attempting `crossterm::cursor::position()` ANSI device status handshakes.
+- Hardened `stream.rs` cursor position error fallback to default to `(0, 0)` rather than aborting stream execution with `Failed to reader stream`.
+
 ---
 
 ## 3. Verification & Test Coverage
 
 | Test Area | Details | Result |
 | :--- | :--- | :--- |
-| **Unit & Integration Suite** | `cargo test --bin aichat` | **499 pass, 0 fail** |
+| **Unit & Integration Suite** | `cargo test --bin aichat` | **503 pass, 0 fail** |
 | **Catalog Override Tests** | `cargo test --test catalog_override` | **5 pass, 0 fail** |
-| **Web Asset Security Tests**| `cargo test --test web_search_asset_security` | **3 pass, 0 fail** |
-| **Total Test Suite** | Full workspace test suite | **507 pass, 0 fail** |
+| **Web Asset Security Tests**| `cargo test --test web_assets_security` | **3 pass, 0 fail** |
+| **Total Test Suite** | Full workspace test suite | **511 pass, 0 fail** |
 | **Clippy Lints** | `cargo clippy --all-targets -- -D warnings` | **Clean, 0 warnings** |
 | **Release Build** | `cargo build --release` | **Clean binary compiled** |
-| **E2E Live Verification** | Live Demo 5 (`./run-demos.nu --no-truncate --demo 5`) | **Verified: zero line collisions, clean soft-wrapping, colored roles, dimmed history** |
-
+| **E2E Live Verification** | Live Demo 5 (`./run-demos.nu --no-truncate --demo 5`) | **Verified: parallel delegation, nanoworkers, tool piping, synthesis** |
+| **Pipe Routing Demo** | Live Demo 8 (`./run-demos.nu --no-truncate --demo 8`) | **Verified: fetch_and_summarize pipe routing to summarize_text** |
 
 ---
 
@@ -89,9 +110,8 @@ We introduce **Nanoworker Traceability** with parent petname inheritance, compac
 
 - **`aichat` repository:**
   - Branch: `feat/tool-safety-permission-boundary`
-  - Commits: `5522b86`, `1d85794`, `34b8bb2`, `f4abd47`, `192fe24`
   - Tracked status: Clean
 - **`llm-functions` repository:**
   - Branch: `feat/fetch-url-native-html-to-markdown`
-  - Commits: `79ede0f`, `15bd96a`, `4adf72e`
+  - Commits: `79ede0f`, `15bd96a`, `4adf72e`, `828ab5f`
   - Tracked status: Clean
