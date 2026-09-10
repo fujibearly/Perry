@@ -213,6 +213,7 @@ An iterative agent loop that makes **every provider** capable of multi-step agen
 
 - **Parallel tool execution** — multiple tool calls run concurrently (semaphore-bounded, default 8). A turn with 5 web fetches takes 1x latency, not 5x.
 - **Turn budget** — configurable `max_turns` (default 20) prevents runaway. The model can't loop forever.
+- **Empty-turn resilience & retry** — transient provider dropouts yielding 0 text and 0 tool calls trigger automatic backoff retry (`MAX_EMPTY_RETRIES = 2`), preventing premature loop exits.
 - **Planning tool** — built-in `_plan` pseudo-tool auto-injected when tools are configured. The model can reason and decompose tasks without polluting user-visible output.
 - **Sub-agent delegation** — tools marked `agent: true` spawn a new aichat process as a subprocess. Each sub-agent has its own PID, turn budget, session, and observability. Sub-agents can themselves delegate to further sub-agents (bounded by `max_agent_depth`).
 - **Recursive orchestration** — an orchestrator agent can delegate to a researcher agent, which can delegate to a deep-researcher agent. Each is a full aichat instance. Depth tracked via `AICHAT_AGENT_DEPTH` env var.
@@ -328,7 +329,7 @@ safety:
   default_ceiling: destructive   # catastrophic → human
 ```
 
-Environment overrides: `AICHAT_SAFETY_POLICY_FILE`, `AICHAT_SAFETY_DEFAULT_CEILING`. Unclassified tools (including MCP tools, which carry no metadata) are conservatively human-reserved by default. Blocked calls trace as `<tool> BLOCKED (<reason>)` — the tool binary never runs.
+Environment overrides: `AICHAT_SAFETY_POLICY_FILE`, `AICHAT_SAFETY_DEFAULT_CEILING`. Unclassified tools (including MCP tools, which carry no metadata) are conservatively human-reserved by default. Trace events follow a scannable grammar (`ALLOW <tool>: risk <tier> <= ceiling <tier>` and `BLOCK <tool>: risk <tier> > ceiling <tier>`), clearly annotating effective reversibility discounts or policy raises — the tool binary never runs on a block.
 
 ### Structured PDF Loading
 

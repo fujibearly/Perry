@@ -195,3 +195,42 @@ This repository maintains continuous, chronological session handoff summaries do
       * **ANSI-Aware Soft-Wrapping & Guide Rail Continuity (Task `6d.35`):** Dynamically soft-wrap long lines at word boundaries without breaking ANSI codes, ensuring all continuation lines prepend vertical guide rails with context-appropriate hanging indents; responsively clamp box borders to terminal width.
       * **Verification & Testing (Tasks `6d.34` & `6d.36`):** Suite **494 pass, 0 fail** (486 unit/integration + 5 catalog + 3 web asset security); `cargo clippy --all-targets -- -D warnings` clean; `cargo build --release` clean; live Demos 3, 4, and 5 verified 100% green with visual guide rails, soft-wrapping, folded prompts, and zero repetition illusion.
       * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
+
+  18. **Session 18: Unified ALLOW / BLOCK Governance Nomenclature, Explicit Blocked Comparisons & Debug Journal Inspection**
+    * **Period:** `2026-09-09`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-09-session18.md`](.kiro/docs/session-summary-2026-09-09-session18.md)
+    * **Focus Areas:**
+      * **Consolidated Scannable Grammar (`FR-6d.27` / Task `6d.38`):** Trace events across pass and block follow `<VERB> <tool>: <lhs> <op> <rhs>`, with `risk` always on LHS and `ceiling` always on RHS (`ALLOW <tool>: risk <tier> <= ceiling <tier>` vs `BLOCK <tool>: risk <tier> > ceiling <tier>`), plus capability mask blocks (`BLOCK <tool>: read-only mask (mutating tool; unwound: true)`).
+      * **Single-Source Risk Token Derivation:** Implemented pure helper `format_risk_token(static_tier, required, mechanism)` formatting effective parenthetical qualifiers (`(effective, <why>)`), derived upfront from authoritative state to eliminate dual-path drift.
+      * **Human Approval Prompt Banner:** Updated `prompt_human_verdict` to display non-colliding header `[HUMAN APPROVAL REQUIRED] <tool>` and threaded `ceiling: AuthorityCeiling` through all call sites.
+      * **Debug Rollback Journal Inspection (`FR-6d.26` / Task `6d.37`):** Added `--debug` flag (and `AICHAT_AGENT_LOOP_DEBUG`) to display full rollback journal entry metadata (`target_path`, `artifact_path`, `undo_command`, compact `args`) formatted under guide rails, strictly omitting backup contents.
+      * **Deterministic Agent Petnames:** Introduced disposable petnames derived via dual 32-bit integer mixes (`format_agent_pid(pid)` $\to$ `12345 (AstuteRobin)`).
+      * **Bounded Helper Script Resolution:** Resolved referenced helper scripts (`utils/guard_path.sh`) safely within a 4KB budget and directory containment.
+      * **Verification & Testing (Task `6d.39`):** Suite **498 pass, 0 fail** (490 unit/integration + 5 catalog + 3 web asset security); `cargo clippy --all-targets -- -D warnings` clean; `cargo build --release` clean; live Demo 16 verified green; all demos in `scripts/run-demos.nu` tolerant of new grammar.
+      * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
+
+  19. **Session 19: Link-Only Web Search (`--links`), Sub-Agent Multi-Step Research Pipeline & Empty-Response Resilience**
+    * **Period:** `2026-09-09`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-09-session19.md`](.kiro/docs/session-summary-2026-09-09-session19.md)
+    * **Focus Areas:**
+      * **Link-Only Grounded Search (`--links`):** Added `# @flag --links` to `web_search_aichat.sh` instructing Gemini grounding to return strictly formatted `[Page Title](URL) - 1-sentence summary` entries rather than synthesizing an essay. Regenerated tool declarations in `agents/researcher/functions.json`. Verified followable Google Vertex AI Search grounding redirect URLs via `curl -fsSL` and `html-to-markdown`.
+      * **Multi-Step Research Pipeline:** Updated `researcher` agent instructions (`agents/researcher/index.yaml`) to discover links via `web_search` with `links=true` on turn 1, then fetch 2–4 pages with `fetch_url_via_curl` concurrently, completely breaking the 3-tier echoing cycle.
+      * **Empty LLM Response Detection & Automatic Retry:** Diagnosed root cause of transient 0.9s empty responses from Gemini where 0 tokens caused `agent_loop.rs` to treat empty outputs as premature `LoopComplete`. Added automatic exponential backoff retry in `call_llm_raw` (`MAX_EMPTY_RETRIES = 2`) with an explicit error bail if unrecovered.
+      * **Streaming Error Catching:** Caught provider `blockReason` and non-`STOP` finish reasons (such as `RECITATION`) in `gemini_chat_events` streaming handler.
+      * **Demo Runner Stepping Order:** Ensured demo header, natural-language description, and command line render before the interactive pause in all 22 demos in `scripts/run-demos.nu`.
+      * **Verification:** Suite **498 pass, 0 fail** (490 unit/integration + 5 catalog + 3 web asset security); `cargo build --release` clean; live Demo 4 executed end-to-end with 4-turn multi-step research execution.
+      * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
+
+  20. **Session 20: Agent Loop History Preservation, Sub-Agent Turn Budget Loop Fix & URL Fetch Resilience**
+    * **Period:** `2026-09-09`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-09-session20.md`](.kiro/docs/session-summary-2026-09-09-session20.md)
+    * **Focus Areas:**
+      * **Diagnosed Demo 5 Turn-Budget Exhaustion Loop:** Uncovered multi-layer bug where `fetch_url_via_curl` was executed repeatedly without advancing history until exhausting the 20-turn limit.
+      * **Eliminated `is_all_done` Tool Result Drop (`src/agent_loop.rs`):** In `eval_tool_calls_parallel`, removed the legacy check that dropped tool results and returned `Ok(vec![])` when all results were `"DONE"`. In multi-turn agent loops, dropping tool results erases execution history, causing the LLM to receive identical prompts and re-request tools indefinitely.
+      * **Enriched Tool Execution Error Reporting:** Included underlying error details `{e}` in `tool_execution_error` messages passed back to the model.
+      * **Hardened Shell Tool Pipeline (`fetch_url_via_curl.sh`):** Added `set -eo pipefail` so curl failures (such as 404s) are not silently masked by `html-to-markdown`. Added modern browser User-Agent header and `-m 30` transfer timeout.
+      * **Canonical URL Grounding & Non-Interactive CLI Invocation (`web_search_aichat.sh` & `summarize_text.sh`):** Instructed Google grounding to return direct canonical URLs rather than transient search redirect tokens. Added `-S` (`--no-stream`) to avoid terminal cursor read timeouts in subshells.
+      * **Selective Demo Runner Pausing (`scripts/run-demos.nu`):** Aligned `should_pause` with `--debug` so automated/scripted single-demo runs (`--demo <N>`) execute non-interactively.
+      * **Verification & Testing:** Added unit test `test_eval_tool_calls_parallel_preserves_all_results_without_dropping`; full suite **499 pass, 0 fail** (491 unit/integration + 5 catalog + 3 web asset security); release binary rebuilt; live Demo 5 passed with parallel researchers completing in 5 turns and synthesizing both topics cleanly.
+      * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
+

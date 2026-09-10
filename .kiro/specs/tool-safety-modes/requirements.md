@@ -371,6 +371,25 @@ can fall back to it.
   4. **Multi-Turn System Prompt Folding:** On multi-turn agent iterations (`turn > 1`), unchanged static system instructions exceeding 3 lines MUST be collapsed to a concise dimmed banner (`[system: <N> lines instructions unchanged]`) to prevent screen-height flooding and optical illusion of repetitive looping.
   5. **Turn Delta vs. Prior History Highlighting:** In multi-turn prompts, prior turns' messages MUST be marked as history (`[history: user]`, `[history: assistant]`) in dimmed text, while newly appended turn inputs (e.g. latest tool results) MUST be highlighted with distinct bright indicators (`⚡ [new: tool_result: <name>]`).
   6. **ANSI-Aware Soft-Wrapping & Guide Rail Preservation:** Long lines within dialog blocks and progress traces MUST NOT hard-wrap at column 0 in the terminal. The engine MUST detect terminal column width (`crossterm::terminal::size` / `COLUMNS` / `AICHAT_TERMINAL_WIDTH`), dynamically soft-wrap lines at word boundaries within the available inner column width, preserve active ANSI styling across wrapped boundaries, apply hanging indents for code/JSON/bullets/badges, and prepend full multi-tier guide rails to every wrapped line so vertical alignment is never broken. Header and footer borders MUST responsively clamp to terminal width.
+- **FR-6d.26 — Explicit Blocked Comparisons, Debug Journal Inspection & Deterministic Petnames.**
+  1. **Explicit Mathematical Blocked Comparisons:** When a tool call is blocked by authority ceilings or risk evaluators, the error JSON payload and trace event MUST surface the explicit mathematical inequality backing the decision (`risk <tier> > ceiling <tier>`), clearly distinguishing between unclassified tools, base tool tiers, and effective discount/raise adjustments.
+  2. **Debug Rollback Journal Inspection:** When the engine runs with `--debug` (or `AICHAT_AGENT_LOOP_DEBUG`), rollback journal recording events MUST render full entry metadata (`target_path`, `artifact_path`, `undo_command`, compact `args`) formatted cleanly inside guide rails. To protect secrets and PII, actual backup file contents MUST strictly be omitted.
+  3. **Deterministic Agent Petnames:** To disambiguate concurrent and recursive processes without confusing PIDs, each agent PID MUST map deterministically to a disposable human-readable petname (e.g. `12345 (AstuteRobin)`), derived via dual independent 32-bit mixing hashes across separate adjective and noun pools.
+  4. **Bounded Helper Script Resolution:** Evaluator context generation MUST dynamically resolve referenced helper scripts within tool repositories (e.g. `utils/guard_path.sh`), bounded by a 4KB budget, binary null-byte check, and strict directory confinement.
+- **FR-6d.27 — Unified ALLOW / BLOCK Governance Nomenclature & Single-Source Derivation.**
+  1. **Consolidated Scannable Grammar:** Trace lines across both pass and block paths MUST adhere to `<VERB> <tool>: <lhs> <op> <rhs>` with leading `ALLOW` and `BLOCK` verbs.
+  2. **Fixed Operand Ordering:** The LHS MUST strictly represent `risk`, and the RHS MUST strictly represent `ceiling` across all branches:
+     - `ALLOW <tool>: risk <tier> <= ceiling <tier>`
+     - `BLOCK <tool>: risk <tier> > ceiling <tier>`
+     - `BLOCK <tool>: read-only mask (mutating tool; unwound: true)`
+  3. **Single-Source Mechanism Derivation (`format_risk_token`):** The engine MUST derive the effective risk qualifier once from authoritative state (`format_risk_token(static_tier, required, mechanism)`), annotating adjustments parenthetically as `(effective, <why>)`:
+     - `risk reversible (effective, via backup)`
+     - `risk disruptive (effective, reversible tool)`
+     - `risk destructive (effective, policy raise)`
+     - `risk destructive (effective, evaluator raise)`
+     - `risk human (unclassified tool)`
+     - `risk human (policy forbid)`
+  4. **Human Authorization Banner:** Interactive human prompts MUST display the non-colliding header `[HUMAN APPROVAL REQUIRED] <tool>`, threading `ceiling: AuthorityCeiling` to display `risk: <tier> (tool)`, `ceiling: <tier> (agent)`, and `blocked: risk <tier> > ceiling <tier>`. Wire protocols and headless JSON outputs remain completely stable.
 
 ## Non-Functional Requirements
 

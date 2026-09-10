@@ -9,6 +9,24 @@ All notable changes to this fork are documented here. This project follows
 - Live streaming progress for OpenAI Responses multi-agent turns.
 - Terminal-safe spinner output: respects terminal width, supports `--no-spinner`,
   and can print progress lines without corrupting the spinner.
+- Unified ALLOW / BLOCK governance nomenclature (`<VERB> <tool>: <lhs> <op> <rhs>`)
+  with fixed operand ordering (`risk` on LHS, `ceiling` on RHS) across trace events.
+- Single-source risk token formatting (`format_risk_token`) with parenthetical
+  `(effective, <why>)` qualifiers for reversibility discounts, policy raises, and evaluator raises.
+- Threaded authority ceiling into interactive human prompts with the non-colliding
+  banner `[HUMAN APPROVAL REQUIRED] <tool>`.
+- Debug rollback journal inspection with `--debug` / `AICHAT_AGENT_LOOP_DEBUG`
+  displaying metadata inside guide rails while strictly omitting backup file contents.
+- Deterministic human-readable agent petnames (`format_agent_pid(pid)`).
+- Bounded helper script resolution in `%assess-risk%` evaluator context.
+- Empty LLM response detection and automatic backoff retry in `call_llm_raw` (`MAX_EMPTY_RETRIES = 2`), preventing premature/silent loop completions.
+- Extended Vertex AI / Gemini streaming parser to catch provider `blockReason` and `RECITATION` finish reasons.
+- Added `--links` flag to `web_search` and updated `researcher` agent instructions to enable multi-step search-and-fetch workflows via `fetch_url_via_curl`.
+- Fixed pre-step demo description and command rendering order in `scripts/run-demos.nu`.
+- Unconditionally preserved tool results in `eval_tool_calls_parallel`, eliminating the `is_all_done` result drop that caused infinite turn-budget exhaustion loops in multi-turn agents.
+- Enriched `tool_execution_error` messages with underlying error strings `{e}` for improved agent self-correction.
+- Hardened `fetch_url_via_curl.sh` with `set -eo pipefail`, modern browser User-Agent, and 30-second connection timeout.
+- Directed Google Search grounding in `web_search_aichat.sh` to return canonical direct URLs rather than ephemeral redirect tokens.
 
 ## 0.31.0-fork.8
 

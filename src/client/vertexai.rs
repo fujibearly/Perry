@@ -235,11 +235,12 @@ pub async fn gemini_chat_events(
                     )));
                 }
             }
-        } else if let Some("SAFETY") = data["promptFeedback"]["blockReason"]
-            .as_str()
-            .or_else(|| data["candidates"][0]["finishReason"].as_str())
-        {
+        } else if let Some(block_reason) = data["promptFeedback"]["blockReason"].as_str() {
+            bail!("Blocked by provider: {block_reason}")
+        } else if let Some("SAFETY") = data["candidates"][0]["finishReason"].as_str() {
             bail!("Blocked due to safety")
+        } else if let Some("RECITATION") = data["candidates"][0]["finishReason"].as_str() {
+            bail!("Blocked due to recitation")
         }
 
         Ok(())

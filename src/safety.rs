@@ -908,12 +908,93 @@ pub fn extract_shell_function(script: &str, function_name: &str) -> Option<Strin
     Some(extracted_lines.join("\n"))
 }
 
+/// Read a text file with a strict maximum byte budget, null-byte binary check, and UTF-8 validation.
+/// Returns `Ok(Some((text, truncated)))` if readable text, `Ok(None)` if binary, or `Err(io_err)` on failure.
+pub fn read_text_file_bounded(path: &std::path::Path, max_bytes: usize) -> std::io::Result<Option<(String, bool)>> {
+    let bytes = std::fs::read(path)?;
+    if bytes.is_empty() {
+        return Ok(Some((String::new(), false)));
+    }
+    let check_len = bytes.len().min(512);
+    if bytes[..check_len].contains(&0) {
+        return Ok(None);
+    }
+    let text = match std::str::from_utf8(&bytes) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    if bytes.len() > max_bytes {
+        let mut end = max_bytes;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Ok(Some((text[..end].to_string(), true)))
+    } else {
+        Ok(Some((text.to_string(), false)))
+    }
+}
+
+/// Helper script context provided to the risk evaluator (e.g. guard_path.sh).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HelperScriptContext {
+    pub name: String,
+    pub source: String,
+}
+
+/// Best-effort resolution of referenced helper scripts in `utils/` (e.g. `guard_path.sh`).
+/// Unfound or unparseable helpers safely fall back to opaque commands in `source`, strictly failing safe.
+pub fn resolve_tool_helpers(
+    functions_dir: &std::path::Path,
+    source: &str,
+) -> Vec<HelperScriptContext> {
+    let mut helpers = Vec::new();
+    let utils_dir = functions_dir.join("utils");
+    if !utils_dir.is_dir() {
+        return helpers;
+    }
+
+    let canonical_utils = match utils_dir.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return helpers,
+    };
+
+    let mut search_idx = 0;
+    while let Some(pos) = source[search_idx..].find("utils/") {
+        let start = search_idx + pos + "utils/".len();
+        let end = source[start..]
+            .find(|c: char| c.is_whitespace() || c == '"' || c == '\'' || c == '`' || c == ';' || c == ')')
+            .map(|offset| start + offset)
+            .unwrap_or(source.len());
+
+        let candidate = &source[start..end];
+        search_idx = end;
+
+        if candidate.ends_with(".sh") && !candidate.contains('/') && !candidate.contains("..") {
+            let target_file = canonical_utils.join(candidate);
+            if let Ok(canon_target) = target_file.canonicalize() {
+                if canon_target.starts_with(&canonical_utils) && canon_target.is_file() {
+                    const BUDGET: usize = 4096;
+                    if let Ok(Some((content, _))) = read_text_file_bounded(&canon_target, BUDGET) {
+                        if !helpers.iter().any(|h: &HelperScriptContext| h.name == candidate) {
+                            helpers.push(HelperScriptContext {
+                                name: candidate.to_string(),
+                                source: content,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    helpers
+}
+
 /// Build the context payload shown to the evaluator (FR-6c.3, FR-6c.11).
 ///
 /// The evaluator role receives only grounded execution facts and active safeguards:
 /// tool name, resolved invocation string, concrete arguments, operational intent,
 /// flattened script source code (with metadata tags stripped) or fallback functional description,
-/// and active rollback mechanisms (when proven reversible).
+/// helper script definitions (when referenced in utils/), and active rollback mechanisms (when proven reversible).
 /// It receives NO static tier classifications, schema noise, or biasing anchors.
 #[allow(clippy::too_many_arguments)]
 pub fn build_evaluator_context(
@@ -924,6 +1005,7 @@ pub fn build_evaluator_context(
     declaration: Option<&ToolDeclarationContext>,
     implementation: Option<&ToolImplementation>,
     invocation: Option<&str>,
+    helpers: Option<&[HelperScriptContext]>,
 ) -> String {
     let mut payload = serde_json::Map::new();
     payload.insert("tool".to_string(), serde_json::json!(tool_name));
@@ -975,6 +1057,16 @@ pub fn build_evaluator_context(
         );
     }
 
+    if let Some(helpers) = helpers {
+        if !helpers.is_empty() {
+            let mut helper_map = serde_json::Map::new();
+            for h in helpers {
+                helper_map.insert(h.name.clone(), serde_json::json!(h.source));
+            }
+            payload.insert("helpers".to_string(), serde_json::Value::Object(helper_map));
+        }
+    }
+
     let val = serde_json::Value::Object(payload);
     // Pretty-print so the single action is legible; it is small by construction.
     serde_json::to_string_pretty(&val).unwrap_or_else(|_| val.to_string())
@@ -992,6 +1084,7 @@ pub fn build_evaluator_context_simple(
         arguments,
         proven_reversible,
         intent,
+        None,
         None,
         None,
         None,
@@ -1939,6 +2032,7 @@ mod tests {
             Some(&decl),
             Some(&implementation),
             Some(invocation),
+            None,
         );
         let parsed: serde_json::Value = serde_json::from_str(&ctx).unwrap();
         assert_eq!(parsed["tool"], "execute_command");
@@ -1972,6 +2066,7 @@ mod tests {
             Some(&decl),
             Some(&implementation),
             Some("sysinfo"),
+            None,
         );
         let parsed: serde_json::Value = serde_json::from_str(&ctx).unwrap();
         assert_eq!(parsed["tool"], "sysinfo");
@@ -1979,6 +2074,39 @@ mod tests {
         assert_eq!(parsed["functional_notes"], "Reads /etc/os-release.");
         assert_eq!(parsed["binary_path"], "/usr/bin/sysinfo");
         assert!(parsed.get("source").is_none());
+    }
+
+    #[test]
+    fn resolve_tool_helpers_resolves_script_safely() {
+        let temp_dir = crate::utils::temp_file("-test-helpers-", "");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let utils_dir = temp_dir.join("utils");
+        std::fs::create_dir_all(&utils_dir).unwrap();
+        let guard_script = utils_dir.join("guard_path.sh");
+        std::fs::write(&guard_script, "#!/usr/bin/env bash\necho guard\n").unwrap();
+
+        let source = r#"
+fs_create() {
+    "$ROOT_DIR/utils/guard_path.sh" "$argc_path" "Create '$argc_path'?"
+    mkdir -p "$(dirname "$argc_path")"
+}
+"#;
+        let helpers = resolve_tool_helpers(&temp_dir, source);
+        assert_eq!(helpers.len(), 1);
+        assert_eq!(helpers[0].name, "guard_path.sh");
+        assert!(helpers[0].source.contains("echo guard"));
+
+        // Nonexistent helper falls back safely without error
+        let source_missing = r#"utils/nonexistent.sh "foo""#;
+        let helpers_missing = resolve_tool_helpers(&temp_dir, source_missing);
+        assert!(helpers_missing.is_empty());
+
+        // Traversal attempt is rejected
+        let source_traversal = r#"utils/../escape.sh"#;
+        let helpers_traversal = resolve_tool_helpers(&temp_dir, source_traversal);
+        assert!(helpers_traversal.is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

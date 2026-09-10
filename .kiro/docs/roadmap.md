@@ -97,13 +97,13 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 
 # View 2 — Traction (progress)
 
-## Current State (2026-09-09 — Session 17)
+## Current State (2026-09-09 — Session 19)
 
-**Branch:** `feat/tool-safety-permission-boundary` — **Hierarchical Guide Rails, Semantic Role Badging & Turn Delta Observability (`FR-6d.25`)**.
+**Branch:** `feat/tool-safety-permission-boundary` — **Unified Governance Nomenclature, Sub-Agent Multi-Step Research Pipeline & Empty-Response Resilience**.
 **Version:** v0.31.0-fork.9
-**Tests:** 494 pass, 0 fail (486 unit/integration + 5 catalog-override + 3 web asset security) — suite passing; clippy clean (`-D warnings`); release binary compiled.
+**Tests:** 498 pass, 0 fail (490 unit/integration + 5 catalog-override + 3 web asset security) — suite passing; clippy clean (`-D warnings`); release binary compiled.
 **#6d transport decision (Path 1′):** mutual-TLS over a raw loopback TCP stream + hand-rolled length-delimited JSON framing — **not** WebSocket (deferred behind the `EscalationTransport` trait). Only new crate `rcgen` (+ tiny `yasna`); `rustls`/`tokio-rustls` reused (single version, no OpenSSL). Child auth = channel-bound HMAC (no literal token).
-**E2E demos (2026-09-08, live on `gemini-2.5-flash`):** 22 demos in `scripts/run-demos.nu` (`1`–`21` and `10b`). Features interactive debug stepping (`--debug`), selective targeted execution (`--demo <ID>`), natural language test objective banners (`ℹ`), agent hierarchy indentation, color-coded agent traces, LLM dialog observability (`--dialog`), untruncated trace observability (`--no-truncate` / `-n`), and Option 1 strict FIFO causal event ordering via `AgentLoopEvent::DialogBlock`.
+**E2E demos (2026-09-09, live on `gemini-2.5-flash`):** 22 demos in `scripts/run-demos.nu` (`1`–`21` and `10b`). Features unified scannable grammar (`ALLOW <tool>: risk <tier> <= ceiling <tier>`, `BLOCK <tool>: risk <tier> > ceiling <tier>`), interactive debug stepping (`--debug`), selective targeted execution (`--demo <ID>`), pre-pause demo objective banners (`ℹ`) and command rendering, agent hierarchy indentation, color-coded agent traces, deterministic petnames (`format_agent_pid`), LLM dialog observability (`--dialog`), untruncated trace observability (`--no-truncate` / `-n`), multi-step sub-agent research pipelines via `web_search --links` + `fetch_url_via_curl`, and empty-response backoff resilience in `call_llm_raw`.
 **Agent Loop Coverage:** unit-test (`cargo test`) line coverage of `src/agent_loop.rs` rose **46.8% → 64.7%** (+17.9 pts) from #5 — see [coverage re-measurement 2026-09-02](coverage-remeasurement-2026-09-02.md). NB: not comparable to the older 72.9% figure (live E2E harness, different methodology — [2026-08-31 report](coverage-evaluation-2026-08-31.md)).
 
 ## Status Table (canonical)
@@ -243,10 +243,10 @@ Fourth increment — persistent mTLS control plane, human-in-the-loop, durable r
 - **Evaluator Context Awareness:** Evaluator payload includes `"rollback_mechanism": "atomic pre-mutation backup in durable rollback journal"`.
 - **Downward Supervisory Verdict & Permit Propagation (`FR-6d.22`):** `VerdictMsg` propagates generated `ExecutionPermit` token and the supervisor's evaluated `risk_verdict: Option<RiskVerdict>`. When a supervisor approves (`Continue`), child seeds its `RiskCache` and satisfies Gate 3 autonomously without duplicate risk evaluations or second-round escalations.
 - **Permanent Model Definition in Role:** `%assess-risk%.md` front-matter supports direct `model:` definition.
-- **Structured Safety Trace Events:** Loop trace emits `[safety gate passed: ...]`, `[safety preflight reversibility: ...]`, and `[%assess-risk% evaluator response: ...]`.
+- **Unified Scannable Governance Nomenclature (`FR-6d.26`, `FR-6d.27`):** Trace events follow a scannable grammar (`<VERB> <tool>: <lhs> <op> <rhs>`) with `risk` always on LHS and `ceiling` on RHS (`ALLOW <tool>: risk <tier> <= ceiling <tier>` vs `BLOCK <tool>: risk <tier> > ceiling <tier>`), with pure single-source mechanism derivation (`format_risk_token`) producing parenthetical `(effective, <why>)` qualifiers. Interactive banner rendered as `[HUMAN APPROVAL REQUIRED] <tool>` with threaded authority ceiling.
 - **Human-in-the-Loop CLI UX:** Interactive single-key terminal prompt (`[c]ontinue | [h]alt | [r]evert | [e]xplain | [g]uide`); headless Layer-3 fail-closed mode.
 - **Live Demos 17–20:** Demos 17 (Happy Path autonomous write), 18 (Option B Pre-flight Remediation), 19 (Ceiling Fail-Closed), 20 (Orchestrator to Coder Multi-Process Escalation).
-- +29 unit/integration tests (481 total workspace tests); Demo 16 offline fail-closed and journal durability verified.
+- +29 unit/integration tests (498 total workspace tests); Demo 16 offline fail-closed and journal durability verified.
 
 
 ### PDF Loader Enhancement

@@ -49,6 +49,9 @@ pub struct Cli {
     /// Do not truncate dialog trace payloads
     #[clap(long)]
     pub dialog_no_truncate: bool,
+    /// Display debug journal details and verbose agent execution
+    #[clap(long, alias = "agent-debug")]
+    pub debug: bool,
     /// Enable OpenAI hosted web search in multi-agent mode
     #[clap(long)]
     pub web_search: bool,

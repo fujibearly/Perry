@@ -152,10 +152,10 @@ def extract-plan [trace: string]: nothing -> string {
     }
 }
 
-# Wait for user input to step to the next demo when in debug mode
-def step-pause [debug: bool, next_test: string] {
-    if $debug {
-        print $"\n(ansi yellow_bold)⏸ [DEBUG](ansi reset) Next: (ansi yellow)($next_test)(ansi reset). Press Enter to proceed [or 'q' to quit]: "
+# Wait for user input to step to the next demo when in debug mode or running a specific demo
+def step-pause [enabled: bool, next_test: string = ""] {
+    if $enabled {
+        print $"\n(ansi yellow_bold)⏸ [DEBUG](ansi reset) Press Enter to proceed [or 'q' to quit]: "
         let reply = (try { input "" } catch { "" })
         if ($reply | str trim | str lowercase) == "q" {
             print $"\n(ansi red)Execution aborted by user.(ansi reset)\n"
@@ -194,12 +194,16 @@ def main [
     # AICHAT_AGENT_LOOP_SHOW_DIALOG enables the LLM dialog trace when --dialog is set.
     # AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE disables dialog truncation when --no-truncate is set.
     let base_env = {
+        PATH: ($env.PATH | prepend ($project_dir | path join "target/debug") | prepend ($project_dir | path join "target/release"))
         AICHAT_FUNCTIONS_DIR: $functions_dir
         AICHAT_MODEL: $DEMO_MODEL
         WEB_SEARCH_MODEL: $DEMO_MODEL
         AICHAT_SAFETY_RISK_MODEL: $DEMO_MODEL
     } | merge (if $dialog { { AICHAT_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
       | merge (if $no_truncate { { AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE: "true" } } else { {} })
+      | merge (if $debug { { AICHAT_AGENT_LOOP_DEBUG: "true" } } else { {} })
+
+    let should_pause = $debug
 
     # ─── Preflight Checks ────────────────────────────────────────────────────────
 
@@ -242,12 +246,12 @@ report "Agents visible" $agents_ok $"Found: ($agents | str join ', ')"
 if (should-run-demo "1" $demo) {
 # ─── Demo 1: Parallel Tool Execution ─────────────────────────────────────────
 
-step-pause $debug "Demo 1: Parallel Tool Execution"
 header "Demo 1: Parallel Tool Execution"
 show-desc "Verifies parallel tool execution: calls slow_task 3 times concurrently, confirming total wall-clock time is ~2s rather than 6s sequential."
 
 let demo1_prompt = "You MUST call slow_task exactly 3 times in parallel: label='first' delay=2, label='second' delay=2, label='third' delay=2. Do NOT answer without calling the tools."
 show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "($demo1_prompt)"'
+step-pause $should_pause
 
 let demo1_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo1 = (do {
@@ -273,12 +277,12 @@ show-cost ($demo1.stderr | default "")
 if (should-run-demo "2" $demo) {
 # ─── Demo 2: Turn Budget ─────────────────────────────────────────────────────
 
-step-pause $debug "Demo 2: Turn Budget"
 header "Demo 2: Turn Budget"
 show-desc "Verifies turn budget enforcement: sets max turns to 1 and asserts that the agent triggers a turn limit warning when more turns are required."
 
 let demo2_prompt = "Read each of the files /etc/hostname, /etc/os-release, /etc/shells, /etc/fstab one by one and summarize each"
 show-cmd $'AICHAT_AGENT_LOOP_MAX_TURNS=1 aichat --show-cost -r %functions% "($demo2_prompt)"'
+step-pause $should_pause
 
 let demo2_env = ($base_env | merge { AICHAT_AGENT_LOOP_MAX_TURNS: "1", AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo2 = (do {
@@ -295,14 +299,14 @@ report "Turn budget warning fires" $budget_warning
 if (should-run-demo "3" $demo) {
 # ─── Demo 3: Planning Tool (_plan) ───────────────────────────────────────────
 
-step-pause $debug "Demo 3: Planning Tool (_plan)"
 header "Demo 3: Planning Tool (_plan)"
 show-desc "Demonstrates structured planning: orchestrator formulates an upfront plan with _plan before delegating tasks, keeping the plan internal to trace."
 
-if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
-
 let demo3_prompt = "Read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
 show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo3_prompt)"'
+step-pause $should_pause
+
+if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
 
 let demo3_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo3 = (do {
@@ -338,12 +342,12 @@ if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
 if (should-run-demo "4" $demo) {
 # ─── Demo 4: Sub-Agent Delegation ────────────────────────────────────────────
 
-step-pause $debug "Demo 4: Sub-Agent Delegation"
 header "Demo 4: Sub-Agent Delegation"
 show-desc "Demonstrates sub-agent delegation: orchestrator delegates web research to the researcher specialist agent and returns synthesized results."
 
 let demo4_prompt = "You MUST delegate this to the researcher agent (do NOT answer yourself): Search the web for 'what is Model Context Protocol MCP by Anthropic' and return a summary with sources."
 show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo4_prompt)"'
+step-pause $should_pause
 
 let demo4_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo4 = (do {
@@ -365,12 +369,12 @@ show-cost ($demo4.stderr | default "")
 if (should-run-demo "5" $demo) {
 # ─── Demo 5: Parallel Delegation ─────────────────────────────────────────────
 
-step-pause $debug "Demo 5: Parallel Delegation (2 researchers)"
 header "Demo 5: Parallel Delegation (2 researchers)"
 show-desc "Demonstrates parallel sub-agent delegation: orchestrator invokes two researcher agents concurrently for separate queries and synthesizes both."
 
 let demo5_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
 show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo5_prompt)"'
+step-pause $should_pause
 
 let demo5_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo5 = (do {
@@ -399,12 +403,12 @@ show-cost ($demo5.stderr | default "")
 if (should-run-demo "6" $demo) {
 # ─── Demo 6: External Observability ──────────────────────────────────────────
 
-step-pause $debug "Demo 6: External Observability (status file + tmux title)"
 header "Demo 6: External Observability (status file + tmux title)"
 show-desc "Demonstrates external observability: asserts background JSON status file emission in XDG_RUNTIME_DIR and dynamic tmux pane title updates."
 
 let demo6_prompt = "You MUST call slow_task with label=observability-test and delay=8. Do NOT answer without calling the tool."
 show-cmd $'aichat --show-cost -r %functions% "($demo6_prompt)"'
+step-pause $should_pause
 
 let in_tmux = ($env | get TMUX? | default "" | str length) > 0
 let status_dir = $"/run/user/(id -u | str trim)"
@@ -488,12 +492,12 @@ if $in_tmux {
 if (should-run-demo "7" $demo) {
 # ─── Demo 7: Auto-Capping ────────────────────────────────────────────────────
 
-step-pause $debug "Demo 7: Tool Output Auto-Capping"
 header "Demo 7: Tool Output Auto-Capping"
 show-desc "Demonstrates tool output auto-capping: large tool output exceeding thresholds is safely written to disk and summarized to avoid token bloat."
 
 let demo7_prompt = "Use fs_cat to read the file /usr/share/dict/cracklib-small"
 show-cmd $'aichat --show-cost -r %functions% "($demo7_prompt)"'
+step-pause $should_pause
 
 let demo7_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo7 = (do {
@@ -523,12 +527,12 @@ $cap_files | each { |f| rm -f $f }; null
 if (should-run-demo "8" $demo) {
 # ─── Demo 8: Pipe Routing ────────────────────────────────────────────────────
 
-step-pause $debug "Demo 8: Pipe Routing (fetch_and_summarize)"
 header "Demo 8: Pipe Routing (fetch_and_summarize)"
 show-desc "Demonstrates pipe routing: executes fetch_and_summarize tool pipeline where raw HTML is piped directly to summarizer without LLM token consumption."
 
 let demo8_prompt = "You MUST call the fetch_and_summarize tool with url 'https://example.com'. Do not use any other tool."
 show-cmd $'aichat --show-cost -r %functions% "($demo8_prompt)"'
+step-pause $should_pause
 
 let demo8_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo8 = (do {
@@ -551,12 +555,12 @@ show-cost ($demo8.stderr | default "")
 if (should-run-demo "9" $demo) {
 # ─── Demo 9: File Destination ─────────────────────────────────────────────────
 
-step-pause $debug "Demo 9: File Destination (generate_data)"
 header "Demo 9: File Destination (generate_data)"
 show-desc "Demonstrates file destination routing: tool data is written directly to a designated file path on disk without polluting model context."
 
 let demo9_prompt = "You MUST call generate_data with rows=20. Do NOT answer without calling the tool."
 show-cmd $'aichat --show-cost -r %functions% "($demo9_prompt)"'
+step-pause $should_pause
 
 let demo9_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo9 = (do {
@@ -593,12 +597,12 @@ show-cost ($demo9.stderr | default "")
 if (should-run-demo "10" $demo) {
 # ─── Demo 10: PDF Reading ────────────────────────────────────────────────────
 
-step-pause $debug "Demo 10: PDF Reading (manual.pdf)"
 header "Demo 10: PDF Reading (manual.pdf)"
 show-desc "Demonstrates native PDF reading: executes read_pdf on manual.pdf and verifies extracted text is processed by the model."
 
 let demo10_prompt = $"Use read_pdf to read the file ($manual_pdf) and tell me what this document is about. List the main sections."
 show-cmd "aichat --show-cost -r %functions% \"Use read_pdf to read ./manual.pdf and tell me what this document is about.\""
+step-pause $should_pause
 
 let demo10_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo10 = (do {
@@ -619,12 +623,12 @@ show-cost ($demo10.stderr | default "")
 if (should-run-demo "10b" $demo) {
 # ─── Demo 10b: PDF with page selection ───────────────────────────────────────
 
-step-pause $debug "Demo 10b: PDF Page Selection + Compact"
 header "Demo 10b: PDF Page Selection + Compact"
 show-desc "Demonstrates targeted PDF extraction: reads specific page ranges (5-10) with compact formatting for token efficiency."
 
 let demo10b_prompt = $"You MUST call read_pdf with path='($manual_pdf)', pages='5-10', and the compact flag. Then summarize what those pages cover."
 show-cmd "aichat --show-cost -r %functions% \"read_pdf ./manual.pdf --pages='5-10' --compact\""
+step-pause $should_pause
 
 let demo10b = (do {
     "" | with-env ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" }) { ^$aichat_bin --show-cost -r "%functions%" $demo10b_prompt }
@@ -642,12 +646,12 @@ show-cost ($demo10b.stderr | default "")
 if (should-run-demo "11" $demo) {
 # ─── Demo 11: Combined Workflow ───────────────────────────────────────────────
 
-step-pause $debug "Demo 11: Combined (plan + delegate + synthesize)"
 header "Demo 11: Combined (plan + delegate + synthesize)"
 show-desc "Demonstrates complete composite workflow: orchestrator plans with _plan, delegates research, and synthesizes findings end-to-end."
 
 let demo11_prompt = "You MUST plan first using the exact tool named '_plan' (with leading underscore, do NOT call 'plan'). Then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. In your final answer, state the findings and mention the researcher agent. Do NOT answer from memory — you MUST delegate."
 show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true AICHAT_AGENT_LOOP_MAX_TURNS=15 aichat --show-cost --agent orchestrator "($demo11_prompt)"'
+step-pause $should_pause
 
 let demo11_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
@@ -694,7 +698,6 @@ if (should-run-demo "12" $demo) {
 # the same signal eval_agent_tool_subprocess captures and wraps as agent_error.
 # A throwaway config dir + closed stdin prevent the interactive config prompt.
 
-step-pause $debug "Demo 12: Sub-Agent Crash Isolation"
 header "Demo 12: Sub-Agent Crash Isolation (deterministic, offline)"
 show-desc "Demonstrates sub-agent crash isolation: verifies that a crashing child agent does not panic the parent process, returning a structured error."
 
@@ -710,6 +713,7 @@ let crash_env = ($base_env | merge {
     AICHAT_MODEL: "openai:gpt-4o-mini"
 })
 show-cmd 'aichat --agent __nonexistent_crash_test__ "trigger crash"'
+step-pause $should_pause
 
 let demo12 = (do {
     "" | with-env $crash_env { ^$aichat_bin --agent "__nonexistent_crash_test__" "trigger crash" }
@@ -743,7 +747,6 @@ if (should-run-demo "13" $demo) {
 # Reuses the real config dir (for the provider key + model catalog) and injects
 # the policy via AICHAT_SAFETY_POLICY_FILE — no config.yaml edits needed.
 
-step-pause $debug "Demo 13: Protected Policy File — forbid"
 header "Demo 13: Protected Policy File — forbid (live, gemini-2.5-flash)"
 show-desc "Demonstrates policy-based tool forbidding: an owner-only 0600 policy explicitly forbids get_current_time, asserting deterministic safety blocking."
 
@@ -755,6 +758,7 @@ chmod 0600 $d13_policy
 
 let d13_prompt = "You MUST call the get_current_time tool exactly once to tell me the current time. Do not answer from memory."
 show-cmd 'AICHAT_SAFETY_POLICY_FILE=[0600 policy: forbid get_current_time] aichat --show-cost -r %functions% "<prompt>"'
+step-pause $should_pause
 
 let d13_env = ($base_env | merge {
     AICHAT_SAFETY_POLICY_FILE: $d13_policy
@@ -794,7 +798,6 @@ if (should-run-demo "14" $demo) {
 # ceiling comparison in the live path, distinct from Demo 13's `forbid`.)
 # Same cheap model + tight budget.
 
-step-pause $debug "Demo 14: Authority Ceiling Exceeded"
 header "Demo 14: Authority Ceiling Exceeded (live, gemini-2.5-flash)"
 show-desc "Demonstrates authority ceiling enforcement: policy raises get_current_time to catastrophic (> destructive ceiling), asserting it is blocked before execution."
 
@@ -806,6 +809,7 @@ chmod 0600 $d14_policy
 
 let d14_prompt = "You MUST call the get_current_time tool exactly once to tell me the current time. Do not answer from memory."
 show-cmd 'AICHAT_SAFETY_POLICY_FILE=[raise get_current_time to catastrophic] AICHAT_SAFETY_DEFAULT_CEILING=destructive aichat --show-cost -r %functions% "<prompt>"'
+step-pause $should_pause
 
 let d14_env = ($base_env | merge {
     AICHAT_SAFETY_POLICY_FILE: $d14_policy
@@ -844,7 +848,6 @@ if (should-run-demo "15" $demo) {
 # so the arg-match fires and the gate blocks it before anything runs. (Even if
 # the gate failed, an echo is side-effect-free — no real risk in the demo.)
 
-step-pause $debug "Demo 15: Argument-Sensitive Policy Escalation"
 header "Demo 15: Argument-Sensitive Policy Escalation (live, gemini-2.5-flash)"
 show-desc "Demonstrates argument-sensitive policy escalation: policy matches dangerous patterns (rm -rf) in arguments to dynamically elevate authority requirements."
 
@@ -856,6 +859,7 @@ chmod 0600 $d15_policy
 
 let d15_prompt = "You MUST call execute_command exactly once with this exact command: echo 'the phrase rm -rf is dangerous'. Do not answer without calling the tool."
 show-cmd 'AICHAT_SAFETY_POLICY_FILE=[execute_command arg_contains rm -rf -> catastrophic] AICHAT_SAFETY_DEFAULT_CEILING=destructive aichat --show-cost -r %functions% "<prompt>"'
+step-pause $should_pause
 
 let d15_env = ($base_env | merge {
     AICHAT_SAFETY_POLICY_FILE: $d15_policy
@@ -872,7 +876,7 @@ let combined15 = $"($demo15.stdout)($trace15)"
 # The arg-match raises execute_command to catastrophic (> destructive ceiling)
 # → authority_exceeded. Primary signal is the accurate BLOCKED trace line
 # (thanks to the ToolBlocked fix); secondary accepts paraphrased refusals.
-let d15_blocked = ($trace15 | str contains "execute_command BLOCKED") or ($combined15 | str contains "authority_exceeded") or ($combined15 | str contains "exceeds this agent") or ($demo15.stdout | str contains -i "approval") or ($demo15.stdout | str contains -i "ceiling")
+let d15_blocked = ($trace15 | str contains "execute_command BLOCKED") or ($trace15 | str contains "BLOCK execute_command:") or ($combined15 | str contains "authority_exceeded") or ($combined15 | str contains "exceeds this agent") or ($demo15.stdout | str contains -i "approval") or ($demo15.stdout | str contains -i "ceiling")
 # And it must NOT have executed successfully — a real run would trace as
 # `execute_command completed`, which the gate path never emits.
 let d15_not_run = not ($trace15 | str contains "execute_command completed")
@@ -899,7 +903,6 @@ if (should-run-demo "16" $demo) {
 #   3. Rollback journal durability: Journals are created with strict 0600 (owner-only)
 #      permissions under the configured/runtime directory and replay commands atomically.
 
-step-pause $debug "Demo 16: Multi-Process Escalation & Rollback Journal"
 header "Demo 16: Multi-Process Escalation & Rollback Journal (deterministic, offline)"
 show-desc "Demonstrates multi-process escalation & rollback journaling: verifies 0600 journal permissions, unreachable parent timeout fail-closed, and mTLS security."
 
@@ -921,6 +924,7 @@ let d16_env_degrade = ($base_env | merge {
     AICHAT_SAFETY_DEFAULT_CEILING: "read_only"
 })
 show-cmd 'AICHAT_SAFETY_DEFAULT_CEILING=read_only [no parent] aichat --agent esc_demo_agent "trigger over-ceiling tool"'
+step-pause $should_pause
 let demo16_degrade = (do {
     "" | with-env $d16_env_degrade { ^$aichat_bin --agent "esc_demo_agent" "trigger" }
 } | complete)
@@ -974,7 +978,6 @@ if (should-run-demo "17" $demo) {
 #   4. Gate #6d durable rollback journal records pre-mutation entry (0600 fsync).
 #   5. Tool executes cleanly with piped input.
 
-step-pause $debug "Demo 17: Full Safety Lifecycle — Happy Path"
 header "Demo 17: Full Safety Lifecycle — Happy Path (live, gemini-2.5-flash)"
 show-desc "Demonstrates full safety lifecycle happy path: executing a mutating tool (fs_write) within authorized authority with live trace logging."
 
@@ -983,6 +986,7 @@ if ($d17_target | path exists) { rm -f $d17_target }
 
 let d17_prompt = $"You MUST use the exact tool 'fs_write' to write the text 'SAFETY_VERIFIED' to ($d17_target). Do not answer without calling the tool."
 show-cmd $'AICHAT_SAFETY_DEFAULT_CEILING=destructive AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "<prompt>"'
+step-pause $should_pause
 
 let d17_env = ($base_env | merge {
     AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
@@ -997,7 +1001,7 @@ let trace17 = ($demo17.stderr | default "")
 let clean17 = (clean-trace $trace17)
 
 let d17_file_written = ($d17_target | path exists)
-let d17_gate_passed = ($clean17 | str contains "safety gate passed: fs_write") or ($trace17 | str contains "safety gate passed: fs_write")
+let d17_gate_passed = ($clean17 | str contains "safety gate passed: fs_write") or ($trace17 | str contains "safety gate passed: fs_write") or ($clean17 | str contains "ALLOW fs_write:") or ($trace17 | str contains "ALLOW fs_write:")
 let d17_assessed = ($clean17 | str contains "assess-risk: evaluating fs_write") or ($trace17 | str contains "assess-risk: evaluating fs_write")
 let d17_verdict = ($clean17 | str contains "assess-risk: verdict for fs_write") or ($trace17 | str contains "assess-risk: verdict for fs_write")
 let d17_journaled = ($clean17 | str contains "rollback journal: recorded fs_write") or ($trace17 | str contains "rollback journal: recorded fs_write")
@@ -1025,7 +1029,6 @@ if (should-run-demo "18" $demo) {
 # opportunistically creates an atomic backup in the durable rollback journal UPFRONT,
 # stepping down the required authority to `reversible` and allowing the gate to pass!
 
-step-pause $debug "Demo 18: Pre-flight Opportunistic Remediation (Option B)"
 header "Demo 18: Pre-flight Opportunistic Remediation (Option B — live)"
 show-desc "Demonstrates Option B pre-flight reversibility: creates file backups prior to mutation to enable opportunistic remediation and safe execution."
 
@@ -1034,6 +1037,7 @@ if ($d18_target | path exists) { rm -f $d18_target }
 
 let d18_prompt = $"You MUST call fs_write to write 'REMEDIATION_SUCCESS' to ($d18_target). Do not answer without calling the tool."
 show-cmd $'AICHAT_SAFETY_DEFAULT_CEILING=reversible AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "<prompt>"'
+step-pause $should_pause
 
 let d18_env = ($base_env | merge {
     AICHAT_SAFETY_DEFAULT_CEILING: "reversible"
@@ -1049,7 +1053,7 @@ let clean18 = (clean-trace $trace18)
 
 let d18_file_written = ($d18_target | path exists)
 let d18_remediated = ($clean18 | str contains "preflight remediation: fs_write") or ($trace18 | str contains "preflight remediation: fs_write")
-let d18_gate_passed = ($clean18 | str contains "safety gate passed: fs_write") or ($trace18 | str contains "safety gate passed: fs_write")
+let d18_gate_passed = ($clean18 | str contains "safety gate passed: fs_write") or ($trace18 | str contains "safety gate passed: fs_write") or ($clean18 | str contains "ALLOW fs_write:") or ($trace18 | str contains "ALLOW fs_write:")
 let d18_completed = ($clean18 | str contains "fs_write completed") or ($trace18 | str contains "fs_write completed")
 
 report "Pre-flight remediation applied upfront" ($d18_remediated or $d18_file_written)
@@ -1071,7 +1075,6 @@ if (should-run-demo "19" $demo) {
 # `fs_write` is disruptive -> stepped down to reversible, but reversible > safe!
 # The gate blocks with authority_exceeded and the file is NOT created.
 
-step-pause $debug "Demo 19: Authority Ceiling Fail-Closed"
 header "Demo 19: Authority Ceiling Fail-Closed (live, gemini-2.5-flash)"
 show-desc "Demonstrates authority ceiling escalation and fail-closed defense: irreversibly destructive tool is refused when authority exceeds safe ceiling."
 
@@ -1080,6 +1083,7 @@ if ($d19_target | path exists) { rm -f $d19_target }
 
 let d19_prompt = $"You MUST call fs_write to write 'UNAUTHORIZED_DATA' to ($d19_target). Do not answer without calling the tool."
 show-cmd $'AICHAT_SAFETY_DEFAULT_CEILING=safe AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "<prompt>"'
+step-pause $should_pause
 
 let d19_env = ($base_env | merge {
     AICHAT_SAFETY_DEFAULT_CEILING: "safe"
@@ -1094,7 +1098,7 @@ let trace19 = ($demo19.stderr | default "")
 let combined19 = $"($demo19.stdout)($trace19)"
 
 let d19_file_not_created = not ($d19_target | path exists)
-let d19_blocked = ($trace19 | str contains "fs_write BLOCKED") or ($combined19 | str contains "authority_exceeded") or ($combined19 | str contains "exceeds this agent") or ($demo19.stdout | str contains -i "authority") or ($demo19.stdout | str contains -i "ceiling") or ($demo19.stdout | str contains -i "permission")
+let d19_blocked = ($trace19 | str contains "fs_write BLOCKED") or ($trace19 | str contains "BLOCK fs_write:") or ($combined19 | str contains "authority_exceeded") or ($combined19 | str contains "exceeds this agent") or ($demo19.stdout | str contains -i "authority") or ($demo19.stdout | str contains -i "ceiling") or ($demo19.stdout | str contains -i "permission")
 let d19_not_run = not ($trace19 | str contains "fs_write completed")
 
 report "Target file was NOT created (fail-closed)" $d19_file_not_created
@@ -1119,7 +1123,6 @@ if (should-run-demo "20" $demo) {
 # 4. Orchestrator ingests the `permission_blocked` tool result and re-delegates to coder with `disruptive` ceiling.
 # 5. Coder executes successfully within its new statically provisioned authority ceiling.
 
-step-pause $debug "Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation"
 header "Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation (live, gemini-2.5-flash)"
 show-desc "Demonstrates hard authority ceiling sandboxing: sub-agent attempts disruptive action exceeding its reversible ceiling, is hard-blocked with zero downward permits, unwinds, and parent re-delegates with disruptive ceiling."
 
@@ -1128,6 +1131,7 @@ if ($d20_target | path exists) { rm -f $d20_target }
 
 let d20_prompt = $"Delegate to coder with permissions_mask 'mutating' and permissions_ceiling 'reversible': write the exact text HARD_CEILING_OK to ($d20_target) using fs_write. When coder reports permission_blocked due to authority_exceeded, re-delegate with permissions_ceiling 'disruptive' to complete the task."
 show-cmd 'aichat --show-cost --agent orchestrator "Delegate to coder [reversible ceiling] -> authority_exceeded blocked -> re-delegate disruptive"'
+step-pause $should_pause
 
 let d20_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
@@ -1167,7 +1171,6 @@ if (should-run-demo "21" $demo) {
 #    to coder with explicit mutating permissions.
 # 5. Coder executes successfully on the second delegation and writes the file.
 
-step-pause $debug "Demo 21: Sub-Agent Capability Block & Re-Delegation"
 header "Demo 21: Sub-Agent Capability Block & Re-Delegation (live, gemini-2.5-flash)"
 show-desc "Demonstrates sub-agent capability boundary enforcement: when a child agent lacks capability for a tool, parent re-delegates to a capable agent."
 
@@ -1176,6 +1179,7 @@ if ($d21_target | path exists) { rm -f $d21_target }
 
 let d21_prompt = $"Delegate to coder: write the exact text PERMISSION_UNWOUND_OK to ($d21_target) using fs_write. Do NOT specify permissions upfront. When coder reports permission_blocked, re-delegate with mutating permissions."
 show-cmd 'aichat --show-cost --agent orchestrator "Delegate to coder [default readonly] -> permission_blocked -> re-delegate mutating"'
+step-pause $should_pause
 
 let d21_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
@@ -1190,7 +1194,7 @@ let combined21 = $"($demo21.stdout)($trace21)"
 
 let d21_file_created = ($d21_target | path exists)
 let d21_first_call = ($trace21 | str contains "calling: coder") or ($combined21 | str contains "coder")
-let d21_blocked = ($trace21 | str contains "capability blocked:") or ($trace21 | str contains "permission_blocked") or ($combined21 | str contains "permission_blocked")
+let d21_blocked = ($trace21 | str contains "capability blocked:") or ($trace21 | str contains "BLOCK fs_write: read-only mask") or ($trace21 | str contains "permission_blocked") or ($combined21 | str contains "permission_blocked")
 let d21_redelegate = ($trace21 | str contains "calling: coder") and ($d21_file_created or ($combined21 | str contains "mutating"))
 
 report "Orchestrator delegated task to coder" $d21_first_call

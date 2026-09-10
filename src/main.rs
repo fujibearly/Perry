@@ -171,6 +171,10 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if cli.dialog_no_truncate {
         config.write().agent_loop.dialog_no_truncate = true;
     }
+    if cli.debug {
+        config.write().agent_loop.debug = true;
+        std::env::set_var("AICHAT_AGENT_LOOP_DEBUG", "true");
+    }
 
     if let Some(agent) = &cli.agent {
         let session = cli.session.as_ref().map(|v| match v {

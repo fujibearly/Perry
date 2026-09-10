@@ -26,6 +26,7 @@ The fork preserves this philosophy but adds **runtime intelligence to the dispat
 - **Stream Routing & Auto-Capping** — intercepts large tool outputs (>16KB) and pipes tools without burning LLM context tokens.
 - **Budgets & Circuit Breakers** — the harness enforces hard turn and financial ($) limits, preventing runaway loops.
 - **Planning** — the harness gives the model an in-process reasoning channel (`_plan`) without polluting output.
+- **Empty-Turn Resilience** — catches transient 0-token provider outputs and retries with exponential backoff, preventing premature loop termination.
 - **Observability** — the harness reports real-time telemetry out-of-band via `/dev/tty`, OSC titles, and `$XDG_RUNTIME_DIR` JSON files.
 - **Process-Isolated Delegation** — the harness spawns specialist agents as dedicated child OS subprocesses with unique PIDs.
 
@@ -488,6 +489,47 @@ Sub-Agent (Child)                         Parent Listener / Root Agent
   - `Revert`: Atomically executes the recorded `undo_command` / file restoration from the journal (or cleans up no-op entries), returning `{"error": {"type": "escalation_reverted"}}`.
 - **Human-in-the-Loop CLI UX:** Interactive single-key terminal prompt (`[c]ontinue | [h]alt | [r]evert | [e]xplain | [g]uide`) displaying the tool, arguments, static tier, evaluator rationale, and lineage depth. In non-interactive/headless mode, writes structured JSON and fails closed deterministically.
 - **Zero-Config Degradation:** When `AICHAT_AGENT_PARENT_ADDR` is absent, over-ceiling actions block deterministically identical to #6b/#6c behavior.
+
+### Governance Taxonomy: Permissions vs. Risk (The Monotonic Safety Axiom)
+
+To resolve ambiguity between agent limits and tool impact, the governance architecture enforces a strict conceptual and operational separation between **Permissions** and **Risk**:
+
+1. **Permissions (Identity & Subject Axis): What an agent is allowed to do.**
+   - **Authority Ceilings (`AICHAT_AUTHORITY_CEILING`):** The maximum blast-radius tier an agent process is permitted to actuate autonomously. Ceilings shrink monotonically down delegation trees (parents can only restrict children, never grant higher authority).
+   - **Capability Masks (`AICHAT_CAPABILITY_MASK=readonly`):** Coarse static process boundary preventing mutating or unclassified tool execution by child sub-agents.
+   - **Deterministic Policy Rules (`safety.policy_file`):** Owner-controlled configuration that can raise required authority or forbid actions altogether.
+   - **Lineage Depth & Process Isolation:** Each agent runs in its own OS process, with separate budgets and strict downward authority bounds.
+
+2. **Risk (Action & Object Axis): The blast radius and potential impact of an invocation.**
+   - **Static Blast Radius Tiers:** Declared in tool metadata (`functions.json`) ordered strictly by impact: `safe < reversible < disruptive < destructive < catastrophic`.
+   - **Proven Reversibility:** A step-down discount applied when an action has guaranteed undo semantics (e.g., pre-mutation file backups or worktree isolation). Reversibility never excuses `catastrophic` actions.
+   - **Dynamic Risk Evaluation (`%assess-risk%`):** Model-based risk assessor that inspects tool declarations, bounded script implementations (including helpers like `guard_path.sh`), and runtime arguments.
+
+3. **The Monotonic Safety Axiom (Never a Pardoner):**
+   - Both axes intersect at the execution boundary: an action is only admitted if `required_authority <= agent_authority_ceiling`.
+   - The LLM evaluator and policy gates operate under a **monotonic tightening-only invariant**: they can only *tighten* required authority (escalate risk), never *loosen* or pardon it.
+   - Wire protocols, config schemas (`SafetyConfig`), and events maintain backwards compatibility, while observability traces and interactive prompts follow a consolidated scannable grammar:
+     - **Grammar:** `<VERB> <tool>: <lhs> <op> <rhs>`
+     - **Fixed Ordering:** `risk` is always on the LHS, and `ceiling` is always on the RHS across all branches:
+       - `ALLOW <tool>: risk <tier> <= ceiling <tier>` (e.g. `ALLOW fs_cat: risk safe <= ceiling disruptive`)
+       - `BLOCK <tool>: risk <tier> > ceiling <tier>` (e.g. `BLOCK fs_create: risk disruptive > ceiling reversible`)
+       - `BLOCK <tool>: read-only mask (mutating tool; unwound: true)`
+     - **Effective Qualifiers:** Annotated parenthetically `(effective, <why>)` when derived from discounts or raises:
+       - Preflight backup discount: `risk reversible (effective, via backup)`
+       - Intrinsic reversibility discount: `risk disruptive (effective, reversible tool)`
+       - Policy raise: `risk destructive (effective, policy raise)`
+       - Evaluator raise: `risk destructive (effective, evaluator raise)`
+       - Unclassified tool: `risk human (unclassified tool)`
+       - Policy forbid: `risk human (policy forbid)`
+     - **Interactive Human Authorization Banner:**
+       ```text
+       [HUMAN APPROVAL REQUIRED] <tool>
+         risk:    <tier> (tool)
+         ceiling: <tier> (agent)
+         blocked: risk <tier> > ceiling <tier>
+         args:    {...}
+         reason:  <reason>
+       ```
 
 Tool calls are deduplicated and infinite loops are detected (before dispatch).
 
