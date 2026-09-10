@@ -59,11 +59,14 @@ We introduce **Nanoworker Traceability** with parent petname inheritance, compac
   - Prior conversation turns (`[history: ...]`) rendered in Dark Gray (`#666666` / ANSI 242).
   - Current turn deltas highlighted with active bright white headers (`⚡ [new: tool_results]`).
 - **Response Blockquote Dimming:**
-  - Markdown blockquotes in LLM responses (`> ...`) rendered in Dimmed Gray (`#7f848e` / ANSI 245) with dimmed bar delimiters, while preserving internal code blocks and bold emphasis.
-
 ### G. Native HTML-to-Markdown Migration (`llm-functions`)
 - Migrated `fetch_url_via_curl.sh` from external `curl | html-to-markdown` pipeline to native `html-to-markdown --url "$argc_url" -p --preset aggressive --skip-images`.
 - Eliminates curl subprocess overhead and leverages built-in aggressive content extraction and image filtering.
+
+### H. Atomic Terminal Line Writes (`write_atomic_terminal_output`)
+- Fixed a concurrency race condition during parallel sub-agent execution where multiple processes writing to `/dev/tty` interleaved unbuffered `write()` syscalls between trace line text and trailing `\n`.
+- Replaced multi-syscall `writeln!(tty, ...)` with `write_atomic_terminal_output`, ensuring that line buffers and terminating newlines are written in a single atomic `write_all` syscall.
+- Hardened `spinner.print_line`, `emit_dialog_block`, and `notify_terminal` to prevent partial escapes and line splits.
 
 ---
 
@@ -71,13 +74,14 @@ We introduce **Nanoworker Traceability** with parent petname inheritance, compac
 
 | Test Area | Details | Result |
 | :--- | :--- | :--- |
-| **Unit & Integration Suite** | `cargo test --bin aichat` | **498 pass, 0 fail** |
+| **Unit & Integration Suite** | `cargo test --bin aichat` | **499 pass, 0 fail** |
 | **Catalog Override Tests** | `cargo test --test catalog_override` | **5 pass, 0 fail** |
 | **Web Asset Security Tests**| `cargo test --test web_search_asset_security` | **3 pass, 0 fail** |
-| **Total Test Suite** | Full workspace test suite | **506 pass, 0 fail** |
+| **Total Test Suite** | Full workspace test suite | **507 pass, 0 fail** |
 | **Clippy Lints** | `cargo clippy --all-targets -- -D warnings` | **Clean, 0 warnings** |
 | **Release Build** | `cargo build --release` | **Clean binary compiled** |
-| **E2E Live Verification** | Live Demo 5 (`./run-demos.nu --dialog --demo 5`) | **Verified: colored roles, dimmed history, compact petnames, widened guide rails** |
+| **E2E Live Verification** | Live Demo 5 (`./run-demos.nu --no-truncate --demo 5`) | **Verified: zero line collisions, clean soft-wrapping, colored roles, dimmed history** |
+
 
 ---
 

@@ -3912,6 +3912,26 @@ pub fn format_dialog_block(
     )
 }
 
+/// Write a complete block or line of output to `/dev/tty` (or stderr) in a single atomic
+/// write syscall, guaranteeing that concurrent subprocesses writing to the same terminal
+/// cannot interleave between the output text and its trailing newline.
+pub fn write_atomic_terminal_output(output: &str) {
+    use std::io::Write;
+    let mut buf = Vec::with_capacity(output.len() + 1);
+    buf.extend_from_slice(output.as_bytes());
+    if !buf.ends_with(b"\n") {
+        buf.push(b'\n');
+    }
+    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        let _ = tty.write_all(&buf);
+        let _ = tty.flush();
+    } else {
+        let mut stderr = std::io::stderr().lock();
+        let _ = stderr.write_all(&buf);
+        let _ = stderr.flush();
+    }
+}
+
 /// Emit a dialog trace block to /dev/tty (live terminal) or stderr.
 /// Used for standalone invocations where no AgentLoopProgress channel is attached.
 pub fn emit_dialog_block(
@@ -3924,12 +3944,17 @@ pub fn emit_dialog_block(
 ) {
     let block = format_dialog_block(agent, pid, turn, max_turns, direction, content);
     if *IS_STDOUT_TERMINAL {
-        eprintln!("{block}");
-    } else if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
         use std::io::Write;
-        let _ = writeln!(tty, "{block}");
+        let mut stderr = std::io::stderr().lock();
+        let mut buf = Vec::with_capacity(block.len() + 1);
+        buf.extend_from_slice(block.as_bytes());
+        if !buf.ends_with(b"\n") {
+            buf.push(b'\n');
+        }
+        let _ = stderr.write_all(&buf);
+        let _ = stderr.flush();
     } else {
-        eprintln!("{block}");
+        write_atomic_terminal_output(&block);
     }
 }
 
@@ -4310,15 +4335,12 @@ pub fn update_terminal_title(title: &str) {
 ///   - OSC 99: kitty
 pub fn notify_terminal(title: &str, message: &str) {
     use std::io::Write;
+    let payload = format!(
+        "\x07\x1b]777;notify;{title};{message}\x07\x1b]9;{message}\x07\x1b]99;i=aichat;{message}\x1b\\"
+    );
     if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-        // BEL — tmux monitor-bell picks this up
-        let _ = write!(tty, "\x07");
-        // OSC 777 — Ghostty, iTerm2, VS Code, rxvt-unicode
-        let _ = write!(tty, "\x1b]777;notify;{title};{message}\x07");
-        // OSC 9 — Windows Terminal, ConEmu
-        let _ = write!(tty, "\x1b]9;{message}\x07");
-        // OSC 99 — kitty notification protocol
-        let _ = write!(tty, "\x1b]99;i=aichat;{message}\x1b\\");
+        let _ = tty.write_all(payload.as_bytes());
+        let _ = tty.flush();
     }
 }
 
@@ -4519,13 +4541,7 @@ pub fn render_event(
             if *IS_STDOUT_TERMINAL {
                 spinner.print_line(output)?;
             } else {
-                use std::io::Write;
-                if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-                    let _ = writeln!(tty, "{output}");
-                } else {
-                    // No /dev/tty available (CI, cron, containers) — fall back to stderr
-                    eprintln!("{output}");
-                }
+                write_atomic_terminal_output(&output);
             }
         }
     }
@@ -4547,12 +4563,7 @@ pub fn render_event(
             if *IS_STDOUT_TERMINAL {
                 spinner.print_line(block)?;
             } else {
-                use std::io::Write;
-                if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-                    let _ = writeln!(tty, "{block}");
-                } else {
-                    eprintln!("{block}");
-                }
+                write_atomic_terminal_output(&block);
             }
         }
     }
@@ -7225,5 +7236,13 @@ agent_loop:
         std::env::remove_var("AICHAT_AGENT_PETNAME");
         assert_eq!(current_agent_petname(), default_petname);
     }
+
+    #[test]
+    fn test_write_atomic_terminal_output_buffers() {
+        write_atomic_terminal_output("test trace line without newline");
+        write_atomic_terminal_output("test trace line with newline\n");
+        write_atomic_terminal_output("line 1\nline 2\n");
+    }
 }
+
 

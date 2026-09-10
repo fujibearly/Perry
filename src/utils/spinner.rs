@@ -96,8 +96,13 @@ impl SpinnerInner {
             )?;
             writer.flush()?;
         }
+        use std::io::Write;
         let mut writer = stderr();
-        writeln!(writer, "{line}")?;
+        let mut buf = line.into_bytes();
+        if !buf.ends_with(b"\n") {
+            buf.push(b'\n');
+        }
+        writer.write_all(&buf)?;
         writer.flush()?;
         Ok(())
     }

@@ -246,7 +246,8 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Dialog Role Keyword Coloring:** Semantically styled `[user]` (Cyan), `[assistant]` (Yellow), `[system]` (Light Cyan), `[history: <role>]` (Warm Amber), and `[tool]` / `tool_calls:` (Magenta) within dialog frames.
       * **Historic Corpus Dimming & Response Blockquotes:** Rendered prior conversation history in Dark Gray (`#666666`), highlighted active turn inputs with `⚡ [new: ...]`, and dimmed Markdown blockquotes (`> ...`) in LLM responses while preserving internal code blocks.
       * **Native HTML-to-Markdown Migration (`llm-functions`):** Replaced `curl | html-to-markdown` pipeline in `fetch_url_via_curl.sh` with native `html-to-markdown --url -p --preset aggressive --skip-images`.
-      * **Verification & Testing:** Full workspace test suite **506 pass, 0 fail** (498 unit/integration + 5 catalog override + 3 web asset security); clippy clean (`-D warnings`); release binary compiled; live Demo 5 verified with full dialog and color styling.
+      * **Atomic Terminal Line Writes (`write_atomic_terminal_output`):** Fixed race condition where parallel sub-agents writing to `/dev/tty` interleaved unbuffered `write()` syscalls between trace line text and trailing `\n`. Combined line buffers and terminating newlines into single atomic `write_all` syscalls.
+      * **Verification & Testing:** Full workspace test suite **507 pass, 0 fail** (499 unit/integration + 5 catalog override + 3 web asset security); clippy clean (`-D warnings`); release binary compiled; live Demo 5 verified with zero line collisions.
       * **State:** on branch `feat/tool-safety-permission-boundary` (aichat) & `feat/fetch-url-native-html-to-markdown` (llm-functions); local-only.
 
 
