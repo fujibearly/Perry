@@ -3716,8 +3716,25 @@ pub fn petname_for_pid(pid: u32) -> String {
     format!("{adj}{noun}")
 }
 
+/// Helper to identify the current process's petname, honoring inherited petnames for nanoworkers.
+pub fn current_agent_petname() -> String {
+    std::env::var("AICHAT_AGENT_PETNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| petname_for_pid(std::process::id()))
+}
+
 /// Format a PID with its human-readable petname for display: "12345 (SwiftFalcon)".
+/// If formatting the current process's PID and an inherited petname is set (e.g. for a nanoworker),
+/// the inherited petname is displayed instead of computing from PID.
 pub fn format_agent_pid(pid: u32) -> String {
+    if pid == std::process::id() {
+        if let Ok(inherited) = std::env::var("AICHAT_AGENT_PETNAME") {
+            if !inherited.is_empty() {
+                return format!("{pid} ({inherited})");
+            }
+        }
+    }
     format!("{pid} ({})", petname_for_pid(pid))
 }
 
@@ -6824,6 +6841,22 @@ agent_loop:
             petnames.insert(petname_for_pid(pid));
         }
         assert_eq!(petnames.len(), 50, "50 sequential PIDs should produce 50 unique petnames");
+    }
+
+    #[test]
+    fn test_inherited_petname_formatting() {
+        let current_pid = std::process::id();
+        let default_formatted = format_agent_pid(current_pid);
+        let default_petname = current_agent_petname();
+        assert!(default_formatted.contains(&default_petname));
+
+        std::env::set_var("AICHAT_AGENT_PETNAME", "nano-WittyFalcon-1");
+        assert_eq!(current_agent_petname(), "nano-WittyFalcon-1");
+        let formatted = format_agent_pid(current_pid);
+        assert_eq!(formatted, format!("{current_pid} (nano-WittyFalcon-1)"));
+
+        std::env::remove_var("AICHAT_AGENT_PETNAME");
+        assert_eq!(current_agent_petname(), default_petname);
     }
 }
 

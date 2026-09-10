@@ -772,9 +772,15 @@ impl ToolCall {
 
         if is_nano_tool && !invoking_agent.is_empty() {
             envs.insert("AICHAT_INVOKING_AGENT".into(), invoking_agent.clone());
-            envs.insert("AICHAT_AGENT_NAME".into(), format!("nano-{invoking_agent}"));
+            envs.insert("AICHAT_AGENT_NAME".into(), invoking_agent.clone());
             let current_depth = crate::agent_loop::current_agent_depth();
             envs.insert("AICHAT_AGENT_DEPTH".into(), (current_depth + 1).to_string());
+
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NANO_COUNTER: AtomicUsize = AtomicUsize::new(0);
+            let seq = NANO_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
+            let parent_petname = crate::agent_loop::current_agent_petname();
+            envs.insert("AICHAT_AGENT_PETNAME".into(), format!("nano-{parent_petname}-{seq}"));
         }
 
         let json_data = if self.arguments.is_object() {
