@@ -401,6 +401,17 @@ async fn run_directive(
     let agent_label = config.read().agent.as_ref()
         .map(|a| a.name().to_string())
         .or_else(|| config.read().role.as_ref().map(|r| r.name().to_string()))
+        .or_else(|| {
+            std::env::var("AICHAT_AGENT_NAME")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("AICHAT_INVOKING_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|inv| format!("nano-{inv}"))
+        })
         .unwrap_or_else(|| "aichat".to_string());
 
     // Sub-agents (depth > 0) should not overwrite the pane title — only the root owns it.

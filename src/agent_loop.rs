@@ -2600,6 +2600,7 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
         risk: Some(crate::function::BlastRadius::Safe),
         reversible: Some(true),
         reversible_via: None,
+        nano: None,
     }
 }
 
@@ -3062,11 +3063,23 @@ use std::io::Write;
 
 /// Helper to identify the executing agent for trace / dialog observability.
 pub fn current_agent_name(config: &GlobalConfig) -> String {
-    std::env::var("AICHAT_AGENT_NAME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| config.read().agent.as_ref().map(|a| a.name().to_string()))
+    config
+        .read()
+        .agent
+        .as_ref()
+        .map(|a| a.name().to_string())
         .or_else(|| config.read().role.as_ref().map(|r| r.name().to_string()))
+        .or_else(|| {
+            std::env::var("AICHAT_AGENT_NAME")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("AICHAT_INVOKING_AGENT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|inv| format!("nano-{inv}"))
+        })
         .unwrap_or_else(|| "aichat".to_string())
 }
 
@@ -3080,7 +3093,9 @@ pub fn current_agent_depth() -> usize {
 
 /// Helper to get distinct ANSI color for an agent name.
 pub fn agent_color(name: &str) -> nu_ansi_term::Color {
-    match name.to_lowercase().as_str() {
+    let base_name = name.to_lowercase();
+    let effective = base_name.strip_prefix("nano-").unwrap_or(&base_name);
+    match effective {
         "orchestrator" => nu_ansi_term::Color::Purple,
         "coder" => nu_ansi_term::Color::Green,
         "researcher" => nu_ansi_term::Color::Yellow,
@@ -3098,7 +3113,7 @@ pub fn agent_color(name: &str) -> nu_ansi_term::Color {
                 nu_ansi_term::Color::LightBlue,
                 nu_ansi_term::Color::LightCyan,
             ];
-            let hash = name.bytes().fold(0usize, |acc, b| acc.wrapping_add(b as usize));
+            let hash = effective.bytes().fold(0usize, |acc, b| acc.wrapping_add(b as usize));
             palette[hash % palette.len()]
         }
     }
@@ -3639,17 +3654,51 @@ pub fn wrap_ansi_line(line: &str, max_width: usize, continuation_indent: &str) -
 }
 
 const ADJECTIVES: &[&str] = &[
-    "Swift", "Brave", "Keen", "Quiet", "Wise", "Nimble", "Calm", "Bold",
-    "Quick", "Gentle", "Bright", "Vigilant", "Stalwart", "Deft", "Clever",
-    "Fierce", "Noble", "Eager", "Patient", "Steady", "Wary", "Serene",
-    "Daring", "Astute", "Hardy", "Valiant", "Lively", "Plucky", "Resolute", "Agile",
+    "Absurd", "Adroit", "Arch", "Audacious", "Balmy", "Bamboozled", "Barking", "Baronial",
+    "Batty", "Beamish", "Befuddled", "Bespoke", "Blithering", "Bloviating", "Bogus", "Bonkers",
+    "Breezy", "Brummagem", "Bullish", "Bumptious", "Callow", "Cantankerous", "Capricious", "Caustic",
+    "Chappish", "Cheeky", "Chivalric", "Chuffed", "Clueless", "Cocky", "Colloquial", "Comical",
+    "Complacent", "Convivial", "Corking", "Cracked", "Crackpot", "Crumpetless", "Crotchety", "Curious",
+    "Daft", "Dandy", "Dapper", "Dauntless", "Decorous", "Deft", "Delirious", "Demure",
+    "Deranged", "Devilish", "Disgruntled", "Distinguished", "Dodgy", "Dogged", "Droll", "Dubious",
+    "Dunce", "Earnest", "Eccentric", "Effervescent", "Errant", "Erudite", "Extravagant", "Facetious",
+    "Fastidious", "Feckless", "Flabbergasted", "Flap-happy", "Flippant", "Flummoxed", "Foppish", "Fretful",
+    "Frivolous", "Frosty", "Gallant", "Garrulous", "Gauzy", "Gentlemanly", "Giddy", "Grandiloquent",
+    "Groovy", "Grumpy", "Gumptious", "Haphazard", "Hardy", "Haughty", "Headstrong", "Impeccable",
+    "Impertinent", "Impetuous", "Implausible", "Incorrigible", "Indomitable", "Inimitable", "Insouciant", "Irreverent",
+    "Jaunty", "Jocund", "Jolly", "Jovial", "Judicious", "Knottiest", "Lackadaisical", "Loopy",
+    "Lugubrious", "Luminous", "Madcap", "Magniloquent", "Majestic", "Mellifluous", "Mercurial", "Mirthful",
+    "Mischievous", "Modest", "Mumpish", "Munificent", "Nebulous", "Nimble", "Nonchalant", "Nondescript",
+    "Nonplussed", "Nostalgic", "Notional", "Nutty", "Oblivious", "Obstreperous", "Officious", "Opulent",
+    "Ostentatious", "Outlandish", "Panicky", "Particular", "Peckish", "Peculiar", "Pedantic", "Peppery",
+    "Peremptory", "Perfervid", "Perky", "Perspicacious", "Petulant", "Pompous", "Pragmatic", "Prancing",
+    "Preposterous", "Priggish", "Prudent", "Pugnacious", "Pukka", "Punctilious", "Quaint", "Querulous",
+    "Quixotic", "Rambunctious", "Rascally", "Reckless", "Resolute", "Righteous", "Rip-roaring", "Ritzy",
+    "Roguish", "Rollicking", "Roomy", "Rowdy", "Rummy", "Sagacious", "Sanguine", "Sardonic",
 ];
 
 const NOUNS: &[&str] = &[
-    "Falcon", "Otter", "Badger", "Fox", "Owl", "Deer", "Panda", "Hawk",
-    "Wolf", "Seal", "Lynx", "Beaver", "Crane", "Robin", "Raven", "Dolphin",
-    "Puma", "Heron", "Ibex", "Tiger", "Koala", "Marten", "Osprey", "Bison",
-    "Camel", "Viper", "Zebra", "Jaguar", "Lemur", "Condor",
+    "Archduke", "Badger", "Bandicoot", "Baron", "Baronet", "Barrister", "Beadle", "Beetle",
+    "Bishop", "Blackadder", "Blighter", "Boffin", "Bohemian", "Boots", "Bounder", "Brigadier",
+    "Buffoon", "Bulldog", "Bumblebee", "Burgess", "Butler", "Cad", "Cadet", "Captain",
+    "Carey", "Carrot", "Cassowary", "Centurion", "Chancellor", "Chap", "Chinchilla", "Clerk",
+    "Clodhopper", "Codger", "Colonel", "Commander", "Commissar", "Constable", "Cormorant", "Cornet",
+    "Corporal", "Cousin", "Curate", "Curmudgeon", "Dandy", "Dean", "Dipper", "Doctor",
+    "Don", "Dormouse", "Dragoon", "Droog", "Duck", "Ealdorman", "Earl", "Emperor",
+    "Ensign", "Errand-boy", "Falcon", "Fellow", "Field-Marshal", "Firebrand", "Flunkey", "Footman",
+    "Fop", "Forester", "Fox", "Friar", "Frog", "Gaffer", "Galahad", "Gardener",
+    "General", "Gentleman", "Geologist", "Gladiator", "Goose", "Governor", "Grantham", "Grenadier",
+    "Grumbler", "Guide", "Gunner", "Guvnor", "Halberdier", "Harrier", "Hedgehog", "Heron",
+    "Highlander", "Hoplite", "Horseman", "Hussar", "Inspector", "Janitor", "Jeeves", "Jester",
+    "Judge", "Juror", "Justiciar", "Knight", "Lackey", "Laird", "Lamplighter", "Lancer",
+    "Legate", "Lieutenant", "Llama", "Lord", "Magistrate", "Major", "Marquess", "Marshal",
+    "Mayor", "Minstrel", "Mole", "Monarch", "Monk", "Mountebank", "Nabob", "Noble",
+    "Novice", "Otter", "Page", "Paladin", "Palmer", "Pangolin", "Parson", "Patrician",
+    "Peer", "Pensioner", "Philosopher", "Pikeman", "Pilgrim", "Pinniped", "Poacher", "Pontiff",
+    "Postman", "Prelate", "Premier", "Prior", "Privateer", "Proctor", "Professor", "Pundit",
+    "Ranger", "Rector", "Regent", "Rogue", "Roundhead", "Rover", "Sage", "Sailor",
+    "Scholar", "Scoundrel", "Scout", "Scribe", "Senator", "Sentinel", "Sergeant", "Servant",
+    "Squire", "Steward", "Swain", "Toad", "Trooper", "Trustee", "Usurper", "Vagabond",
 ];
 
 /// Deterministic, display-only human-readable petname for an agent PID.
@@ -6754,6 +6803,27 @@ agent_loop:
         // Must never be empty when calls was non-empty; results must be preserved for history
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].call.name, "read_logs");
+    }
+
+    #[test]
+    fn test_agent_color_inherits_for_nano_workers() {
+        assert_eq!(agent_color("nano-researcher"), agent_color("researcher"));
+        assert_eq!(agent_color("nano-orchestrator"), agent_color("orchestrator"));
+        assert_eq!(agent_color("nano-coder"), agent_color("coder"));
+        assert_eq!(agent_color("nano-custom"), agent_color("custom"));
+    }
+
+    #[test]
+    fn test_petname_generation_is_deterministic_and_spread() {
+        let p1 = petname_for_pid(100);
+        let p2 = petname_for_pid(100);
+        assert_eq!(p1, p2, "petname generation must be deterministic");
+
+        let mut petnames = std::collections::HashSet::new();
+        for pid in 1000..1050 {
+            petnames.insert(petname_for_pid(pid));
+        }
+        assert_eq!(petnames.len(), 50, "50 sequential PIDs should produce 50 unique petnames");
     }
 }
 

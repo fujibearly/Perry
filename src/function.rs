@@ -285,6 +285,10 @@ pub struct FunctionDeclaration {
     #[serde(skip_serializing, default)]
     #[allow(dead_code)] // consumed by #6c/#6d (rollback-artifact verification)
     pub reversible_via: Option<String>,
+    /// Whether this tool executes as a one-shot utility worker ("nanoworker").
+    /// Governance metadata — never serialized to the LLM.
+    #[serde(skip_serializing, default)]
+    pub nano: Option<bool>,
 }
 
 impl FunctionDeclaration {
@@ -347,6 +351,11 @@ impl FunctionDeclaration {
                 props.insert("permissions_ceiling".to_string(), schema);
             }
         }
+    }
+
+    /// Check whether this tool executes as a one-shot utility nanoworker.
+    pub fn is_nano(&self) -> bool {
+        self.nano.unwrap_or(false)
     }
 }
 
@@ -714,35 +723,7 @@ impl ToolCall {
             }
         }
 
-        let (call_name, cmd_name, mut cmd_args, envs) = match &config.read().agent {
-            Some(agent) => self.extract_call_config_from_agent(config, agent)?,
-            None => self.extract_call_config_from_config(config)?,
-        };
-
-        let json_data = if self.arguments.is_object() {
-            self.arguments.clone()
-        } else if let Some(arguments) = self.arguments.as_str() {
-            let arguments: Value = serde_json::from_str(arguments).map_err(|_| {
-                anyhow!("The call '{call_name}' has invalid arguments: {arguments}")
-            })?;
-            arguments
-        } else {
-            bail!(
-                "The call '{call_name}' has invalid arguments: {}",
-                self.arguments
-            );
-        };
-
-        cmd_args.push(json_data.to_string());
-
-        let output = match run_llm_function(cmd_name, cmd_args, envs)? {
-            Some(contents) => serde_json::from_str(&contents)
-                .ok()
-                .unwrap_or_else(|| json!({"output": contents})),
-            None => Value::Null,
-        };
-
-        Ok(output)
+        self.eval_shell(config)
     }
 
     /// Execute this tool call via shell-exec only (no MCP routing).
@@ -750,10 +731,51 @@ impl ToolCall {
     /// Used by the async parallel dispatch path where MCP and agent routing are
     /// handled separately before falling through to this method.
     pub fn eval_shell(&self, config: &GlobalConfig) -> Result<Value> {
-        let (call_name, cmd_name, mut cmd_args, envs) = match &config.read().agent {
+        let (call_name, cmd_name, mut cmd_args, mut envs) = match &config.read().agent {
             Some(agent) => self.extract_call_config_from_agent(config, agent)?,
             None => self.extract_call_config_from_config(config)?,
         };
+
+        let is_nano_tool = config
+            .read()
+            .agent
+            .as_ref()
+            .and_then(|a| a.functions().find(&self.name))
+            .map(|f| f.is_nano())
+            .unwrap_or_else(|| {
+                config
+                    .read()
+                    .functions
+                    .find(&self.name)
+                    .map(|f| f.is_nano())
+                    .unwrap_or(false)
+            });
+
+        let invoking_agent = config
+            .read()
+            .agent
+            .as_ref()
+            .map(|a| a.name().to_string())
+            .or_else(|| {
+                std::env::var("AICHAT_AGENT_NAME")
+                    .ok()
+                    .and_then(|name| {
+                        let clean = name.strip_prefix("nano-").unwrap_or(&name).to_string();
+                        if clean.is_empty() || clean == "aichat" {
+                            None
+                        } else {
+                            Some(clean)
+                        }
+                    })
+            })
+            .unwrap_or_default();
+
+        if is_nano_tool && !invoking_agent.is_empty() {
+            envs.insert("AICHAT_INVOKING_AGENT".into(), invoking_agent.clone());
+            envs.insert("AICHAT_AGENT_NAME".into(), format!("nano-{invoking_agent}"));
+            let current_depth = crate::agent_loop::current_agent_depth();
+            envs.insert("AICHAT_AGENT_DEPTH".into(), (current_depth + 1).to_string());
+        }
 
         let json_data = if self.arguments.is_object() {
             self.arguments.clone()
@@ -1318,11 +1340,32 @@ mod tests {
             risk: None,
             reversible: None,
             reversible_via: None,
+            nano: None,
         };
         decl.enrich_agent_permissions_schema();
         let props = decl.parameters.properties.unwrap();
         assert!(props.contains_key("permissions"));
         assert!(props.contains_key("permissions_mask"));
         assert!(props.contains_key("permissions_ceiling"));
+    }
+
+    #[test]
+    fn test_function_declaration_nano_property() {
+        let decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "web_search",
+            "description": "search the web",
+            "parameters": { "type": "object" },
+            "nano": true
+        }))
+        .unwrap();
+        assert!(decl.is_nano());
+
+        let regular_decl: FunctionDeclaration = serde_json::from_value(json!({
+            "name": "fs_cat",
+            "description": "cat a file",
+            "parameters": { "type": "object" }
+        }))
+        .unwrap();
+        assert!(!regular_decl.is_nano());
     }
 }
