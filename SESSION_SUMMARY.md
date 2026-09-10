@@ -234,3 +234,19 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** Added unit test `test_eval_tool_calls_parallel_preserves_all_results_without_dropping`; full suite **499 pass, 0 fail** (491 unit/integration + 5 catalog + 3 web asset security); release binary rebuilt; live Demo 5 passed with parallel researchers completing in 5 turns and synthesizing both topics cleanly.
       * **State:** on branch `feat/tool-safety-permission-boundary`; local-only.
 
+  21. **Session 21: Nanoworker Traceability, British Humour Petnames, Ephemeral Agent Colors & Dialog Observability**
+    * **Period:** `2026-09-10`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-10-session21.md`](.kiro/docs/session-summary-2026-09-10-session21.md)
+    * **Focus Areas:**
+      * **Nanoworker Traceability (`@meta nano true`):** Annotated ephemeral utility tools (`web_search_aichat.sh`, `summarize_text.sh`) with `@meta nano true` and updated declaration build scripts. Nanoworkers inherit their parent's petname with a sequence counter (`nano-<ParentPetname>-<Seq>`, e.g. `nano-KeenDeer-1`) propagated via `AICHAT_PARENT_PETNAME` and `AICHAT_NANOWORKER_SEQ`.
+      * **Compact British Humour Petnames:** Shortened adjectives and nouns to two 32-element arrays of witty British humor words (<= 9 chars), reducing average petname length from 16.5 to 10.8 chars.
+      * **Ancestor Visual Rails & Indentation:** Widened ancestor vertical guide rails to 6 columns (`│     `) and indented trace event lines by 4 spaces (`    [... starting]`), preventing clumping and anchoring visual hierarchy.
+      * **Ephemeral 11-Color Agent Palette:** Deterministic 11-color soft ANSI palette derived via `djb2_hash(petname)` and inherited by child processes via `AICHAT_AGENT_COLOR` for stable visual identity.
+      * **Contrasting Error & Escalation Styling:** Soft coral red `ERROR_COLOR` (`#e06c75` / ANSI 203) for errors and policy/authority rejections; warm amber `ESCALATION_COLOR` (`#d19a66` / ANSI 179) for escalations, human intervention, and re-delegation.
+      * **Dialog Role Keyword Coloring:** Semantically styled `[user]` (Cyan), `[assistant]` (Yellow), `[system]` (Light Cyan), `[history: <role>]` (Warm Amber), and `[tool]` / `tool_calls:` (Magenta) within dialog frames.
+      * **Historic Corpus Dimming & Response Blockquotes:** Rendered prior conversation history in Dark Gray (`#666666`), highlighted active turn inputs with `⚡ [new: ...]`, and dimmed Markdown blockquotes (`> ...`) in LLM responses while preserving internal code blocks.
+      * **Native HTML-to-Markdown Migration (`llm-functions`):** Replaced `curl | html-to-markdown` pipeline in `fetch_url_via_curl.sh` with native `html-to-markdown --url -p --preset aggressive --skip-images`.
+      * **Verification & Testing:** Full workspace test suite **506 pass, 0 fail** (498 unit/integration + 5 catalog override + 3 web asset security); clippy clean (`-D warnings`); release binary compiled; live Demo 5 verified with full dialog and color styling.
+      * **State:** on branch `feat/tool-safety-permission-boundary` (aichat) & `feat/fetch-url-native-html-to-markdown` (llm-functions); local-only.
+
+
