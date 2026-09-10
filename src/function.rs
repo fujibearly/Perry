@@ -781,6 +781,9 @@ impl ToolCall {
             let seq = NANO_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
             let parent_petname = crate::agent_loop::current_agent_petname();
             envs.insert("AICHAT_AGENT_PETNAME".into(), format!("nano-{parent_petname}-{seq}"));
+
+            let color_name = crate::agent_loop::current_agent_color_name(&invoking_agent);
+            envs.insert("AICHAT_AGENT_COLOR".into(), color_name.to_string());
         }
 
         let json_data = if self.arguments.is_object() {

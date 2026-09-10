@@ -3091,32 +3091,88 @@ pub fn current_agent_depth() -> usize {
         .unwrap_or(0)
 }
 
-/// Helper to get distinct ANSI color for an agent name.
+pub const ERROR_COLOR: nu_ansi_term::Color = nu_ansi_term::Color::Rgb(224, 108, 117);
+pub const ESCALATION_COLOR: nu_ansi_term::Color = nu_ansi_term::Color::Rgb(209, 154, 102);
+
+pub const AGENT_PALETTE: &[(&str, nu_ansi_term::Color)] = &[
+    ("cyan", nu_ansi_term::Color::Cyan),
+    ("green", nu_ansi_term::Color::Green),
+    ("yellow", nu_ansi_term::Color::Yellow),
+    ("purple", nu_ansi_term::Color::Purple),
+    ("light_blue", nu_ansi_term::Color::LightBlue),
+    ("light_cyan", nu_ansi_term::Color::LightCyan),
+    ("light_green", nu_ansi_term::Color::LightGreen),
+    ("light_yellow", nu_ansi_term::Color::LightYellow),
+    ("light_magenta", nu_ansi_term::Color::LightMagenta),
+    ("blue", nu_ansi_term::Color::Blue),
+    ("magenta", nu_ansi_term::Color::Magenta),
+];
+
+static AGENT_LABEL_COLORS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<String, usize>>> =
+    std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Helper to get or generate an ephemeral random color for an agent label, honoring inherited colors.
 pub fn agent_color(name: &str) -> nu_ansi_term::Color {
-    let base_name = name.to_lowercase();
-    let effective = base_name.strip_prefix("nano-").unwrap_or(&base_name);
-    match effective {
-        "orchestrator" => nu_ansi_term::Color::Purple,
-        "coder" => nu_ansi_term::Color::Green,
-        "researcher" => nu_ansi_term::Color::Yellow,
-        "sql" => nu_ansi_term::Color::Blue,
-        "todo" => nu_ansi_term::Color::Cyan,
-        "json-viewer" => nu_ansi_term::Color::LightBlue,
-        "%assess-risk%" | "assess-risk" => nu_ansi_term::Color::Red,
-        "%functions%" => nu_ansi_term::Color::LightCyan,
-        _ => {
-            let palette = [
-                nu_ansi_term::Color::Cyan,
-                nu_ansi_term::Color::Green,
-                nu_ansi_term::Color::Yellow,
-                nu_ansi_term::Color::Purple,
-                nu_ansi_term::Color::LightBlue,
-                nu_ansi_term::Color::LightCyan,
-            ];
-            let hash = effective.bytes().fold(0usize, |acc, b| acc.wrapping_add(b as usize));
-            palette[hash % palette.len()]
+    if name == "%assess-risk%" || name == "assess-risk" {
+        return nu_ansi_term::Color::Red;
+    }
+    if name == "%functions%" {
+        return nu_ansi_term::Color::LightCyan;
+    }
+
+    if let Ok(color_str) = std::env::var("AICHAT_AGENT_COLOR") {
+        if let Some(c) = color_from_name(&color_str) {
+            return c;
         }
     }
+
+    let base_name = name.to_lowercase();
+    let clean_name = base_name.strip_prefix("nano-").unwrap_or(&base_name);
+
+    let mut map = AGENT_LABEL_COLORS.lock();
+    if let Some(&idx) = map.get(clean_name) {
+        return AGENT_PALETTE[idx].1;
+    }
+
+    let used_indices: std::collections::HashSet<usize> = map.values().copied().collect();
+    let seed = (std::process::id() as usize)
+        .wrapping_mul(0x9E3779B9)
+        ^ (clean_name.bytes().fold(0usize, |acc, b| acc.wrapping_mul(31).wrapping_add(b as usize)));
+    let offset = seed % AGENT_PALETTE.len();
+    let mut chosen = offset;
+    for i in 0..AGENT_PALETTE.len() {
+        let candidate = (offset + i) % AGENT_PALETTE.len();
+        if !used_indices.contains(&candidate) {
+            chosen = candidate;
+            break;
+        }
+    }
+    map.insert(clean_name.to_string(), chosen);
+    AGENT_PALETTE[chosen].1
+}
+
+/// Helper to get the string name of an agent label's color for inheritance across processes.
+pub fn current_agent_color_name(name: &str) -> &'static str {
+    let color = agent_color(name);
+    color_to_name(color)
+}
+
+pub fn color_to_name(color: nu_ansi_term::Color) -> &'static str {
+    for &(name, c) in AGENT_PALETTE {
+        if c == color {
+            return name;
+        }
+    }
+    "cyan"
+}
+
+pub fn color_from_name(name: &str) -> Option<nu_ansi_term::Color> {
+    for &(n, c) in AGENT_PALETTE {
+        if n == name {
+            return Some(c);
+        }
+    }
+    None
 }
 
 /// Truncate long lines horizontally to avoid terminal blowout.
@@ -3443,9 +3499,9 @@ pub fn ancestor_rails(depth: usize) -> String {
     let mut rails = String::new();
     for d in 0..depth {
         let rail = match d {
-            0 => "│   ",
-            1 => "║   ",
-            _ => "╏   ",
+            0 => "│     ",
+            1 => "║     ",
+            _ => "╏     ",
         };
         rails.push_str(rail);
     }
@@ -3759,7 +3815,7 @@ pub fn format_dialog_block(
     };
     let active_rail_colored = color.bold().paint(active_rail).to_string();
     let line_prefix = format!("{outer_indent}{active_rail_colored} ");
-    let prefix_visible_width = depth * 4 + 3;
+    let prefix_visible_width = depth * 6 + 3;
 
     let term_width = get_terminal_width();
     let max_content_width = term_width.saturating_sub(prefix_visible_width).max(30);
@@ -3770,8 +3826,9 @@ pub fn format_dialog_block(
     };
 
     let pid_str = format_agent_pid(pid);
-    let header_title = format!("{icon} [{pid_str} {colored_agent} [turn {turn}/{max_turns}] {}]", dir_color.bold().paint(dir_str));
-    let outer_indent_width = depth * 4;
+    let colored_pid_str = color.paint(&pid_str).to_string();
+    let header_title = format!("{icon} [{colored_pid_str} {colored_agent} [turn {turn}/{max_turns}] {}]", dir_color.bold().paint(dir_str));
+    let outer_indent_width = depth * 6;
     let title_vis_width = visible_width(&header_title);
     let top_prefix_width = outer_indent_width + 4; // for "┌── "
     let top_total_width = top_prefix_width + title_vis_width;
@@ -3836,28 +3893,72 @@ pub fn is_agent_loop_debug() -> bool {
         .unwrap_or(false)
 }
 
-/// Format an event as a trace line for stderr output.
+/// Format an event as a trace line for stderr output (unstyled fallback).
+#[allow(dead_code)]
 pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
+    format_trace_event_styled(event, pid, None)
+}
+
+/// Format an event as a trace line for stderr output with colored agent labels and error styling.
+pub fn format_trace_event_styled(
+    event: &AgentLoopEvent,
+    pid: u32,
+    agent_label: Option<&str>,
+) -> Option<String> {
     let pid_str = format_agent_pid(pid);
+    let is_styled = agent_label.is_some();
+    let agent_tag = match agent_label {
+        Some(label) => {
+            let color = agent_color(label);
+            let colored_label = color.bold().paint(label);
+            let colored_pid = color.paint(&pid_str);
+            format!("{colored_label} {colored_pid}")
+        }
+        None => pid_str.clone(),
+    };
+
     match event {
         AgentLoopEvent::TurnStart { turn, max_turns } => {
-            Some(format!("{pid_str} [turn {turn}/{max_turns}] starting"))
+            Some(format!("{agent_tag} [turn {turn}/{max_turns}] starting"))
         }
-        AgentLoopEvent::ToolStart { name, .. } => Some(format!("{pid_str} calling: {name}")),
+        AgentLoopEvent::ToolStart { name, .. } => Some(format!("{agent_tag} calling: {name}")),
         AgentLoopEvent::ToolComplete {
             name,
             duration,
             success,
         } => {
-            let status = if *success { "completed" } else { "FAILED" };
-            Some(format!("{pid_str} {name} {status} ({:.1}s)", duration.as_secs_f64()))
+            let status = if *success {
+                if is_styled {
+                    nu_ansi_term::Color::Green.paint("completed").to_string()
+                } else {
+                    "completed".to_string()
+                }
+            } else if is_styled {
+                ERROR_COLOR.bold().paint("FAILED").to_string()
+            } else {
+                "FAILED".to_string()
+            };
+            Some(format!("{agent_tag} {name} {status} ({:.1}s)", duration.as_secs_f64()))
         }
         AgentLoopEvent::ToolBlocked { name, reason } => {
-            Some(format!("{pid_str} BLOCK {name}: {reason}"))
+            if is_styled {
+                let block_str = ERROR_COLOR.bold().paint("BLOCK");
+                let reason_str = ERROR_COLOR.paint(reason.as_str());
+                Some(format!("{agent_tag} {block_str} {name}: {reason_str}"))
+            } else {
+                Some(format!("{agent_tag} BLOCK {name}: {reason}"))
+            }
         }
         AgentLoopEvent::SubAgentStart { agent_name, pid: sub_pid } => {
             let sub_pid_str = format_agent_pid(*sub_pid);
-            Some(format!("{pid_str} sub-agent {agent_name} started (PID {sub_pid_str})"))
+            if is_styled {
+                let sub_color = agent_color(agent_name);
+                let colored_sub = sub_color.bold().paint(agent_name);
+                let colored_sub_pid = sub_color.paint(&sub_pid_str);
+                Some(format!("{agent_tag} sub-agent {colored_sub} started (PID {colored_sub_pid})"))
+            } else {
+                Some(format!("{agent_tag} sub-agent {agent_name} started (PID {sub_pid_str})"))
+            }
         }
         AgentLoopEvent::SubAgentComplete {
             agent_name,
@@ -3865,12 +3966,32 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
             duration,
             success,
         } => {
-            let status = if *success { "completed" } else { "FAILED" };
             let sub_pid_str = format_agent_pid(*sub_pid);
-            Some(format!(
-                "{pid_str} sub-agent {agent_name} {status} ({:.1}s, PID {sub_pid_str})",
-                duration.as_secs_f64()
-            ))
+            let status = if *success {
+                if is_styled {
+                    nu_ansi_term::Color::Green.paint("completed").to_string()
+                } else {
+                    "completed".to_string()
+                }
+            } else if is_styled {
+                ERROR_COLOR.bold().paint("FAILED").to_string()
+            } else {
+                "FAILED".to_string()
+            };
+            if is_styled {
+                let sub_color = agent_color(agent_name);
+                let colored_sub = sub_color.bold().paint(agent_name);
+                let colored_sub_pid = sub_color.paint(&sub_pid_str);
+                Some(format!(
+                    "{agent_tag} sub-agent {colored_sub} {status} ({:.1}s, PID {colored_sub_pid})",
+                    duration.as_secs_f64()
+                ))
+            } else {
+                Some(format!(
+                    "{agent_tag} sub-agent {agent_name} {status} ({:.1}s, PID {sub_pid_str})",
+                    duration.as_secs_f64()
+                ))
+            }
         }
         AgentLoopEvent::PlanReceived { content } => {
             let preview = if content.len() > 60 {
@@ -3878,26 +3999,46 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
             } else {
                 content.clone()
             };
-            Some(format!("{pid_str} plan: \"{preview}\""))
+            Some(format!("{agent_tag} plan: \"{preview}\""))
         }
         AgentLoopEvent::BudgetWarning { turn, max_turns } => {
-            Some(format!("{pid_str} budget warning: turn {turn}/{max_turns}"))
+            if is_styled {
+                let warn = nu_ansi_term::Color::Yellow.paint(format!("budget warning: turn {turn}/{max_turns}"));
+                Some(format!("{agent_tag} {warn}"))
+            } else {
+                Some(format!("{agent_tag} budget warning: turn {turn}/{max_turns}"))
+            }
         }
         AgentLoopEvent::BudgetExhausted { max_turns } => {
-            Some(format!("{pid_str} budget exhausted at {max_turns} turns"))
+            if is_styled {
+                let msg = ERROR_COLOR.bold().paint(format!("budget exhausted at {max_turns} turns"));
+                Some(format!("{agent_tag} {msg}"))
+            } else {
+                Some(format!("{agent_tag} budget exhausted at {max_turns} turns"))
+            }
         }
         AgentLoopEvent::CostExhausted { cost, max_cost } => {
-            Some(format!("{pid_str} cost exhausted: ${cost:.4} exceeded ${max_cost:.4} limit"))
+            if is_styled {
+                let msg = ERROR_COLOR.bold().paint(format!("cost exhausted: ${cost:.4} exceeded ${max_cost:.4} limit"));
+                Some(format!("{agent_tag} {msg}"))
+            } else {
+                Some(format!("{agent_tag} cost exhausted: ${cost:.4} exceeded ${max_cost:.4} limit"))
+            }
         }
-        AgentLoopEvent::LoopComplete => Some(format!("{pid_str} done")),
+        AgentLoopEvent::LoopComplete => Some(format!("{agent_tag} done")),
         AgentLoopEvent::PolicyRuleMatched { name, outcome } => {
-            Some(format!("{pid_str} policy matched: {name} -> {outcome}"))
+            Some(format!("{agent_tag} policy matched: {name} -> {outcome}"))
         }
         AgentLoopEvent::SafetyGatePassed { name, comparison } => {
-            Some(format!("{pid_str} ALLOW {name}: {comparison}"))
+            if is_styled {
+                let allow_str = nu_ansi_term::Color::Green.bold().paint("ALLOW");
+                Some(format!("{agent_tag} {allow_str} {name}: {comparison}"))
+            } else {
+                Some(format!("{agent_tag} ALLOW {name}: {comparison}"))
+            }
         }
         AgentLoopEvent::RiskAssessmentStart { name, model } => {
-            Some(format!("{pid_str} assess-risk: evaluating {name} with {model}"))
+            Some(format!("{agent_tag} assess-risk: evaluating {name} with {model}"))
         }
         AgentLoopEvent::RiskAssessmentComplete {
             name,
@@ -3910,14 +4051,31 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
             } else {
                 rationale.clone()
             };
-            if preview.is_empty() {
-                Some(format!("{pid_str} assess-risk: verdict for {name} -> {tier} ({confidence})"))
+            let tier_display = if is_styled {
+                if tier.to_lowercase().contains("block") || tier.starts_with("T3") {
+                    ERROR_COLOR.bold().paint(tier.as_str()).to_string()
+                } else if tier.starts_with("T1") || tier.to_lowercase().contains("safe") {
+                    nu_ansi_term::Color::Green.paint(tier.as_str()).to_string()
+                } else {
+                    tier.clone()
+                }
             } else {
-                Some(format!("{pid_str} assess-risk: verdict for {name} -> {tier} ({confidence}): \"{preview}\""))
+                tier.clone()
+            };
+            if preview.is_empty() {
+                Some(format!("{agent_tag} assess-risk: verdict for {name} -> {tier_display} ({confidence})"))
+            } else {
+                Some(format!("{agent_tag} assess-risk: verdict for {name} -> {tier_display} ({confidence}): \"{preview}\""))
             }
         }
         AgentLoopEvent::RiskAssessmentError { name, error } => {
-            Some(format!("{pid_str} assess-risk: error for {name}: {error}"))
+            if is_styled {
+                let err_lbl = ERROR_COLOR.bold().paint("error");
+                let err_msg = ERROR_COLOR.paint(error.as_str());
+                Some(format!("{agent_tag} assess-risk: {err_lbl} for {name}: {err_msg}"))
+            } else {
+                Some(format!("{agent_tag} assess-risk: error for {name}: {error}"))
+            }
         }
         AgentLoopEvent::RiskAssessmentCacheHit {
             name,
@@ -3930,29 +4088,61 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
                 } else {
                     r.to_string()
                 };
-                Some(format!("{pid_str} assess-risk: cache hit for {name} (floor: {cached_floor}): \"{preview}\""))
+                Some(format!("{agent_tag} assess-risk: cache hit for {name} (floor: {cached_floor}): \"{preview}\""))
             } else {
-                Some(format!("{pid_str} assess-risk: cache hit for {name} (floor: {cached_floor})"))
+                Some(format!("{agent_tag} assess-risk: cache hit for {name} (floor: {cached_floor})"))
             }
         }
         AgentLoopEvent::EscalationDispatched { name, target, reason } => {
-            Some(format!("{pid_str} escalation: {name} -> {target} ({reason})"))
+            if is_styled {
+                let esc_tag = ESCALATION_COLOR.bold().paint("escalation:");
+                let desc = ESCALATION_COLOR.paint(format!("{name} -> {target} ({reason})"));
+                Some(format!("{agent_tag} {esc_tag} {desc}"))
+            } else {
+                Some(format!("{agent_tag} escalation: {name} -> {target} ({reason})"))
+            }
         }
         AgentLoopEvent::EscalationVerdictReceived { name, decision } => {
-            Some(format!("{pid_str} escalation verdict: {name} -> {decision}"))
+            if is_styled {
+                let verdict_tag = ESCALATION_COLOR.bold().paint("escalation verdict:");
+                let dec_colored = if decision.to_lowercase().contains("halt") || decision.to_lowercase().contains("block") {
+                    ERROR_COLOR.bold().paint(decision.as_str())
+                } else {
+                    nu_ansi_term::Color::Green.bold().paint(decision.as_str())
+                };
+                Some(format!("{agent_tag} {verdict_tag} {name} -> {dec_colored}"))
+            } else {
+                Some(format!("{agent_tag} escalation verdict: {name} -> {decision}"))
+            }
         }
         AgentLoopEvent::HumanPromptRequested {
             name,
             blast_radius,
             reason,
         } => {
-            Some(format!("{pid_str} human authorization requested: {name} ({blast_radius}, {reason})"))
+            if is_styled {
+                let req_tag = ESCALATION_COLOR.bold().paint("human authorization requested:");
+                let details = ESCALATION_COLOR.paint(format!("{name} ({blast_radius}, {reason})"));
+                Some(format!("{agent_tag} {req_tag} {details}"))
+            } else {
+                Some(format!("{agent_tag} human authorization requested: {name} ({blast_radius}, {reason})"))
+            }
         }
         AgentLoopEvent::HumanVerdictReceived { name, decision } => {
-            Some(format!("{pid_str} human verdict: {name} -> {decision}"))
+            if is_styled {
+                let verdict_tag = ESCALATION_COLOR.bold().paint("human verdict:");
+                let dec_colored = if decision.to_lowercase().contains("halt") || decision.to_lowercase().contains("reject") {
+                    ERROR_COLOR.bold().paint(decision.as_str())
+                } else {
+                    nu_ansi_term::Color::Green.bold().paint(decision.as_str())
+                };
+                Some(format!("{agent_tag} {verdict_tag} {name} -> {dec_colored}"))
+            } else {
+                Some(format!("{agent_tag} human verdict: {name} -> {decision}"))
+            }
         }
         AgentLoopEvent::RollbackJournalRecorded { name, entry_id, entry } => {
-            let base_line = format!("{pid_str} rollback journal: recorded {name} ({entry_id})");
+            let base_line = format!("{agent_tag} rollback journal: recorded {name} ({entry_id})");
             if is_agent_loop_debug() && entry.is_some() {
                 let e = entry.as_ref().unwrap();
                 let target = e.target_path.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "-".to_string());
@@ -3977,13 +4167,19 @@ pub fn format_trace_event(event: &AgentLoopEvent, pid: u32) -> Option<String> {
             stepped_down_to,
         } => {
             Some(format!(
-                "{pid_str} preflight remediation: {name} (via {mechanism} -> stepped down to {stepped_down_to})"
+                "{agent_tag} preflight remediation: {name} (via {mechanism} -> stepped down to {stepped_down_to})"
             ))
         }
         AgentLoopEvent::CapabilityBlocked { name, unwound } => {
-            Some(format!(
-                "{pid_str} BLOCK {name}: read-only mask (mutating tool; unwound: {unwound})"
-            ))
+            if is_styled {
+                let block_str = ERROR_COLOR.bold().paint("BLOCK");
+                let reason_str = ERROR_COLOR.paint(format!("read-only mask (mutating tool; unwound: {unwound})"));
+                Some(format!("{agent_tag} {block_str} {name}: {reason_str}"))
+            } else {
+                Some(format!(
+                    "{agent_tag} BLOCK {name}: read-only mask (mutating tool; unwound: {unwound})"
+                ))
+            }
         }
         AgentLoopEvent::DialogBlock { .. } => None,
     }
@@ -4231,7 +4427,7 @@ pub fn render_event(
     //    Falls back to stderr if /dev/tty is unavailable (CI, cron).
     //    When stdout IS a terminal, uses spinner.print_line for clean rendering.
     if config.show_trace {
-        if let Some(line) = format_trace_event(event, pid) {
+        if let Some(line) = format_trace_event_styled(event, pid, Some(agent_label)) {
             let depth = current_agent_depth();
             let rails = ancestor_rails(depth);
             let color = agent_color(agent_label);
@@ -4239,21 +4435,22 @@ pub fn render_event(
             let header_str = if !*trace_header_printed {
                 *trace_header_printed = true;
                 let pid_str = format_agent_pid(pid);
-                format!("{rails}Agent {colored_label} ({pid_str}) loop trace:\n")
+                let colored_pid_str = color.paint(&pid_str).to_string();
+                format!("{rails}Agent {colored_label} ({colored_pid_str}) loop trace:\n")
             } else {
                 String::new()
             };
 
             let term_width = get_terminal_width();
-            let continuation_indent = format!("{rails}   ");
+            let continuation_indent = format!("{rails}     ");
 
             let mut formatted_line = String::new();
             let mut is_first = true;
             for sub_line in line.lines() {
                 let this_prefix = if is_first {
-                    format!("{rails}  [")
+                    format!("{rails}    [")
                 } else {
-                    format!("{rails}   ")
+                    format!("{rails}     ")
                 };
                 let prefix_width = visible_width(&this_prefix);
                 let max_line_width = term_width.saturating_sub(prefix_width + 2).max(30);
@@ -4716,6 +4913,78 @@ agent_loop:
         };
         let line = format_trace_event(&event, pid).unwrap();
         assert_eq!(line, format!("{pid_str} BLOCK fs_write: read-only mask (mutating tool; unwound: true)"));
+    }
+
+    #[test]
+    fn test_format_trace_event_styled_colors_agent_labels_errors_and_escalations() {
+        let pid = 12345u32;
+        let label = "researcher";
+        let color = agent_color(label);
+        let pid_str = format_agent_pid(pid);
+        let expected_agent_tag = format!("{} {}", color.bold().paint(label), color.paint(&pid_str));
+
+        // 1. Tool start contains colored agent tag
+        let event = AgentLoopEvent::ToolStart {
+            name: "web_search".to_string(),
+            id: None,
+        };
+        let line = format_trace_event_styled(&event, pid, Some(label)).unwrap();
+        assert!(line.starts_with(&expected_agent_tag));
+        assert!(line.contains("calling: web_search"));
+
+        // 2. Failed tool execution is styled with ERROR_COLOR
+        let event = AgentLoopEvent::ToolComplete {
+            name: "web_search".to_string(),
+            duration: Duration::from_millis(500),
+            success: false,
+        };
+        let line = format_trace_event_styled(&event, pid, Some(label)).unwrap();
+        let expected_failed = ERROR_COLOR.bold().paint("FAILED").to_string();
+        assert!(line.contains(&expected_failed));
+
+        // 3. Blocked tool is styled with ERROR_COLOR
+        let event = AgentLoopEvent::ToolBlocked {
+            name: "fs_write".to_string(),
+            reason: "risk disruptive > ceiling reversible".to_string(),
+        };
+        let line = format_trace_event_styled(&event, pid, Some(label)).unwrap();
+        let expected_block = ERROR_COLOR.bold().paint("BLOCK").to_string();
+        let expected_reason = ERROR_COLOR.paint("risk disruptive > ceiling reversible").to_string();
+        assert!(line.contains(&expected_block));
+        assert!(line.contains(&expected_reason));
+
+        // 4. Escalations are styled with ESCALATION_COLOR
+        let event = AgentLoopEvent::EscalationDispatched {
+            name: "wipe_disk".to_string(),
+            target: "parent".to_string(),
+            reason: "authority_exceeded".to_string(),
+        };
+        let line = format_trace_event_styled(&event, pid, Some(label)).unwrap();
+        let expected_esc = ESCALATION_COLOR.bold().paint("escalation:").to_string();
+        let expected_esc_desc = ESCALATION_COLOR.paint("wipe_disk -> parent (authority_exceeded)").to_string();
+        assert!(line.contains(&expected_esc));
+        assert!(line.contains(&expected_esc_desc));
+
+        // 5. Escalation verdict with Halt has ESCALATION_COLOR verdict tag and ERROR_COLOR decision
+        let event = AgentLoopEvent::EscalationVerdictReceived {
+            name: "wipe_disk".to_string(),
+            decision: "Halt".to_string(),
+        };
+        let line = format_trace_event_styled(&event, pid, Some(label)).unwrap();
+        let expected_vtag = ESCALATION_COLOR.bold().paint("escalation verdict:").to_string();
+        let expected_halt = ERROR_COLOR.bold().paint("Halt").to_string();
+        assert!(line.contains(&expected_vtag));
+        assert!(line.contains(&expected_halt));
+
+        // 6. Human authorization prompt requested is styled with ESCALATION_COLOR
+        let event = AgentLoopEvent::HumanPromptRequested {
+            name: "drop_database".to_string(),
+            blast_radius: "Catastrophic".to_string(),
+            reason: "authority_exceeded".to_string(),
+        };
+        let line = format_trace_event_styled(&event, pid, Some(label)).unwrap();
+        let expected_human_tag = ESCALATION_COLOR.bold().paint("human authorization requested:").to_string();
+        assert!(line.contains(&expected_human_tag));
     }
 
     #[test]
@@ -6692,13 +6961,16 @@ agent_loop:
 
     #[test]
     fn test_agent_color_assignment() {
-        assert_eq!(agent_color("orchestrator"), nu_ansi_term::Color::Purple);
-        assert_eq!(agent_color("coder"), nu_ansi_term::Color::Green);
-        assert_eq!(agent_color("researcher"), nu_ansi_term::Color::Yellow);
-        assert_eq!(agent_color("sql"), nu_ansi_term::Color::Blue);
-        assert_eq!(agent_color("todo"), nu_ansi_term::Color::Cyan);
         assert_eq!(agent_color("%assess-risk%"), nu_ansi_term::Color::Red);
         assert_eq!(agent_color("%functions%"), nu_ansi_term::Color::LightCyan);
+
+        let c1 = agent_color("orchestrator");
+        let c2 = agent_color("orchestrator");
+        assert_eq!(c1, c2, "ephemeral color for same label must be stable in a process");
+
+        std::env::set_var("AICHAT_AGENT_COLOR", "green");
+        assert_eq!(agent_color("custom-agent"), nu_ansi_term::Color::Green);
+        std::env::remove_var("AICHAT_AGENT_COLOR");
     }
 
     #[test]
