@@ -3228,6 +3228,19 @@ pub fn format_messages_dialog(messages: &[crate::client::Message], no_truncate: 
     format_messages_dialog_with_turn(messages, no_truncate, 1)
 }
 
+/// Format LLM response text, dimming Markdown blockquote lines (`> ...`) in DarkGray.
+pub fn format_response_text_with_blockquotes(text: &str) -> String {
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with('>') {
+            lines.push(nu_ansi_term::Color::DarkGray.paint(line).to_string());
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+    lines.join("\n")
+}
+
 /// Format messages submitted to LLM for dialog observability trace with turn awareness and semantic styling.
 pub fn format_messages_dialog_with_turn(
     messages: &[crate::client::Message],
@@ -3259,15 +3272,15 @@ pub fn format_messages_dialog_with_turn(
                 let line_count = raw_text.lines().count();
                 if turn > 1 && line_count > 3 {
                     (
-                        nu_ansi_term::Style::new()
-                            .dimmed()
+                        nu_ansi_term::Color::DarkGray
                             .paint(format!("[system: {line_count} lines instructions unchanged]"))
                             .to_string(),
                         String::new(),
                     )
                 } else {
-                    let badge = nu_ansi_term::Style::new().dimmed().paint("[system]").to_string();
-                    (badge, raw_text)
+                    let badge = nu_ansi_term::Color::LightCyan.bold().paint("[system]").to_string();
+                    let dimmed_corpus = nu_ansi_term::Color::DarkGray.paint(&raw_text).to_string();
+                    (badge, dimmed_corpus)
                 }
             }
             MessageRole::User => {
@@ -3287,15 +3300,21 @@ pub fn format_messages_dialog_with_turn(
                     _ => String::new(),
                 };
                 if is_history {
-                    (
-                        nu_ansi_term::Style::new().dimmed().paint("[history: user]").to_string(),
-                        nu_ansi_term::Style::new().dimmed().paint(&text).to_string(),
-                    )
+                    let badge = format!(
+                        "[{}: {}]",
+                        ESCALATION_COLOR.bold().paint("history"),
+                        nu_ansi_term::Color::Cyan.bold().paint("user")
+                    );
+                    (badge, nu_ansi_term::Color::DarkGray.paint(&text).to_string())
+                } else if turn > 1 {
+                    let badge = format!(
+                        "{} {}",
+                        nu_ansi_term::Color::Yellow.bold().paint("⚡"),
+                        nu_ansi_term::Color::Cyan.bold().paint("[new: user]")
+                    );
+                    (badge, text)
                 } else {
-                    (
-                        nu_ansi_term::Color::Cyan.bold().paint("[user]").to_string(),
-                        text,
-                    )
+                    (nu_ansi_term::Color::Cyan.bold().paint("[user]").to_string(), text)
                 }
             }
             MessageRole::Assistant => {
@@ -3315,15 +3334,21 @@ pub fn format_messages_dialog_with_turn(
                     _ => String::new(),
                 };
                 if is_history {
-                    (
-                        nu_ansi_term::Style::new().dimmed().paint("[history: assistant]").to_string(),
-                        nu_ansi_term::Style::new().dimmed().paint(&text).to_string(),
-                    )
+                    let badge = format!(
+                        "[{}: {}]",
+                        ESCALATION_COLOR.bold().paint("history"),
+                        nu_ansi_term::Color::Yellow.bold().paint("assistant")
+                    );
+                    (badge, nu_ansi_term::Color::DarkGray.paint(&text).to_string())
+                } else if turn > 1 {
+                    let badge = format!(
+                        "{} {}",
+                        nu_ansi_term::Color::Yellow.bold().paint("⚡"),
+                        nu_ansi_term::Color::Yellow.bold().paint("[new: assistant]")
+                    );
+                    (badge, text)
                 } else {
-                    (
-                        nu_ansi_term::Color::Yellow.bold().paint("[assistant]").to_string(),
-                        text,
-                    )
+                    (nu_ansi_term::Color::Yellow.bold().paint("[assistant]").to_string(), text)
                 }
             }
             MessageRole::Tool => {
@@ -3332,10 +3357,12 @@ pub fn format_messages_dialog_with_turn(
                     _ => String::new(),
                 };
                 if is_history {
-                    (
-                        nu_ansi_term::Style::new().dimmed().paint("[history: tool]").to_string(),
-                        nu_ansi_term::Style::new().dimmed().paint(&text).to_string(),
-                    )
+                    let badge = format!(
+                        "[{}: {}]",
+                        ESCALATION_COLOR.bold().paint("history"),
+                        nu_ansi_term::Color::Magenta.bold().paint("tool")
+                    );
+                    (badge, nu_ansi_term::Color::DarkGray.paint(&text).to_string())
                 } else {
                     let badge = format!(
                         "{} {}",
@@ -3352,7 +3379,7 @@ pub fn format_messages_dialog_with_turn(
             if !tc.text.is_empty() {
                 let text_trunc = truncate_payload_dialog(&tc.text, 20, 20, no_truncate);
                 if is_history {
-                    parts.push(nu_ansi_term::Style::new().dimmed().paint(&text_trunc).to_string());
+                    parts.push(nu_ansi_term::Color::DarkGray.paint(&text_trunc).to_string());
                 } else {
                     parts.push(text_trunc);
                 }
@@ -3371,8 +3398,8 @@ pub fn format_messages_dialog_with_turn(
                 if is_history {
                     parts.push(format!(
                         "{} {}",
-                        nu_ansi_term::Style::new().dimmed().paint(format!("tool_result: {} ->", res.call.name)),
-                        nu_ansi_term::Style::new().dimmed().paint(&truncated_output)
+                        nu_ansi_term::Color::DarkGray.paint(format!("tool_result: {} ->", res.call.name)),
+                        nu_ansi_term::Color::DarkGray.paint(&truncated_output)
                     ));
                 } else {
                     let badge = format!(
@@ -3383,13 +3410,32 @@ pub fn format_messages_dialog_with_turn(
                     parts.push(format!("{badge} {truncated_output}"));
                 }
             }
-            (role_header, parts.join("\n"))
+
+            let effective_header = if !tc.tool_results.is_empty() && tc.text.is_empty() {
+                if is_history {
+                    format!(
+                        "[{}: {}]",
+                        ESCALATION_COLOR.bold().paint("history"),
+                        nu_ansi_term::Color::Magenta.bold().paint("tool_results")
+                    )
+                } else {
+                    format!(
+                        "{} {}",
+                        nu_ansi_term::Color::Yellow.bold().paint("⚡"),
+                        nu_ansi_term::Color::Magenta.bold().paint("[new: tool_results]")
+                    )
+                }
+            } else {
+                role_header
+            };
+
+            (effective_header, parts.join("\n"))
         } else {
             (role_header, content_str)
         };
 
         if i > 0 {
-            out.push_str(&nu_ansi_term::Style::new().dimmed().paint("\n───\n").to_string());
+            out.push_str(&nu_ansi_term::Color::DarkGray.paint("\n───\n").to_string());
         }
         if final_content.is_empty() {
             out.push_str(&role_header);
@@ -3408,7 +3454,8 @@ pub fn format_llm_response(
 ) -> String {
     let mut parts = Vec::new();
     if !output.text.trim().is_empty() {
-        parts.push(truncate_payload_dialog(output.text.trim(), 20, 20, no_truncate));
+        let text = truncate_payload_dialog(output.text.trim(), 20, 20, no_truncate);
+        parts.push(format_response_text_with_blockquotes(&text));
     }
     if !tool_calls.is_empty() {
         let calls_val: Vec<_> = tool_calls
@@ -6938,10 +6985,58 @@ agent_loop:
             ),
         ];
         let dialog = format_messages_dialog_with_turn(&msgs, false, 2);
-        assert!(dialog.contains("[history: user]"));
-        assert!(dialog.contains("[history: assistant]"));
-        assert!(dialog.contains("[new: tool_result: web_search]"));
-        assert!(dialog.contains("search result payload"));
+        let stripped = strip_ansi(&dialog);
+        assert!(stripped.contains("[history: user]"));
+        assert!(stripped.contains("[history: assistant]"));
+        assert!(stripped.contains("[new: tool_result: web_search]"));
+        assert!(stripped.contains("search result payload"));
+    }
+
+    #[test]
+    fn test_format_llm_response_dims_blockquotes() {
+        let raw_text = "> Prior quote from user\n> Second line of quote\n\nDirect response from assistant";
+        let output = ChatCompletionsOutput {
+            text: raw_text.to_string(),
+            ..Default::default()
+        };
+        let formatted = format_llm_response(&output, &[], false);
+        let expected_quoted_line = nu_ansi_term::Color::DarkGray.paint("> Prior quote from user").to_string();
+        assert!(formatted.contains(&expected_quoted_line));
+        assert!(formatted.contains("Direct response from assistant"));
+    }
+
+    #[test]
+    fn test_format_messages_dialog_all_keywords_colored_and_corpus_dimmed() {
+        use crate::client::{Message, MessageContent, MessageRole};
+        let msgs = vec![
+            Message::new(MessageRole::System, MessageContent::Text("sys instructions".to_string())),
+            Message::new(MessageRole::User, MessageContent::Text("initial prompt".to_string())),
+            Message::new(MessageRole::Assistant, MessageContent::Text("prior reply".to_string())),
+            Message::new(MessageRole::User, MessageContent::Text("new prompt".to_string())),
+        ];
+        let dialog = format_messages_dialog_with_turn(&msgs, false, 2);
+
+        // Keywords check
+        let stripped = strip_ansi(&dialog);
+        assert!(stripped.contains("[system: 1 lines instructions unchanged]") || stripped.contains("[system]"));
+        assert!(stripped.contains("[history: user]"));
+        assert!(stripped.contains("[history: assistant]"));
+        assert!(stripped.contains("[new: user]"));
+
+        // Colors check: history badge contains ESCALATION_COLOR and role color
+        let expected_hist_user = format!("[{}: {}]", ESCALATION_COLOR.bold().paint("history"), nu_ansi_term::Color::Cyan.bold().paint("user"));
+        let expected_hist_asst = format!("[{}: {}]", ESCALATION_COLOR.bold().paint("history"), nu_ansi_term::Color::Yellow.bold().paint("assistant"));
+        assert!(dialog.contains(&expected_hist_user));
+        assert!(dialog.contains(&expected_hist_asst));
+
+        // Corpus dimming check: historic text is wrapped in DarkGray
+        let expected_dimmed_user = nu_ansi_term::Color::DarkGray.paint("initial prompt").to_string();
+        let expected_dimmed_asst = nu_ansi_term::Color::DarkGray.paint("prior reply").to_string();
+        assert!(dialog.contains(&expected_dimmed_user));
+        assert!(dialog.contains(&expected_dimmed_asst));
+
+        // Active new text is plain foreground
+        assert!(dialog.contains("new prompt"));
     }
 
     #[test]
