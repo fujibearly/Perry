@@ -55,6 +55,9 @@ pub struct Cli {
     /// Enable OpenAI hosted web search in multi-agent mode
     #[clap(long)]
     pub web_search: bool,
+    /// Enable link exploration mode for web searches (passes links: true and scrapes discovered URLs)
+    #[clap(long)]
+    pub wslinks: bool,
     /// Limit generated output tokens per response
     #[clap(long, value_name = "N")]
     pub max_output_tokens: Option<NonZeroUsize>,

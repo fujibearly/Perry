@@ -54,6 +54,7 @@ Maps each strategic strand to its tracked item. **Status lives in the [Status Ta
 | Remote MCP transports (HTTP/WSS) | L2→L4 | **#12** | The concrete engine work that lets L4 control planes drive the engine remotely. |
 | Scoped shared artifact store (engine-level cross-agent memory) | L2 | **#13** | Structured, root-PID-scoped, read-mostly. Engine-level counterpart to the L4 Hive-Mind — NOT a free-form blackboard. |
 | Per-machine consolidated audit log (auditability, not just observability) | L2→L4 | **#14** | Durable append-only JSONL per agent, consolidated per-machine via correlation IDs; read by external auditors/observability platforms. Distinct *audit plane* from #6d's control + rollback planes. |
+| Web-search style & branch-wide grounding control (`--wslinks`) | L1/L2 | **#16** | Branch-wide toggle between direct grounded search (default 1-turn) vs. link exploration (`--wslinks` multi-step). |
 | Gemini Interactions API | L2 | **#2** | Covered via OpenRouter + client loop. |
 | CLI flag parity (`--show-trace/--max-turns/--max-cost`) | L2 | *(folded into #3)* | Flags exist; no distinct open item. |
 | **Adopt `dot-agent-deck`** (SRE mission control, HITL cards) | L3 | 🧭 *(external, not our code)* | #1 SRE supervisor recommendation. Engine already emits the status-file/`/dev/tty` signals it consumes. |
@@ -132,6 +133,7 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 | 13 | Scoped Shared Artifact Store for Orchestration Trees | 🔜 Proposed | Low | `feat/shared-artifact-store` | No way for sibling sub-agents in one tree to share intermediate artifacts without round-tripping the parent. Engine-level counterpart to the L4 "Hive-Mind", scoped to a local tree. | **Pillars 1 & 2 (managed tension):** structured append-only, root-PID-scoped, read-mostly — NOT a free-form blackboard. | M — ~150-300 lines; own spec; interacts with #7 (WAL) and #9 (worktrees). |
 | 14 | Per-Machine Consolidated Audit Log (auditability) | 🔜 Proposed | Medium | `feat/audit-log` | Observability today is live/ephemeral/single-process (`/dev/tty`, OSC, per-PID status files that vanish). No durable, consolidated, historical record for an external auditor/SRE/platform. Auditability is a *distinct goal* from observability. | **Pillar 4 extended to durability + Pillars 1/2:** each isolated agent authors its own append-only JSONL; consolidated per-machine at read time via correlation IDs. | M — ~200-400 lines; also the natural home to fix the `$0.000000` cost bug; own spec. |
 | 15 | Serious Structured `_plan` / Plan-Driven Execution | 🔜 Proposed | Medium | `feat/structured-plan` | Current `_plan` is a free-text scratchpad that never drives execution; a structured, plan-driven planner enables progress tracking, replanning, and a whole-plan risk pre-pass that pre-raises the #6c `RiskCache` (earlier/cheaper red-light with cross-step context). | **Pillar 1 + "the LLM is not a Pardoner":** plan-time is a red-light only; act-time evaluation stays the non-negotiable floor. Splits out of #6c's superseded plan-time model. | M — plan schema + loop plan-state/replanning + plan-time `%assess-risk%` pass writing the raise-only cache; own spec; touches hot path. |
+| 16 | Web-Search Style & Branch-Wide Grounding Control (`--wslinks`) | 🔨 In progress | High | `feat/tool-safety-permission-boundary` | Control web-search style across the entire orchestrator process tree: default grounded direct LLM summary (fast 1-turn synthesis, no intermediate page scraping) vs. multi-step link exploration (`--wslinks`, URL discovery + `fetch_and_summarize` piped to `summarize_text`). | **Pillar 1 (Delegation over Context Monoliths) + Pillar 3 (Declarative Data Flow):** adapts researcher instruction and tool execution dynamically, avoiding unnecessary scrape turns and token burn. | S–M — `cli.rs`, `agent_loop.rs`, `agent.rs`, `variables.rs`, `web_search_aichat.sh`, `researcher/index.yaml`, Demos 5/5b. |
 | 2 | Gemini Interactions API | ⏸ Deferred | Low | — (covered via OpenRouter/client loop) | Future-proofs against `generateContent` deprecation, but Google's API may still shift and OpenRouter + client loop already cover Gemini agentic use. | **Weakest fit.** Provider-specific server-side vs. the fork's provider-agnostic thesis; #3 already makes Gemini agentic. | L — ~1000-1500 lines + new `gemini_interactions.rs`; external API stability risk. |
 
 Legend: ✓ Done · 🔨 in progress · 🔜 proposed & tracked · ⏸ deferred.
@@ -578,6 +580,24 @@ A **serious** planner would make the plan a first-class object that the loop exe
 **Rationale / fit:** improves planning quality generally (a real capability, not just a safety feature), and completes #6c's two-phase intent faithfully without ever weakening the deterministic floor. Changes the agent-loop contract (plan state, replanning), so it is deliberately **its own item** rather than smuggled into a safety increment.
 
 **Dependencies:** consumes #6c's `RiskCache` and `%assess-risk%` evaluator. Interacts with #7 (WAL — plan state is checkpointable) and #10 (staged/dry-run ops). Priority **Medium**; own spec required; touches the hot path.
+
+---
+
+## 16. Web-Search Style & Branch-Wide Grounding Control (`--wslinks`)
+
+**Driver:** Web research in orchestrator sub-agent swarms historically enforced a rigid multi-turn pipeline: `web_search` with `--links` to discover URLs, followed by 2–4 sequential or parallel `fetch_and_summarize` calls (each shelling out to `html-to-markdown` and piping through `summarize_text`). For general comparison, inquiry, or high-level research tasks, the search provider (e.g. Gemini with Google Search grounding) already provides an authoritative, up-to-date grounded answer with citations directly in the first turn. Running 3–5 additional page scrapes burns tokens, consumes 30–60 seconds, and risks 404/bot-block failures.
+
+### Approach
+1. **Branch-wide `--wslinks` CLI flag (`src/cli.rs`)**: Add `--wslinks` flag. When present, export `AICHAT_WSLINKS=true` into the process environment.
+2. **Subprocess propagation (`src/agent_loop.rs`)**: `eval_agent_tool_subprocess` passes `--wslinks` and `AICHAT_WSLINKS=true` to all child subagents across the delegation hierarchy.
+3. **Dynamic instruction variable `{{__researcher_search_instructions__}}` (`src/config/agent.rs` / `src/utils/variables.rs`)**:
+   - Default (absence of `--wslinks`): directs `researcher` to use direct grounded `web_search` (`links: false`) and synthesize immediately without fetching web pages.
+   - Active (`--wslinks`): directs `researcher` to discover links (`links: true`) and fetch 2–4 pages with `fetch_and_summarize`.
+4. **Tool Guard (`tools/web_search_aichat.sh`)**: Enforce that `--links` formatting is only activated when `AICHAT_WSLINKS=true`.
+5. **Trace display optimization**: Omit the redundant initial `Agent <name> loop trace:` header lines, letting clean turn entries (`[turn 1/20] starting`) and guide rails speak for themselves.
+6. **Dual Demo Verification**: Demo 5 tests `--wslinks` (multi-step scraping pipeline); Demo 5b tests default direct grounded search (single-turn per researcher).
+
+**Spec:** [`.kiro/specs/web-search-style-control/`](../specs/web-search-style-control/)
 
 ---
 

@@ -2158,6 +2158,10 @@ async fn eval_agent_tool_subprocess(
     let mut cmd = tokio::process::Command::new(&aichat_bin);
     cmd.arg("--agent").arg(&agent_name);
     cmd.arg("--show-cost");
+    if std::env::var("AICHAT_WSLINKS").map(|v| v == "true" || v == "1").unwrap_or(false) {
+        cmd.arg("--wslinks");
+        cmd.env("AICHAT_WSLINKS", "true");
+    }
     cmd.arg(&task_message);
 
     // Pass depth to child
@@ -4583,29 +4587,18 @@ pub fn render_event(
     //    When stdout IS a terminal, uses spinner.print_line for clean rendering.
     if config.show_trace {
         if let Some(line) = format_trace_event_styled(event, pid, Some(agent_label)) {
+            *trace_header_printed = true;
             let depth = current_agent_depth();
             let rails = ancestor_rails(depth);
-            let color = agent_color(agent_label);
-            let colored_label = color.bold().paint(agent_label).to_string();
-            let header_str = if !*trace_header_printed {
-                *trace_header_printed = true;
-                let pid_str = format_agent_pid(pid);
-                let colored_pid_str = color.paint(&pid_str).to_string();
-                format!("{rails}Agent {colored_label} ({colored_pid_str}) loop trace:\n")
-            } else {
-                String::new()
-            };
-
             let term_width = get_terminal_width();
             let elapsed_secs = get_trace_elapsed_seconds(snapshot);
             let formatted_line =
                 format_trace_item_with_timestamp(&rails, &line, elapsed_secs, term_width);
 
-            let output = format!("{header_str}{formatted_line}");
             if *IS_STDOUT_TERMINAL {
-                spinner.print_line(output)?;
+                spinner.print_line(formatted_line)?;
             } else {
-                write_atomic_terminal_output(&output);
+                write_atomic_terminal_output(&formatted_line);
             }
         }
     }

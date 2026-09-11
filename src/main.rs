@@ -180,6 +180,9 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
         config.write().agent_loop.debug = true;
         std::env::set_var("AICHAT_AGENT_LOOP_DEBUG", "true");
     }
+    if cli.wslinks {
+        std::env::set_var("AICHAT_WSLINKS", "true");
+    }
 
     if let Some(agent) = &cli.agent {
         let session = cli.session.as_ref().map(|v| match v {

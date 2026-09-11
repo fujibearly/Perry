@@ -180,7 +180,7 @@ def main [
     --no-truncate (-n),       # Cancel default truncation of dialog traces and output
     --demo (-t): string = "", # Run only a specific demo (e.g. --demo 3 or -t 10b)
 ] {
-    let valid_demos = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21"]
+    let valid_demos = ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21"]
     if ($demo | is-not-empty) and not (($demo | str lowercase) in $valid_demos) {
         print $"(ansi red_bold)ERROR:(ansi reset) Unknown demo '($demo)'. Valid demos: ($valid_demos | str join ', ')"
         exit 1
@@ -369,16 +369,16 @@ show-cost ($demo4.stderr | default "")
 if (should-run-demo "5" $demo) {
 # ─── Demo 5: Parallel Delegation ─────────────────────────────────────────────
 
-header "Demo 5: Parallel Delegation (2 researchers)"
-show-desc "Demonstrates parallel sub-agent delegation: orchestrator invokes two researcher agents concurrently for separate queries and synthesizes both."
+header "Demo 5: Parallel Delegation (2 researchers, --wslinks mode)"
+show-desc "Demonstrates parallel sub-agent delegation with link exploration (--wslinks): orchestrator invokes two researcher agents concurrently, using link discovery and fetch_and_summarize scraping."
 
 let demo5_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo5_prompt)"'
+show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --wslinks --agent orchestrator "($demo5_prompt)"'
 step-pause $should_pause
 
 let demo5_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo5 = (do {
-    "" | with-env $demo5_env { ^$aichat_bin --show-cost --agent orchestrator $demo5_prompt }
+    "" | with-env $demo5_env { ^$aichat_bin --show-cost --wslinks --agent orchestrator $demo5_prompt }
 } | complete)
 
 let trace5 = ($demo5.stderr | default "")
@@ -394,10 +394,43 @@ let detail_calls_5 = if $root_in_stderr { $"calls=($researcher_calls_5)" } else 
 let detail_comp_5 = if $root_in_stderr { $"completions=($researcher_completions_5)" } else { "Trace routed to terminal (visual verification)" }
 
 # Trace visible live on terminal via /dev/tty
-report "Two researcher calls" $calls_5_ok $detail_calls_5
+report "Two researcher calls (--wslinks)" $calls_5_ok $detail_calls_5
 report "Both completed" $completions_5_ok $detail_comp_5
 show-output $demo5.stdout --max-lines 20
 show-cost ($demo5.stderr | default "")
+}
+
+if (should-run-demo "5b" $demo) {
+# ─── Demo 5b: Parallel Delegation (Direct Grounded Search) ──────────────────────
+
+header "Demo 5b: Parallel Delegation (Direct Grounded Search)"
+show-desc "Demonstrates parallel sub-agent delegation with direct grounded web search (default, no --wslinks): orchestrator invokes two researcher agents concurrently, using grounded search results without secondary page scraping."
+
+let demo5b_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
+show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo5b_prompt)"'
+step-pause $should_pause
+
+let demo5b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo5b = (do {
+    "" | with-env $demo5b_env { ^$aichat_bin --show-cost --agent orchestrator $demo5b_prompt }
+} | complete)
+
+let trace5b = ($demo5b.stderr | default "")
+let clean5b = (clean-trace $trace5b)
+let researcher_calls_5b = ($clean5b | split row "\n" | where { $in | str contains "calling: researcher" } | length)
+let researcher_completions_5b = ($clean5b | split row "\n" | where { $in | str contains "researcher completed" } | length)
+let root_in_stderr_5b = ($clean5b | str contains "calling: researcher")
+let calls_5b_ok = ($researcher_calls_5b >= 2) or (($demo5b.stdout | str length) > 200) or (not $root_in_stderr_5b)
+let completions_5b_ok = ($researcher_completions_5b >= 2) or (($demo5b.stdout | str length) > 200) or (not $root_in_stderr_5b)
+
+let detail_calls_5b = if $root_in_stderr_5b { $"calls=($researcher_calls_5b)" } else { "Trace routed to terminal (visual verification)" }
+let detail_comp_5b = if $root_in_stderr_5b { $"completions=($researcher_completions_5b)" } else { "Trace routed to terminal (visual verification)" }
+
+# Trace visible live on terminal via /dev/tty
+report "Two researcher calls (direct grounded)" $calls_5b_ok $detail_calls_5b
+report "Both completed" $completions_5b_ok $detail_comp_5b
+show-output $demo5b.stdout --max-lines 20
+show-cost ($demo5b.stderr | default "")
 }
 
 if (should-run-demo "6" $demo) {
