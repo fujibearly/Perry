@@ -345,10 +345,11 @@ pub async fn eval_tool_calls_parallel(
                             return ToolResult::new(call, value);
                         }
 
+                        let is_error = value.is_object() && value.get("error").is_some();
                         progress.emit(AgentLoopEvent::ToolComplete {
                             name: call.name.clone(),
                             duration,
-                            success: true,
+                            success: !is_error,
                         });
                         if value.is_null() {
                             json!("DONE")
@@ -3066,6 +3067,39 @@ async fn call_llm_raw(
                 return Ok((output, tool_calls));
             }
             Err(err) => {
+                let err_str = err.to_string();
+                if (err_str.contains("MALFORMED_FUNCTION_CALL")
+                    || err_str.contains("ResourceExhausted")
+                    || err_str.contains("rate limit")
+                    || err_str.contains("429")
+                    || err_str.contains("503")
+                    || err_str.contains("connection reset"))
+                    && retries < MAX_EMPTY_RETRIES
+                    && !params.abort_signal.aborted()
+                {
+                    retries += 1;
+                    let (base_ms, jitter_range_ms) = match retries {
+                        1 => (1000, 200),
+                        2 => (2500, 300),
+                        _ => (5000, 500),
+                    };
+                    let random_u32 = u32::from_le_bytes(
+                        uuid::Uuid::new_v4().as_bytes()[0..4]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    let jitter = (random_u32 % (2 * jitter_range_ms + 1)) as i64 - jitter_range_ms as i64;
+                    let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
+
+                    log::warn!(
+                        "LLM call transient error: {err_str} (attempt {}/{}), retrying in {}ms...",
+                        retries,
+                        MAX_EMPTY_RETRIES,
+                        delay_ms
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+                    continue;
+                }
                 return Err(err);
             }
         }

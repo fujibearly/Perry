@@ -244,6 +244,16 @@ pub async fn gemini_chat_events(
                 }
                 "SAFETY" => bail!("Blocked due to safety"),
                 "RECITATION" => bail!("Blocked due to recitation"),
+                "MALFORMED_FUNCTION_CALL" => {
+                    if let Some(msg) = data["candidates"][0]["finishMessage"].as_str() {
+                        if let Some(tool_call) = recover_malformed_function_call(msg) {
+                            debug!("Recovered malformed function call in stream: {:?}", tool_call);
+                            events.push(ChatEvent::ToolCall(tool_call));
+                            return Ok(());
+                        }
+                    }
+                    bail!("Provider ended generation without content (finishReason: MALFORMED_FUNCTION_CALL)");
+                }
                 other => bail!("Provider ended generation without content (finishReason: {other})"),
             }
         }
@@ -309,6 +319,22 @@ fn gemini_extract_chat_completions_text(data: &Value) -> Result<ChatCompletionsO
             .or_else(|| data["candidates"][0]["finishReason"].as_str())
         {
             bail!("Blocked due to safety")
+        } else if data["candidates"][0]["finishReason"].as_str() == Some("MALFORMED_FUNCTION_CALL") {
+            if let Some(msg) = data["candidates"][0]["finishMessage"].as_str() {
+                if let Some(tool_call) = recover_malformed_function_call(msg) {
+                    debug!("Recovered malformed function call in non-streaming: {:?}", tool_call);
+                    tool_calls.push(tool_call);
+                    let output = ChatCompletionsOutput {
+                        text: String::new(),
+                        tool_calls,
+                        id: None,
+                        input_tokens: data["usageMetadata"]["promptTokenCount"].as_u64(),
+                        output_tokens: data["usageMetadata"]["candidatesTokenCount"].as_u64(),
+                    };
+                    return Ok(output);
+                }
+            }
+            bail!("Invalid response data: {data}");
         } else {
             bail!("Invalid response data: {data}");
         }
@@ -407,7 +433,16 @@ pub fn gemini_build_chat_completions_body(
 
     let mut body = json!({ "contents": contents, "generationConfig": {} });
 
-    if let Some(v) = system_message {
+    let mut system_text = system_message.map(|v| v.to_string());
+    if functions.is_some() {
+        const TOOL_INSTRUCTION: &str = "\nWhen invoking tools, call the tool directly using the exact declared function name. Do NOT output code, python calls, or prepend namespaces (e.g. do NOT write `print(default_api....)`).";
+        match system_text.as_mut() {
+            Some(s) => s.push_str(TOOL_INSTRUCTION),
+            None => system_text = Some(TOOL_INSTRUCTION.to_string()),
+        }
+    }
+
+    if let Some(v) = system_text {
         body["systemInstruction"] = json!({ "parts": [{"text": v }] });
     }
 
@@ -554,6 +589,124 @@ fn strip_model_version(name: &str) -> &str {
     }
 }
 
+pub(crate) fn recover_malformed_function_call(msg: &str) -> Option<ToolCall> {
+    let text = msg.strip_prefix("Malformed function call:")?.trim();
+    let text = if let Some(stripped) = text.strip_prefix("print(") {
+        stripped.strip_suffix(')')?.trim()
+    } else {
+        text
+    };
+    let open_paren = text.find('(')?;
+    let close_paren = text.rfind(')')?;
+    if close_paren <= open_paren {
+        return None;
+    }
+    let full_name = text[..open_paren].trim();
+    let name = full_name.rsplit('.').next()?.trim();
+    let args_str = text[open_paren + 1..close_paren].trim();
+    let args = parse_python_kwargs(args_str)?;
+    Some(ToolCall::new(name.to_string(), Value::Object(args), None))
+}
+
+fn parse_python_kwargs(args_str: &str) -> Option<serde_json::Map<String, Value>> {
+    let mut map = serde_json::Map::new();
+    if args_str.is_empty() {
+        return Some(map);
+    }
+
+    let mut pairs = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut escape = false;
+    let mut depth = 0usize;
+
+    for ch in args_str.chars() {
+        if escape {
+            current.push(ch);
+            escape = false;
+            continue;
+        }
+        if ch == '\\' {
+            escape = true;
+            current.push(ch);
+            continue;
+        }
+        if let Some(q) = in_quote {
+            if ch == q {
+                in_quote = None;
+            }
+            current.push(ch);
+            continue;
+        }
+        if ch == '"' || ch == '\'' {
+            in_quote = Some(ch);
+            current.push(ch);
+            continue;
+        }
+        if ch == '(' || ch == '[' || ch == '{' {
+            depth += 1;
+            current.push(ch);
+            continue;
+        }
+        if ch == ')' || ch == ']' || ch == '}' {
+            depth = depth.saturating_sub(1);
+            current.push(ch);
+            continue;
+        }
+        if ch == ',' && depth == 0 {
+            pairs.push(current.trim().to_string());
+            current.clear();
+            continue;
+        }
+        current.push(ch);
+    }
+    if !current.trim().is_empty() {
+        pairs.push(current.trim().to_string());
+    }
+
+    for pair in pairs {
+        let eq_idx = pair.find('=')?;
+        let key = pair[..eq_idx].trim().to_string();
+        let val_str = pair[eq_idx + 1..].trim();
+        let val = parse_python_val(val_str);
+        map.insert(key, val);
+    }
+
+    Some(map)
+}
+
+fn parse_python_val(val_str: &str) -> Value {
+    if (val_str.starts_with('"') && val_str.ends_with('"'))
+        || (val_str.starts_with('\'') && val_str.ends_with('\''))
+    {
+        if val_str.len() >= 2 {
+            let inner = &val_str[1..val_str.len() - 1];
+            let unescaped = inner.replace("\\\"", "\"").replace("\\'", "'");
+            return Value::String(unescaped);
+        }
+        return Value::String(String::new());
+    }
+    if val_str.eq_ignore_ascii_case("true") {
+        return Value::Bool(true);
+    }
+    if val_str.eq_ignore_ascii_case("false") {
+        return Value::Bool(false);
+    }
+    if val_str.eq_ignore_ascii_case("none") || val_str.eq_ignore_ascii_case("null") {
+        return Value::Null;
+    }
+    if let Ok(num) = val_str.parse::<i64>() {
+        return json!(num);
+    }
+    if let Ok(num) = val_str.parse::<f64>() {
+        return json!(num);
+    }
+    if let Ok(val) = serde_json::from_str::<Value>(val_str) {
+        return val;
+    }
+    Value::String(val_str.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -645,5 +798,25 @@ mod tests {
             prediction_base_url("fixture-project", "us", ModelCategory::Gemini),
             "https://us-aiplatform.googleapis.com/v1/projects/fixture-project/locations/us/publishers"
         );
+    }
+
+    #[test]
+    fn test_recover_malformed_function_call() {
+        let msg1 = "Malformed function call: print(default_api.web_search(query=\"Rust async runtimes comparison 2024 trends\", links=true))";
+        let tool1 = recover_malformed_function_call(msg1).expect("Should recover tool1");
+        assert_eq!(tool1.name, "web_search");
+        assert_eq!(tool1.arguments["query"], "Rust async runtimes comparison 2024 trends");
+        assert_eq!(tool1.arguments["links"], true);
+
+        let msg2 = "Malformed function call: default_api.fetch_and_summarize(url='https://example.com/test')";
+        let tool2 = recover_malformed_function_call(msg2).expect("Should recover tool2");
+        assert_eq!(tool2.name, "fetch_and_summarize");
+        assert_eq!(tool2.arguments["url"], "https://example.com/test");
+
+        let msg3 = "Malformed function call: web_search(query=\"python asyncio\", count=5)";
+        let tool3 = recover_malformed_function_call(msg3).expect("Should recover tool3");
+        assert_eq!(tool3.name, "web_search");
+        assert_eq!(tool3.arguments["query"], "python asyncio");
+        assert_eq!(tool3.arguments["count"], 5);
     }
 }
