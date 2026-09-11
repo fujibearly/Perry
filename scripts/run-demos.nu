@@ -179,6 +179,7 @@ def main [
     --dialog,                 # Display full submitted LLM prompt and response observability trace
     --no-truncate (-n),       # Cancel default truncation of dialog traces and output
     --demo (-t): string = "", # Run only a specific demo (e.g. --demo 3 or -t 10b)
+    --wslinks,                # Enable link exploration mode for web searches across demos
 ] {
     let valid_demos = ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21"]
     if ($demo | is-not-empty) and not (($demo | str lowercase) in $valid_demos) {
@@ -188,11 +189,17 @@ def main [
     if $no_truncate {
         $env.AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE = "true"
     }
+    if $wslinks {
+        $env.AICHAT_WSLINKS = "true"
+    } else if ("AICHAT_WSLINKS" in $env) {
+        hide-env AICHAT_WSLINKS
+    }
     # Base environment for all aichat invocations. AICHAT_MODEL makes every demo
     # use DEMO_MODEL as its default model without needing a per-demo -m flag;
     # WEB_SEARCH_MODEL points the researcher/web-search tooling at the same model;
     # AICHAT_AGENT_LOOP_SHOW_DIALOG enables the LLM dialog trace when --dialog is set.
     # AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE disables dialog truncation when --no-truncate is set.
+    # AICHAT_WSLINKS enables link exploration mode for web searches across sub-agent trees when --wslinks is set.
     let base_env = {
         PATH: ($env.PATH | prepend ($project_dir | path join "target/debug") | prepend ($project_dir | path join "target/release"))
         AICHAT_FUNCTIONS_DIR: $functions_dir
@@ -202,6 +209,10 @@ def main [
     } | merge (if $dialog { { AICHAT_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
       | merge (if $no_truncate { { AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE: "true" } } else { {} })
       | merge (if $debug { { AICHAT_AGENT_LOOP_DEBUG: "true" } } else { {} })
+      | merge (if $wslinks { { AICHAT_WSLINKS: "true" } } else { {} })
+
+    let wslinks_args = if $wslinks { ["--wslinks"] } else { [] }
+    let wslinks_cmd_str = if $wslinks { " --wslinks" } else { "" }
 
     let should_pause = $debug
 
@@ -342,16 +353,26 @@ if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
 if (should-run-demo "4" $demo) {
 # ─── Demo 4: Sub-Agent Delegation ────────────────────────────────────────────
 
-header "Demo 4: Sub-Agent Delegation"
-show-desc "Demonstrates sub-agent delegation: orchestrator delegates web research to the researcher specialist agent and returns synthesized results."
+let demo4_title = if $wslinks {
+    "Demo 4: Sub-Agent Delegation (--wslinks mode)"
+} else {
+    "Demo 4: Sub-Agent Delegation"
+}
+header $demo4_title
+let demo4_desc = if $wslinks {
+    "Demonstrates sub-agent delegation with link exploration (--wslinks): orchestrator delegates web research to the researcher specialist agent and returns synthesized results."
+} else {
+    "Demonstrates sub-agent delegation: orchestrator delegates web research to the researcher specialist agent and returns synthesized results."
+}
+show-desc $demo4_desc
 
 let demo4_prompt = "You MUST delegate this to the researcher agent (do NOT answer yourself): Search the web for 'what is Model Context Protocol MCP by Anthropic' and return a summary with sources."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo4_prompt)"'
+show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost($wslinks_cmd_str) --agent orchestrator "($demo4_prompt)"'
 step-pause $should_pause
 
 let demo4_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo4 = (do {
-    "" | with-env $demo4_env { ^$aichat_bin --show-cost --agent orchestrator $demo4_prompt }
+    "" | with-env $demo4_env { ^$aichat_bin --show-cost ...$wslinks_args --agent orchestrator $demo4_prompt }
 } | complete)
 
 let trace4 = ($demo4.stderr | default "")
@@ -369,16 +390,26 @@ show-cost ($demo4.stderr | default "")
 if (should-run-demo "5" $demo) {
 # ─── Demo 5: Parallel Delegation ─────────────────────────────────────────────
 
-header "Demo 5: Parallel Delegation (2 researchers, --wslinks mode)"
-show-desc "Demonstrates parallel sub-agent delegation with link exploration (--wslinks): orchestrator invokes two researcher agents concurrently, using link discovery and fetch_and_summarize scraping."
+let demo5_title = if $wslinks {
+    "Demo 5: Parallel Delegation (2 researchers, --wslinks mode)"
+} else {
+    "Demo 5: Parallel Delegation (2 researchers, direct grounded mode)"
+}
+header $demo5_title
+let demo5_desc = if $wslinks {
+    "Demonstrates parallel sub-agent delegation with link exploration (--wslinks): orchestrator invokes two researcher agents concurrently, using link discovery and fetch_and_summarize scraping."
+} else {
+    "Demonstrates parallel sub-agent delegation with direct grounded web search (default, no --wslinks): orchestrator invokes two researcher agents concurrently, using grounded search results without secondary page scraping."
+}
+show-desc $demo5_desc
 
 let demo5_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --wslinks --agent orchestrator "($demo5_prompt)"'
+show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost($wslinks_cmd_str) --agent orchestrator "($demo5_prompt)"'
 step-pause $should_pause
 
 let demo5_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo5 = (do {
-    "" | with-env $demo5_env { ^$aichat_bin --show-cost --wslinks --agent orchestrator $demo5_prompt }
+    "" | with-env $demo5_env { ^$aichat_bin --show-cost ...$wslinks_args --agent orchestrator $demo5_prompt }
 } | complete)
 
 let trace5 = ($demo5.stderr | default "")
@@ -394,7 +425,8 @@ let detail_calls_5 = if $root_in_stderr { $"calls=($researcher_calls_5)" } else 
 let detail_comp_5 = if $root_in_stderr { $"completions=($researcher_completions_5)" } else { "Trace routed to terminal (visual verification)" }
 
 # Trace visible live on terminal via /dev/tty
-report "Two researcher calls (--wslinks)" $calls_5_ok $detail_calls_5
+let report_label_5 = if $wslinks { "Two researcher calls (--wslinks)" } else { "Two researcher calls (direct grounded)" }
+report $report_label_5 $calls_5_ok $detail_calls_5
 report "Both completed" $completions_5_ok $detail_comp_5
 show-output $demo5.stdout --max-lines 20
 show-cost ($demo5.stderr | default "")
@@ -410,7 +442,7 @@ let demo5b_prompt = "You MUST delegate TWO separate research tasks (call the res
 show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo5b_prompt)"'
 step-pause $should_pause
 
-let demo5b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo5b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true", AICHAT_WSLINKS: "false" })
 let demo5b = (do {
     "" | with-env $demo5b_env { ^$aichat_bin --show-cost --agent orchestrator $demo5b_prompt }
 } | complete)
@@ -679,11 +711,16 @@ show-cost ($demo10b.stderr | default "")
 if (should-run-demo "11" $demo) {
 # ─── Demo 11: Combined Workflow ───────────────────────────────────────────────
 
-header "Demo 11: Combined (plan + delegate + synthesize)"
+let demo11_title = if $wslinks {
+    "Demo 11: Combined (plan + delegate + synthesize, --wslinks mode)"
+} else {
+    "Demo 11: Combined (plan + delegate + synthesize)"
+}
+header $demo11_title
 show-desc "Demonstrates complete composite workflow: orchestrator plans with _plan, delegates research, and synthesizes findings end-to-end."
 
 let demo11_prompt = "You MUST plan first using the exact tool named '_plan' (with leading underscore, do NOT call 'plan'). Then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. In your final answer, state the findings and mention the researcher agent. Do NOT answer from memory — you MUST delegate."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true AICHAT_AGENT_LOOP_MAX_TURNS=15 aichat --show-cost --agent orchestrator "($demo11_prompt)"'
+show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true AICHAT_AGENT_LOOP_MAX_TURNS=15 aichat --show-cost($wslinks_cmd_str) --agent orchestrator "($demo11_prompt)"'
 step-pause $should_pause
 
 let demo11_env = ($base_env | merge {
@@ -691,7 +728,7 @@ let demo11_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_MAX_TURNS: "15"
 })
 let demo11 = (do {
-    "" | with-env $demo11_env { ^$aichat_bin --show-cost --agent orchestrator $demo11_prompt }
+    "" | with-env $demo11_env { ^$aichat_bin --show-cost ...$wslinks_args --agent orchestrator $demo11_prompt }
 } | complete)
 
 let trace11 = ($demo11.stderr | default "")
