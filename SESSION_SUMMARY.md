@@ -250,5 +250,18 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** Full workspace test suite **511 pass, 0 fail** (503 unit/integration + 5 catalog override + 3 web asset security); clippy clean (`-D warnings`); release binary compiled; live Demo 5 verified with parallel researchers and nanoworkers completing synthesis; live Demo 8 verified with `fetch_and_summarize` pipe routing.
       * **State:** on branch `feat/tool-safety-permission-boundary` (aichat) & `feat/fetch-url-native-html-to-markdown` (llm-functions); local-only.
 
+  22. **Session 22: Web-Search Grounding Control (`--wslinks`), Streamlined Trace Display, Dual-Layer `MALFORMED_FUNCTION_CALL` Recovery & Truthful Failure Reporting**
+    * **Period:** `2026-09-10` $\rightarrow$ `2026-09-11`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-11-session22.md`](.kiro/docs/session-summary-2026-09-11-session22.md)
+    * **Focus Areas:**
+      * **Web-Search Grounding Control (`--wslinks` & `AICHAT_WSLINKS`):** Added `--wslinks` CLI flag to `aichat` and `scripts/run-demos.nu`. Injected and propagated `AICHAT_WSLINKS=true` across child processes. Dynamic interpolation of `{{__researcher_search_instructions__}}` allows fast 1-turn direct grounded web search without page scrapes by default, or multi-step link exploration and scraping when `--wslinks` is enabled. Enforced `AICHAT_WSLINKS` guard in `tools/web_search_aichat.sh`.
+      * **Streamlined Trace Display:** Omitted redundant initial agent and nanoworker "loop trace" starting header line (`Agent <name> loop trace:`) to conserve vertical terminal space while preserving indentation, British humor petnames, 11-color ANSI palettes, and turn tracking (`[turn 1/20] starting`). Hardened atomic terminal line writes via `write_atomic_terminal_output` to eliminate multi-process line collisions on `/dev/tty`.
+      * **Non-`STOP` finishReason Bubble-Up (`src/client/vertexai.rs`):** Bubbled non-`STOP` finish reasons when candidates lack content parts, preventing silent drops on safety filters or recitation blocks.
+      * **Dual-Layer `MALFORMED_FUNCTION_CALL` Resilience & Transient Retries:** Resolved parallel sub-agent crashes where Gemini 2.5 Flash under burst load hallucinated Python function syntax (e.g. `print(default_api.web_search(...))`) triggering `MALFORMED_FUNCTION_CALL`. Added explicit prompt guidance against code/namespaces in tool calls, an AST/kwargs recovery parser (`recover_malformed_function_call`, `parse_python_kwargs`) in `src/client/vertexai.rs`, and exponential backoff retries in `call_llm_raw` for transient errors (`MALFORMED_FUNCTION_CALL`, `ResourceExhausted`, `429`, `503`).
+      * **Truthful Tool Failure Reporting (`src/agent_loop.rs`):** Fixed `eval_tool_calls_parallel` to inspect `value.get("error").is_some()`, truthfully rendering child process exit failures as `FAILED` in soft coral red instead of false green `completed`.
+      * **URL Token Formatting & Strict JSON Constraints (`llm-functions`):** Formatted canonical URLs on dedicated lines (`Title: ...\nURL: ...\nSummary: ...`) in `tools/web_search_aichat.sh` to prevent markdown link brackets from breaking base64 tokens. Added strict JSON validation constraints in `agents/researcher/index.yaml`.
+      * **Verification & Testing:** All 505 unit tests in `aichat` passing; `cargo clippy -- -D warnings` clean; 71/71 `argc test` in `llm-functions` passing; live Demo 5 verified green in both `--wslinks` (40.6s, 0 crashes, 0 retries) and default direct grounded mode (33.9s).
+      * **State:** on branch `feat/tool-safety-permission-boundary` (aichat) & `feat/fetch-url-native-html-to-markdown` (llm-functions); local-only.
+
 
 
