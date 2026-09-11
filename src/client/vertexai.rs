@@ -237,10 +237,15 @@ pub async fn gemini_chat_events(
             }
         } else if let Some(block_reason) = data["promptFeedback"]["blockReason"].as_str() {
             bail!("Blocked by provider: {block_reason}")
-        } else if let Some("SAFETY") = data["candidates"][0]["finishReason"].as_str() {
-            bail!("Blocked due to safety")
-        } else if let Some("RECITATION") = data["candidates"][0]["finishReason"].as_str() {
-            bail!("Blocked due to recitation")
+        } else if let Some(finish_reason) = data["candidates"][0]["finishReason"].as_str() {
+            match finish_reason {
+                "STOP" => {
+                    debug!("Provider completed with STOP but no content parts");
+                }
+                "SAFETY" => bail!("Blocked due to safety"),
+                "RECITATION" => bail!("Blocked due to recitation"),
+                other => bail!("Provider ended generation without content (finishReason: {other})"),
+            }
         }
 
         Ok(())
