@@ -431,6 +431,8 @@ async fn run_directive(
     if current_depth > 0 {
         agent_loop_config.osc_title = false;
         agent_loop_config.notify = false;
+    } else if std::env::var("AICHAT_AGENT_COLOR").is_err() {
+        std::env::set_var("AICHAT_AGENT_COLOR", crate::agent_loop::AGENT_PALETTE[0].0);
     }
 
     // If no trace/observability needed and stdout is not a terminal, run without rendering overhead

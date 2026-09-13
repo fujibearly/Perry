@@ -2172,6 +2172,17 @@ async fn eval_agent_tool_subprocess(
         cmd.env("AICHAT_START_TIME_MS", start_ms);
     }
 
+    // Allocate mutually exclusive color for subagent
+    static SUBAGENT_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let subagent_seq = SUBAGENT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let parent_seq: usize = std::env::var("AICHAT_SUBAGENT_SEQ")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1);
+    let subagent_color = allocate_subagent_color(current_depth, parent_seq, subagent_seq);
+    cmd.env("AICHAT_AGENT_COLOR", subagent_color);
+    cmd.env("AICHAT_SUBAGENT_SEQ", subagent_seq.to_string());
+
     // Backlog #6d (FR-6d.18): hierarchical upfront permission provisioning.
     let parent_is_readonly = under_readonly_mask();
     let parent_ceiling = current_authority_ceiling(config);
@@ -2625,6 +2636,11 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
 pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopOutput> {
     // Eagerly initialize persistent child client if running under parent listener (#6d)
     let _ = get_or_init_child_client().await;
+
+    // Ensure root agent has a stable, exclusive color (default Cyan) if not set
+    if current_agent_depth() == 0 && std::env::var("AICHAT_AGENT_COLOR").is_err() {
+        std::env::set_var("AICHAT_AGENT_COLOR", AGENT_PALETTE[0].0);
+    }
 
     let max_turns = params.config.read().agent_loop.max_turns;
     let max_cost = params.config.read().agent_loop.max_cost;
@@ -3227,6 +3243,23 @@ pub fn color_from_name(name: &str) -> Option<nu_ansi_term::Color> {
         }
     }
     None
+}
+
+/// Allocate a mutually exclusive color for a subagent based on its hierarchy depth and sequence.
+/// - Depth 0 (direct subagents of orchestrator): cycle through colors 1..10 (never 0, which is reserved for root).
+/// - Depth 1 (sub-subagents): partitioned across colors 1..10 offset by parent sequence.
+/// - Depth > 1: further partitioned offset by sequence.
+pub fn allocate_subagent_color(current_depth: usize, parent_seq: usize, subagent_seq: usize) -> &'static str {
+    let subagent_pool_len = AGENT_PALETTE.len().saturating_sub(1);
+    if subagent_pool_len == 0 {
+        return AGENT_PALETTE[0].0;
+    }
+    let pool_idx = match current_depth {
+        0 => (subagent_seq.saturating_sub(1)) % subagent_pool_len,
+        1 => (4 + (parent_seq.saturating_sub(1)) * 2 + (subagent_seq.saturating_sub(1))) % subagent_pool_len,
+        _ => (8 + (subagent_seq.saturating_sub(1))) % subagent_pool_len,
+    };
+    AGENT_PALETTE[1 + pool_idx].0
 }
 
 /// Truncate long lines horizontally to avoid terminal blowout.
@@ -7297,6 +7330,63 @@ agent_loop:
         assert_eq!(agent_color("nano-orchestrator"), agent_color("orchestrator"));
         assert_eq!(agent_color("nano-coder"), agent_color("coder"));
         assert_eq!(agent_color("nano-custom"), agent_color("custom"));
+    }
+
+    #[test]
+    fn test_allocate_subagent_color_exclusivity() {
+        // Root orchestrator uses AGENT_PALETTE[0] ("cyan")
+        assert_eq!(AGENT_PALETTE[0].0, "cyan");
+
+        // Direct subagents (depth 0) must never get "cyan" and should be mutually exclusive
+        let sub1 = allocate_subagent_color(0, 1, 1);
+        let sub2 = allocate_subagent_color(0, 1, 2);
+        let sub3 = allocate_subagent_color(0, 1, 3);
+        let sub4 = allocate_subagent_color(0, 1, 4);
+
+        assert_eq!(sub1, "green");
+        assert_eq!(sub2, "yellow");
+        assert_eq!(sub3, "purple");
+        assert_eq!(sub4, "light_blue");
+
+        assert_ne!(sub1, "cyan");
+        assert_ne!(sub2, "cyan");
+        assert_ne!(sub3, "cyan");
+        assert_ne!(sub4, "cyan");
+
+        assert_ne!(sub1, sub2);
+        assert_ne!(sub2, sub3);
+        assert_ne!(sub3, sub4);
+
+        // Sub-subagents (depth 1) must not collide with root or direct siblings
+        let sub1_child1 = allocate_subagent_color(1, 1, 1);
+        let sub1_child2 = allocate_subagent_color(1, 1, 2);
+        let sub2_child1 = allocate_subagent_color(1, 2, 1);
+
+        assert_ne!(sub1_child1, "cyan");
+        assert_ne!(sub1_child1, sub1);
+        assert_ne!(sub1_child1, sub2);
+        assert_ne!(sub1_child1, sub1_child2);
+        assert_ne!(sub1_child1, sub2_child1);
+    }
+
+    #[test]
+    fn test_nano_worker_inherits_caller_env_color() {
+        let prev = std::env::var("AICHAT_AGENT_COLOR").ok();
+
+        // When caller is green, nano worker resolves to green
+        std::env::set_var("AICHAT_AGENT_COLOR", "green");
+        assert_eq!(current_agent_color_name("nano-summarize_text"), "green");
+        assert_eq!(agent_color("nano-summarize_text"), nu_ansi_term::Color::Green);
+
+        // When caller is yellow, nano worker resolves to yellow
+        std::env::set_var("AICHAT_AGENT_COLOR", "yellow");
+        assert_eq!(current_agent_color_name("nano-summarize_text"), "yellow");
+        assert_eq!(agent_color("nano-summarize_text"), nu_ansi_term::Color::Yellow);
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_AGENT_COLOR", v),
+            None => std::env::remove_var("AICHAT_AGENT_COLOR"),
+        }
     }
 
     #[test]
