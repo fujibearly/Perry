@@ -263,5 +263,17 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** All 505 unit tests in `aichat` passing; `cargo clippy -- -D warnings` clean; 71/71 `argc test` in `llm-functions` passing; live Demo 5 verified green in both `--wslinks` (40.6s, 0 crashes, 0 retries) and default direct grounded mode (33.9s).
       * **State:** on branch `feat/tool-safety-permission-boundary` (aichat) & `feat/fetch-url-native-html-to-markdown` (llm-functions); local-only.
 
+  23. **Session 23: Branch-Exclusive Agent Colors & Nano Caller Inheritance**
+    * **Period:** `2026-09-12`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-12-session23.md`](.kiro/docs/session-summary-2026-09-12-session23.md)
+    * **Focus Areas:**
+      * **Branch-Exclusive Agent Colors:** Eliminated inter-agent color collisions where parallel sub-agents or sub-agents and orchestrators shared the same color. Palette index 0 (`"cyan"`) is reserved exclusively for the root orchestrator.
+      * **Hierarchical Palette Stratification (`src/agent_loop.rs`):** Added `allocate_subagent_color` function partitioning `AGENT_PALETTE` so direct subagents cycle through 10 distinct non-cyan colors, while sub-subagents (`depth > 1`) are offset into higher partitions by parent sequence.
+      * **Zero-Overhead Subagent Sequence Injection:** In `eval_agent_tool_subprocess`, an atomic sequence counter (`SUBAGENT_COUNTER`) allocates colors and exports `AICHAT_AGENT_COLOR` and `AICHAT_SUBAGENT_SEQ` to children without locks or filesystem registries.
+      * **Nano-Subagent Caller Inheritance (`src/function.rs`):** Verified and reinforced that `# @meta nano true` tools inherit their invoking agent's color (`AICHAT_AGENT_COLOR = current_agent_color_name(&invoking_agent)`).
+      * **Root Orchestrator Initialization (`src/main.rs` & `src/agent_loop.rs`):** Guaranteed root process initializes `AICHAT_AGENT_COLOR = "cyan"` when unset.
+      * **Verification & Testing:** Added unit tests `test_allocate_subagent_color_exclusivity` and `test_nano_worker_inherits_caller_env_color`; all 507 unit/integration tests passing; debug build verified.
+      * **State:** on branch `feat/branch-exclusive-agent-colors`; local-only.
+
 
 
