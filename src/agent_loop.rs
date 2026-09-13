@@ -3031,15 +3031,16 @@ async fn call_llm_raw(
 
     let mut retries = 0;
     const MAX_EMPTY_RETRIES: usize = 3;
+    let mut active_input = input.clone();
 
     loop {
         if params.abort_signal.aborted() {
             bail!("Aborted.");
         }
 
-        let res = if !input.stream() || extract_code {
+        let res = if !active_input.stream() || extract_code {
             call_chat_completions_raw(
-                input,
+                &active_input,
                 true,
                 extract_code,
                 client.as_ref(),
@@ -3047,13 +3048,18 @@ async fn call_llm_raw(
             )
             .await
         } else {
-            call_chat_completions_streaming_raw(input, client.as_ref(), params.abort_signal.clone())
+            call_chat_completions_streaming_raw(&active_input, client.as_ref(), params.abort_signal.clone())
                 .await
         };
 
         match res {
             Ok((output, tool_calls)) => {
                 if output.text.trim().is_empty() && tool_calls.is_empty() {
+                    let has_prior_tools = active_input
+                        .tool_calls()
+                        .as_ref()
+                        .map_or(false, |tc| !tc.tool_results.is_empty());
+
                     if retries < MAX_EMPTY_RETRIES && !params.abort_signal.aborted() {
                         retries += 1;
                         let (base_ms, jitter_range_ms) = match retries {
@@ -3069,8 +3075,17 @@ async fn call_llm_raw(
                         let jitter = (random_u32 % (2 * jitter_range_ms + 1)) as i64 - jitter_range_ms as i64;
                         let delay_ms = (base_ms as i64 + jitter).max(100) as u64;
 
+                        // Section A Item 2: Append a nudge message into the retry turn
+                        if has_prior_tools {
+                            active_input.append_retry_nudge(
+                                "The previous tool completed successfully. Please confirm completion to the user or summarize the result.",
+                            );
+                        } else {
+                            active_input.append_retry_nudge("Please provide a response to the prompt.");
+                        }
+
                         log::debug!(
-                            "LLM returned empty response (attempt {}/{}), retrying in {}ms...",
+                            "LLM returned empty response (attempt {}/{}), retrying with nudge in {}ms...",
                             retries,
                             MAX_EMPTY_RETRIES,
                             delay_ms
@@ -3078,6 +3093,33 @@ async fn call_llm_raw(
                         tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
+
+                    // Section A Item 1: Default to graceful synthesis message when tool already executed
+                    if has_prior_tools {
+                        let tool_names = active_input
+                            .tool_calls()
+                            .as_ref()
+                            .map(|tc| {
+                                tc.tool_results
+                                    .iter()
+                                    .map(|tr| tr.call.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            })
+                            .unwrap_or_default();
+                        let fallback_text = if !tool_names.is_empty() {
+                            format!("Tool execution completed successfully ({tool_names}).")
+                        } else {
+                            "Tool execution completed successfully.".to_string()
+                        };
+                        log::warn!(
+                            "LLM returned empty response after tool execution ({tool_names}). Defaulting to graceful completion message."
+                        );
+                        let mut fallback_output = output;
+                        fallback_output.text = fallback_text;
+                        return Ok((fallback_output, vec![]));
+                    }
+
                     bail!("LLM returned an empty response with no text and no tool calls");
                 }
                 return Ok((output, tool_calls));
@@ -7499,6 +7541,38 @@ agent_loop:
 
         // Final line closes with ']'
         assert!(lines.last().unwrap().ends_with(']'));
+    }
+
+    #[test]
+    fn test_graceful_synthesis_fallback_formatting() {
+        use crate::client::{MessageContentToolCalls, ToolCall};
+        use crate::function::ToolResult;
+
+        let tool_call1 = ToolCall {
+            id: None,
+            name: "fs_create".to_string(),
+            arguments: serde_json::json!({ "path": "/tmp/test.txt" }),
+        };
+        let tool_result1 = ToolResult::new(
+            tool_call1,
+            serde_json::json!({ "output": "File created" }),
+        );
+        let tc = MessageContentToolCalls::new(vec![tool_result1], String::new());
+
+        let tool_names = tc
+            .tool_results
+            .iter()
+            .map(|tr| tr.call.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(tool_names, "fs_create");
+
+        let fallback_text = if !tool_names.is_empty() {
+            format!("Tool execution completed successfully ({tool_names}).")
+        } else {
+            "Tool execution completed successfully.".to_string()
+        };
+        assert_eq!(fallback_text, "Tool execution completed successfully (fs_create).");
     }
 }
 

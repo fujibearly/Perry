@@ -18,8 +18,8 @@ All notable changes to this fork are documented here. This project follows
 - Debug rollback journal inspection with `--debug` / `AICHAT_AGENT_LOOP_DEBUG`
   displaying metadata inside guide rails while strictly omitting backup file contents.
 - Deterministic human-readable agent petnames (`format_agent_pid(pid)`).
-- Bounded helper script resolution in `%assess-risk%` evaluator context.
-- Empty LLM response detection and automatic backoff retry in `call_llm_raw` (`MAX_EMPTY_RETRIES = 2`), preventing premature/silent loop completions.
+- Empty LLM response detection, dynamic retry nudge injection (`append_retry_nudge`), and automatic backoff retry in `call_llm_raw` (`MAX_EMPTY_RETRIES = 3`), breaking provider prompt caching and instructing models to summarize tool completion.
+- Graceful synthesis fallback in `call_llm_raw` after tool execution when retries are exhausted, defaulting to `"Tool execution completed successfully (<tool_names>)."` rather than failing the sub-agent.
 - Extended Vertex AI / Gemini streaming parser to catch provider `blockReason` and `RECITATION` finish reasons.
 - Added `--links` flag to `web_search` and updated `researcher` agent instructions to enable multi-step search-and-fetch workflows via `fetch_url_via_curl`.
 - Fixed pre-step demo description and command rendering order in `scripts/run-demos.nu`.

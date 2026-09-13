@@ -148,6 +148,60 @@ impl Input {
         &self.tool_calls
     }
 
+    pub fn tool_calls_mut(&mut self) -> &mut Option<MessageContentToolCalls> {
+        &mut self.tool_calls
+    }
+
+    /// Append a retry nudge instruction to the input when an LLM call returns empty.
+    /// If tool calls exist, annotates the last tool result output so that providers' prompt
+    /// caches are bypassed and the model receives an explicit directive to summarize or confirm.
+    /// If no tool calls exist, appends a brief prompt directive to the text.
+    pub fn append_retry_nudge(&mut self, nudge: &str) {
+        if let Some(tool_calls) = self.tool_calls_mut().as_mut() {
+            if let Some(last_result) = tool_calls.tool_results.last_mut() {
+                match &mut last_result.output {
+                    serde_json::Value::String(s) => {
+                        if !s.contains("[Instruction:") {
+                            s.push_str("\n\n[Instruction: ");
+                            s.push_str(nudge);
+                            s.push(']');
+                        }
+                    }
+                    serde_json::Value::Object(map) => {
+                        if let Some(serde_json::Value::String(s)) = map.get_mut("output") {
+                            if !s.contains("[Instruction:") {
+                                s.push_str("\n\n[Instruction: ");
+                                s.push_str(nudge);
+                                s.push(']');
+                            }
+                        } else if !map.contains_key("_instruction") {
+                            map.insert(
+                                "_instruction".to_string(),
+                                serde_json::Value::String(nudge.to_string()),
+                            );
+                        }
+                    }
+                    other => {
+                        *other = serde_json::json!({
+                            "result": other.clone(),
+                            "_instruction": nudge,
+                        });
+                    }
+                }
+            }
+        } else {
+            let target = match self.patched_text.as_mut() {
+                Some(pt) => pt,
+                None => &mut self.text,
+            };
+            if !target.contains("[Instruction:") {
+                target.push_str("\n\n[Instruction: ");
+                target.push_str(nudge);
+                target.push(']');
+            }
+        }
+    }
+
     pub fn text(&self) -> String {
         match self.patched_text.clone() {
             Some(text) => text,
@@ -676,5 +730,61 @@ mod media_tests {
         let path = path.to_string_lossy();
         let error = read_media_to_data_url(&path).await.unwrap_err();
         assert!(error.to_string().contains(path.as_ref()));
+    }
+
+    #[test]
+    fn test_append_retry_nudge_with_tool_results_string_and_object() {
+        use crate::client::{MessageContentToolCalls, ToolCall};
+        use crate::function::ToolResult;
+
+        let config = crate::config::GlobalConfig::default();
+        let mut input = Input::from_str(&config, "Write file", None);
+
+        // Initially no tool calls, nudge appends to text
+        input.append_retry_nudge("Please respond.");
+        assert!(input.text().contains("[Instruction: Please respond.]"));
+
+        // Idempotency: second call does not duplicate
+        input.append_retry_nudge("Please respond.");
+        assert_eq!(input.text().matches("[Instruction:").count(), 1);
+
+        // With tool calls: String output
+        let tool_call = ToolCall {
+            id: None,
+            name: "fs_write".to_string(),
+            arguments: serde_json::json!({ "path": "/tmp/test.txt" }),
+        };
+        let tool_result = ToolResult::new(
+            tool_call.clone(),
+            serde_json::Value::String("File written successfully.".to_string()),
+        );
+        input.tool_calls = Some(MessageContentToolCalls::new(vec![tool_result], String::new()));
+
+        input.append_retry_nudge("Please confirm completion.");
+        let tc = input.tool_calls().as_ref().unwrap();
+        match &tc.tool_results[0].output {
+            serde_json::Value::String(s) => {
+                assert!(s.contains("File written successfully."));
+                assert!(s.contains("[Instruction: Please confirm completion.]"));
+            }
+            _ => panic!("Expected string output"),
+        }
+
+        // With tool calls: Object output with "output" field
+        let tool_result_obj = ToolResult::new(
+            tool_call,
+            serde_json::json!({ "output": "File created: /tmp/a.txt\n" }),
+        );
+        input.tool_calls = Some(MessageContentToolCalls::new(vec![tool_result_obj], String::new()));
+        input.append_retry_nudge("Confirm to user.");
+        let tc2 = input.tool_calls().as_ref().unwrap();
+        match &tc2.tool_results[0].output {
+            serde_json::Value::Object(map) => {
+                let out_str = map.get("output").and_then(|v| v.as_str()).unwrap();
+                assert!(out_str.contains("File created: /tmp/a.txt"));
+                assert!(out_str.contains("[Instruction: Confirm to user.]"));
+            }
+            _ => panic!("Expected object output"),
+        }
     }
 }

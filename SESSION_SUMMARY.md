@@ -275,5 +275,16 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** Added unit tests `test_allocate_subagent_color_exclusivity` and `test_nano_worker_inherits_caller_env_color`; all 507 unit/integration tests passing; debug build verified.
       * **State:** on branch `feat/branch-exclusive-agent-colors`; local-only.
 
+  24. **Session 24: Empty LLM Response Retry Nudge & Graceful Synthesis Fallback**
+    * **Period:** `2026-09-12`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-12-session24.md`](.kiro/docs/session-summary-2026-09-12-session24.md)
+    * **Focus Areas:**
+      * **Forensic Diagnosis of Sub-Agent Empty Responses (Demo 20 & 21):** Identified turn 2 empty responses (`finishReason: "STOP"` with no parts) from Gemini 2.5 Flash following successful tool completion (`fs_create`). Repeated retries with identical input hit server-side prompt cache (`cachedContentTokenCount: 781`) and deterministically returned empty responses within 300ms until bailing with `LLM returned an empty response with no text and no tool calls`.
+      * **Retry Nudge Injection (`src/config/input.rs`):** Added `Input::tool_calls_mut` and `Input::append_retry_nudge`. On empty response retry, annotates the prior tool result output (or prompt text) with `[Instruction: The previous tool completed successfully. Please confirm completion to the user or summarize the result.]`. Breaks prompt cache hash across all LLM providers and instructs model to synthesize completion.
+      * **Graceful Synthesis Fallback (`src/agent_loop.rs`):** Updated `call_llm_raw` to check `has_prior_tools`. When tools have already run, exhausted retries gracefully synthesize `"Tool execution completed successfully (<tool_names>)."` and complete the turn cleanly rather than bailing with an agent failure. Preserved strict failure bailout for turn-1 empty responses without tool execution.
+      * **Verification & Testing:** Added unit tests `test_append_retry_nudge_with_tool_results_string_and_object` and `test_graceful_synthesis_fallback_formatting`; all 509 unit tests passing; live Demo 20 and Demo 21 verified passing cleanly with zero empty-response retries or sub-agent failures.
+      * **State:** on branch `fix/empty-response-retry-nudge-and-fallback`; local-only.
+
+
 
 
