@@ -285,6 +285,15 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** Added unit tests `test_append_retry_nudge_with_tool_results_string_and_object` and `test_graceful_synthesis_fallback_formatting`; all 509 unit tests passing; live Demo 20 and Demo 21 verified passing cleanly with zero empty-response retries or sub-agent failures.
       * **State:** on branch `fix/empty-response-retry-nudge-and-fallback`; local-only.
 
-
-
-
+  25. **Session 25: Comprehensive Prompt & Model Observability Across All Execution Paths**
+    * **Period:** `2026-09-14`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-14-session25.md`](.kiro/docs/session-summary-2026-09-14-session25.md)
+    * **Focus Areas:**
+      * **Centralized DialogTraceSink Architecture:** Built an unbounded, asynchronous trace sink in `src/agent_loop/dialog_trace.rs` with monotonic sequence tracking, exit drain guarantees, and destination control (`AICHAT_DIALOG_OUTPUT=stderr|tty`).
+      * **Cross-Process Relay Framing (`RELAY_FRAME_PREFIX`):** Implemented length-delimited JSON relay framing over stderr for generic shell tools (`run_llm_function`) and subagents, with concurrent pipe draining to prevent OS buffer stalls.
+      * **Universal Model Attribution:** Wired configured model (`@ <model>`) and wire model (`[wire: <model>]`) badges across all dialog headers for root agents, subagents, nanoworkers, and internal safety evaluators (`%assess-risk%`).
+      * **Semantic History Folding & Payload Capping:** Collapsed unchanged system instructions on turns > 1 (`[system: <N> lines instructions unchanged]`), dimmed prior history, highlighted delta inputs (`⚡ [new: ...]`), and capped large outputs to top/bottom 20 lines.
+      * **Universal Observability Expansion:** Extended dialog tracing to session autonaming (`%create-title%`), context compression (`%summarize-session%`), natural language shell execution (`%shell%`), and OpenAI Responses API multi-agent continuations.
+      * **CLI Aliases & Demo Runner Integration:** Added `--dialog` (`--show-dialog`) and `--no-truncate` (`--dialog-no-truncate`) CLI aliases and mapped them into `scripts/run-demos.nu`.
+      * **Verification & Testing:** All 516 unit/integration tests passing; full live demo suite verified green across Demos 1, 2, 3, 4, 5, and 5b.
+      * **State:** on branch `feat/dialog-observability-all-prompts-and-models` @ `3a1bf79`; local-only.
