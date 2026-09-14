@@ -809,9 +809,14 @@ impl ToolCall {
             );
         };
 
+        if config.read().agent_loop.show_dialog {
+            envs.insert("AICHAT_DIALOG_RELAY".into(), "stderr".into());
+        }
+
         cmd_args.push(json_data.to_string());
 
-        let output = match run_llm_function(cmd_name, cmd_args, envs)? {
+        let dialog_sink = config.read().dialog_sink();
+        let output = match run_llm_function(cmd_name, cmd_args, envs, dialog_sink)? {
             Some(contents) => serde_json::from_str(&contents)
                 .ok()
                 .unwrap_or_else(|| json!({"output": contents})),
@@ -868,6 +873,7 @@ pub fn run_llm_function(
     cmd_name: String,
     cmd_args: Vec<String>,
     mut envs: HashMap<String, String>,
+    dialog_sink: Option<std::sync::Arc<crate::agent_loop::dialog_trace::DialogTraceSink>>,
 ) -> Result<Option<String>> {
     let prompt = format!("Call {cmd_name} {}", cmd_args.join(" "));
 
@@ -897,9 +903,17 @@ pub fn run_llm_function(
     }
     let (success, stdout, stderr) = run_command_with_output(&cmd_name, &cmd_args, Some(envs))
         .map_err(|err| anyhow!("Unable to run {cmd_name}, {err}"))?;
+
+    let (relay_events, clean_stderr) = crate::agent_loop::dialog_trace::parse_relay_frames(&stderr);
+    if let Some(sink) = &dialog_sink {
+        for event in relay_events {
+            sink.emit(event);
+        }
+    }
+
     if !success {
-        let err_msg = if !stderr.trim().is_empty() {
-            stderr.trim().to_string()
+        let err_msg = if !clean_stderr.trim().is_empty() {
+            clean_stderr.trim().to_string()
         } else if !stdout.trim().is_empty() {
             stdout.trim().to_string()
         } else {
@@ -1395,5 +1409,48 @@ mod tests {
         }))
         .unwrap();
         assert!(!regular_decl.is_nano());
+    }
+
+    #[test]
+    fn test_run_llm_function_relays_dialog_frames_and_cleans_errors() {
+        use crate::agent_loop::dialog_trace::{DialogEvent, DialogSource, DialogTraceSink, format_relay_frame};
+        use crate::agent_loop::DialogDirection;
+        use std::collections::HashMap;
+
+        let (sink, mut rx) = DialogTraceSink::new();
+
+        let event = DialogEvent {
+            sequence: 1,
+            trace_id: "relay-test".into(),
+            agent: "sub-tool".into(),
+            configured_model: "gpt-4o".into(),
+            wire_model: None,
+            pid: 999,
+            turn: 1,
+            max_turns: 10,
+            direction: DialogDirection::Request,
+            source: DialogSource::GenericTool,
+            content: "internal prompt".into(),
+        };
+        let frame = format_relay_frame(&event).unwrap();
+
+        let script = format!("printf '%s' '{frame}' >&2\necho 'real failure' >&2\nexit 1");
+
+        let res = run_llm_function(
+            "sh".to_string(),
+            vec!["-c".to_string(), script],
+            HashMap::new(),
+            Some(sink),
+        );
+
+        assert!(res.is_err());
+        let err_str = res.unwrap_err().to_string();
+        assert!(err_str.contains("real failure"));
+        assert!(!err_str.contains("__AICHAT_DIALOG_EVENT__"));
+
+        let received = rx.try_recv().expect("received event");
+        assert_eq!(received.trace_id, "relay-test");
+        assert_eq!(received.agent, "sub-tool");
+        assert_eq!(received.content, "internal prompt");
     }
 }

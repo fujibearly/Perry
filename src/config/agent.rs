@@ -349,6 +349,7 @@ impl Agent {
             self.name().to_string(),
             vec!["_instructions".into(), "{}".into()],
             self.variable_envs(),
+            None,
         )?;
         match value {
             Some(v) => Ok(v),

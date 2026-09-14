@@ -44,10 +44,10 @@ pub struct Cli {
     #[clap(long)]
     pub show_agent_trace: bool,
     /// Display full prompt and response dialog trace
-    #[clap(long)]
+    #[clap(long, alias = "dialog")]
     pub show_dialog: bool,
     /// Do not truncate dialog trace payloads
-    #[clap(long)]
+    #[clap(long, alias = "no-truncate")]
     pub dialog_no_truncate: bool,
     /// Display debug journal details and verbose agent execution
     #[clap(long, alias = "agent-debug")]

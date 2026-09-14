@@ -176,6 +176,29 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if cli.dialog_no_truncate {
         config.write().agent_loop.dialog_no_truncate = true;
     }
+    let show_dialog = config.read().agent_loop.show_dialog;
+    std::env::set_var(
+        "AICHAT_AGENT_LOOP_SHOW_DIALOG",
+        if show_dialog { "true" } else { "false" },
+    );
+    let dialog_no_truncate = config.read().agent_loop.dialog_no_truncate;
+    std::env::set_var(
+        "AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE",
+        if dialog_no_truncate { "true" } else { "false" },
+    );
+
+    let _dialog_sink_task = if show_dialog {
+        let (sink, mut rx) = crate::agent_loop::DialogTraceSink::new();
+        config.write().set_dialog_sink(sink);
+        Some(tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                crate::agent_loop::render_dialog_event(&event);
+            }
+        }))
+    } else {
+        None
+    };
+
     if cli.debug {
         config.write().agent_loop.debug = true;
         std::env::set_var("AICHAT_AGENT_LOOP_DEBUG", "true");
@@ -260,28 +283,34 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
         macro_execute(&config, name, text.as_deref(), abort_signal.clone()).await?;
         return Ok(());
     }
-    if cli.execute && !is_repl {
+    let res = if cli.execute && !is_repl {
         let input = create_input(&config, text, &files, abort_signal.clone()).await?;
-        shell_execute(&config, &SHELL, input, abort_signal.clone()).await?;
-        return Ok(());
-    }
-    config.write().apply_prelude()?;
-    if config.read().multi_agent.enabled && config.read().session.is_some() {
-        bail!("Responses multi-agent mode does not support sessions opened by command preludes");
-    }
-    match is_repl {
-        false => {
-            let mut input = create_input(&config, text, &files, abort_signal.clone()).await?;
-            input.use_embeddings(abort_signal.clone()).await?;
-            start_directive(&config, input, cli.code, abort_signal).await
+        shell_execute(&config, &SHELL, input, abort_signal.clone()).await
+    } else {
+        config.write().apply_prelude()?;
+        if config.read().multi_agent.enabled && config.read().session.is_some() {
+            bail!("Responses multi-agent mode does not support sessions opened by command preludes");
         }
-        true => {
-            if !*IS_STDOUT_TERMINAL {
-                bail!("No TTY for REPL")
+        match is_repl {
+            false => {
+                let mut input = create_input(&config, text, &files, abort_signal.clone()).await?;
+                input.use_embeddings(abort_signal.clone()).await?;
+                start_directive(&config, input, cli.code, abort_signal).await
             }
-            start_interactive(&config).await
+            true => {
+                if !*IS_STDOUT_TERMINAL {
+                    bail!("No TTY for REPL")
+                }
+                start_interactive(&config).await
+            }
         }
+    };
+
+    if let Some(task) = _dialog_sink_task {
+        drop(config.write().dialog_sink.take());
+        let _ = tokio::time::timeout(Duration::from_millis(500), task).await;
     }
+    res
 }
 
 fn configure_multi_agent(config: &GlobalConfig, cli: &Cli) -> Result<()> {
@@ -645,11 +674,56 @@ async fn shell_execute(
     abort_signal: AbortSignal,
 ) -> Result<()> {
     let client = input.create_client()?;
+    let show_dialog = config.read().agent_loop.show_dialog;
+    let no_truncate = config.read().agent_loop.dialog_no_truncate;
+    let dialog_sink = config.read().dialog_sink();
+    let model_id = client.model().id().to_string();
+
+    if show_dialog {
+        let prompt_content = match input.build_messages() {
+            Ok(msgs) => crate::agent_loop::format_messages_dialog(&msgs, no_truncate),
+            Err(_) => input.text().to_string(),
+        };
+        if let Some(sink) = &dialog_sink {
+            sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                sequence: 0,
+                trace_id: "shell-execute".into(),
+                source: crate::agent_loop::dialog_trace::DialogSource::ShellExecute,
+                agent: "shell".into(),
+                configured_model: model_id.clone(),
+                wire_model: None,
+                pid: std::process::id(),
+                turn: 1,
+                max_turns: 1,
+                direction: crate::agent_loop::DialogDirection::Request,
+                content: prompt_content,
+            });
+        }
+    }
+
     config.write().before_chat_completion(&input)?;
     let (output, _) =
         call_chat_completions(&input, false, true, client.as_ref(), abort_signal.clone()).await?;
     let usage = output.usage();
     let eval_str = output.text;
+
+    if show_dialog {
+        if let Some(sink) = &dialog_sink {
+            sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                sequence: 0,
+                trace_id: "shell-execute".into(),
+                source: crate::agent_loop::dialog_trace::DialogSource::ShellExecute,
+                agent: "shell".into(),
+                configured_model: model_id,
+                wire_model: None,
+                pid: std::process::id(),
+                turn: 1,
+                max_turns: 1,
+                direction: crate::agent_loop::DialogDirection::Response,
+                content: eval_str.clone(),
+            });
+        }
+    }
 
     config
         .write()
@@ -703,7 +777,32 @@ async fn shell_execute(
                 }
                 'd' => {
                     let role = config.read().retrieve_role(EXPLAIN_SHELL_ROLE)?;
+                    let explain_model = role
+                        .model_id()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| client.model().id());
                     let input = Input::from_str(config, &eval_str, Some(role));
+                    if show_dialog {
+                        let prompt_content = match input.build_messages() {
+                            Ok(msgs) => crate::agent_loop::format_messages_dialog(&msgs, no_truncate),
+                            Err(_) => eval_str.clone(),
+                        };
+                        if let Some(sink) = &dialog_sink {
+                            sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                                sequence: 0,
+                                trace_id: "explain-shell".into(),
+                                source: crate::agent_loop::dialog_trace::DialogSource::ShellExecute,
+                                agent: "explain-shell".into(),
+                                configured_model: explain_model.clone(),
+                                wire_model: None,
+                                pid: std::process::id(),
+                                turn: 1,
+                                max_turns: 1,
+                                direction: crate::agent_loop::DialogDirection::Request,
+                                content: prompt_content,
+                            });
+                        }
+                    }
                     let (description, _) = if input.stream() {
                         call_chat_completions_streaming(
                             &input,
@@ -721,6 +820,23 @@ async fn shell_execute(
                         )
                         .await?
                     };
+                    if show_dialog {
+                        if let Some(sink) = &dialog_sink {
+                            sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                                sequence: 0,
+                                trace_id: "explain-shell".into(),
+                                source: crate::agent_loop::dialog_trace::DialogSource::ShellExecute,
+                                agent: "explain-shell".into(),
+                                configured_model: explain_model,
+                                wire_model: None,
+                                pid: std::process::id(),
+                                turn: 1,
+                                max_turns: 1,
+                                direction: crate::agent_loop::DialogDirection::Response,
+                                content: description.text.clone(),
+                            });
+                        }
+                    }
                     if config.read().show_cost {
                         eprintln!("{}", format_usage_cost(client.model(), description.usage()));
                     }

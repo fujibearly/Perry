@@ -25,6 +25,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use serde::{Deserialize, Serialize};
+
+pub mod dialog_trace;
+pub use dialog_trace::*;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -46,7 +50,7 @@ pub struct AgentLoopOutput {
     pub final_text: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DialogDirection {
     Request,
     Response,
@@ -62,6 +66,7 @@ pub enum AgentLoopEvent {
     },
     DialogBlock {
         agent: String,
+        model: Option<String>,
         pid: u32,
         turn: usize,
         max_turns: usize,
@@ -1315,6 +1320,7 @@ async fn run_risk_evaluator(
     }
 
     let input = Input::from_str(config, context, Some(role.to_role()));
+    let model_name = role.model().id().to_string();
     let show_dialog = config.read().agent_loop.show_dialog;
     let no_truncate = config.read().agent_loop.dialog_no_truncate;
     let pid = std::process::id();
@@ -1326,6 +1332,7 @@ async fn run_risk_evaluator(
         if let Some(p) = progress {
             p.emit(AgentLoopEvent::DialogBlock {
                 agent: ASSESS_RISK_ROLE.to_string(),
+                model: Some(model_name.clone()),
                 pid,
                 turn: 1,
                 max_turns: 1,
@@ -1333,8 +1340,9 @@ async fn run_risk_evaluator(
                 content: prompt_display,
             });
         } else {
-            emit_dialog_block(
+            emit_dialog_block_with_model(
                 ASSESS_RISK_ROLE,
+                &model_name,
                 pid,
                 1,
                 1,
@@ -1351,6 +1359,7 @@ async fn run_risk_evaluator(
                 if let Some(p) = progress {
                     p.emit(AgentLoopEvent::DialogBlock {
                         agent: ASSESS_RISK_ROLE.to_string(),
+                        model: Some(model_name.clone()),
                         pid,
                         turn: 1,
                         max_turns: 1,
@@ -1358,8 +1367,9 @@ async fn run_risk_evaluator(
                         content: response_content.clone(),
                     });
                 } else {
-                    emit_dialog_block(
+                    emit_dialog_block_with_model(
                         ASSESS_RISK_ROLE,
+                        &model_name,
                         pid,
                         1,
                         1,
@@ -1375,6 +1385,7 @@ async fn run_risk_evaluator(
                 if let Some(p) = progress {
                     p.emit(AgentLoopEvent::DialogBlock {
                         agent: ASSESS_RISK_ROLE.to_string(),
+                        model: Some(model_name.clone()),
                         pid,
                         turn: 1,
                         max_turns: 1,
@@ -1382,8 +1393,9 @@ async fn run_risk_evaluator(
                         content: err_msg,
                     });
                 } else {
-                    emit_dialog_block(
+                    emit_dialog_block_with_model(
                         ASSESS_RISK_ROLE,
+                        &model_name,
                         pid,
                         1,
                         1,
@@ -2222,21 +2234,53 @@ async fn eval_agent_tool_subprocess(
         cmd.env("AICHAT_CONFIG_DIR", config_dir);
     }
 
+    if config.read().agent_loop.show_dialog {
+        cmd.env("AICHAT_DIALOG_RELAY", "stderr");
+        cmd.env("AICHAT_AGENT_LOOP_SHOW_DIALOG", "true");
+        if config.read().agent_loop.dialog_no_truncate {
+            cmd.env("AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE", "true");
+        }
+    }
+
     // Capture stdout/stderr
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    // 5. Run and wait
-    let child = cmd.spawn()?;
+    // 5. Run and wait with concurrent pipe draining to prevent deadlocks
+    let mut child = cmd.spawn()?;
     let _pid = child.id().unwrap_or(0);
-    let output = child.wait_with_output().await?;
+
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+
+    let stdout_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut buf).await;
+        buf
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        let mut buf = Vec::new();
+        let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut buf).await;
+        buf
+    });
+
+    let status = child.wait().await?;
+    let stdout_bytes = stdout_task.await.unwrap_or_default();
+    let stderr_bytes = stderr_task.await.unwrap_or_default();
 
     // 6. Return result + parse sub-agent cost from stderr
-    let stderr_text = String::from_utf8_lossy(&output.stderr).to_string();
-    let sub_cost = parse_cost_from_stderr(&stderr_text);
+    let stderr_text = String::from_utf8_lossy(&stderr_bytes).to_string();
+    let (relay_events, clean_stderr) = crate::agent_loop::dialog_trace::parse_relay_frames(&stderr_text);
+    if let Some(sink) = config.read().dialog_sink() {
+        for event in relay_events {
+            sink.emit(event);
+        }
+    }
+    let sub_cost = parse_cost_from_stderr(&clean_stderr);
 
-    if output.status.success() {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if status.success() {
+        let text = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
         let parsed_json = serde_json::from_str::<serde_json::Value>(&text)
             .ok()
             .or_else(|| {
@@ -2290,14 +2334,14 @@ async fn eval_agent_tool_subprocess(
         }
         Ok((json!({"output": text}), sub_cost))
     } else {
-        let message = if stderr_text.trim().is_empty() {
+        let message = if clean_stderr.trim().is_empty() {
             format!(
                 "Sub-agent '{}' exited with code {:?}",
                 agent_name,
-                output.status.code()
+                status.code()
             )
         } else {
-            stderr_text.trim().to_string()
+            clean_stderr.trim().to_string()
         };
         Ok((json!({
             "error": {
@@ -2684,6 +2728,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             };
             params.progress.emit(AgentLoopEvent::DialogBlock {
                 agent: agent_name.clone(),
+                model: Some(model.id().to_string()),
                 pid,
                 turn,
                 max_turns,
@@ -2701,6 +2746,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                     let response_display = format_llm_response(&val.0, &val.1, no_truncate);
                     params.progress.emit(AgentLoopEvent::DialogBlock {
                         agent: agent_name.clone(),
+                        model: Some(model.id().to_string()),
                         pid,
                         turn,
                         max_turns,
@@ -2714,6 +2760,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                 if params.config.read().agent_loop.show_dialog {
                     params.progress.emit(AgentLoopEvent::DialogBlock {
                         agent: agent_name.clone(),
+                        model: Some(model.id().to_string()),
                         pid,
                         turn,
                         max_turns,
@@ -3170,7 +3217,6 @@ async fn call_llm_raw(
 // ---------------------------------------------------------------------------
 
 use crate::config::AgentLoopConfig;
-use serde::Serialize;
 use std::io::Write;
 
 /// Helper to identify the executing agent for trace / dialog observability.
@@ -3370,6 +3416,48 @@ pub fn format_response_text_with_blockquotes(text: &str) -> String {
     lines.join("\n")
 }
 
+/// Determine if a tool result Value represents an execution failure.
+pub fn is_tool_result_error(output: &serde_json::Value) -> bool {
+    if let Some(obj) = output.as_object() {
+        if obj.contains_key("error") {
+            return true;
+        }
+        if obj.get("success").and_then(|v| v.as_bool()) == Some(false) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Format a folded summary line for an entry in conversation history.
+pub fn fold_history_payload(
+    role: &crate::client::MessageRole,
+    name: Option<&str>,
+    is_error: bool,
+    text: &str,
+) -> String {
+    let lines = text.lines().count();
+    match role {
+        crate::client::MessageRole::Tool => {
+            let error_indicator = if is_error { " — error" } else { "" };
+            format!(
+                "[history: tool_result {} — {lines} lines folded{}]",
+                name.unwrap_or("unknown"),
+                error_indicator
+            )
+        }
+        crate::client::MessageRole::Assistant => {
+            format!("[history: assistant response — {lines} lines folded]")
+        }
+        crate::client::MessageRole::User => {
+            format!("[history: user prompt — {lines} lines folded]")
+        }
+        crate::client::MessageRole::System => {
+            format!("[history: system prompt — {lines} lines folded]")
+        }
+    }
+}
+
 /// Format messages submitted to LLM for dialog observability trace with turn awareness and semantic styling.
 pub fn format_messages_dialog_with_turn(
     messages: &[crate::client::Message],
@@ -3463,12 +3551,18 @@ pub fn format_messages_dialog_with_turn(
                     _ => String::new(),
                 };
                 if is_history {
-                    let badge = format!(
-                        "[{}: {}]",
-                        ESCALATION_COLOR.bold().paint("history"),
-                        nu_ansi_term::Color::Yellow.bold().paint("assistant")
-                    );
-                    (badge, nu_ansi_term::Color::DarkGray.paint(&text).to_string())
+                    let line_count = text.lines().count();
+                    if !no_truncate && line_count > 3 {
+                        let folded = fold_history_payload(&MessageRole::Assistant, None, false, &text);
+                        (nu_ansi_term::Color::DarkGray.paint(&folded).to_string(), String::new())
+                    } else {
+                        let badge = format!(
+                            "[{}: {}]",
+                            ESCALATION_COLOR.bold().paint("history"),
+                            nu_ansi_term::Color::Yellow.bold().paint("assistant")
+                        );
+                        (badge, nu_ansi_term::Color::DarkGray.paint(&text).to_string())
+                    }
                 } else if turn > 1 {
                     let badge = format!(
                         "{} {}",
@@ -3486,12 +3580,18 @@ pub fn format_messages_dialog_with_turn(
                     _ => String::new(),
                 };
                 if is_history {
-                    let badge = format!(
-                        "[{}: {}]",
-                        ESCALATION_COLOR.bold().paint("history"),
-                        nu_ansi_term::Color::Magenta.bold().paint("tool")
-                    );
-                    (badge, nu_ansi_term::Color::DarkGray.paint(&text).to_string())
+                    let line_count = text.lines().count();
+                    if !no_truncate && line_count > 3 {
+                        let folded = fold_history_payload(&MessageRole::Tool, None, false, &text);
+                        (nu_ansi_term::Color::DarkGray.paint(&folded).to_string(), String::new())
+                    } else {
+                        let badge = format!(
+                            "[{}: {}]",
+                            ESCALATION_COLOR.bold().paint("history"),
+                            nu_ansi_term::Color::Magenta.bold().paint("tool")
+                        );
+                        (badge, nu_ansi_term::Color::DarkGray.paint(&text).to_string())
+                    }
                 } else {
                     let badge = format!(
                         "{} {}",
@@ -3525,11 +3625,18 @@ pub fn format_messages_dialog_with_turn(
                 };
                 let truncated_output = truncate_payload_dialog(&output_str, 20, 20, no_truncate);
                 if is_history {
-                    parts.push(format!(
-                        "{} {}",
-                        nu_ansi_term::Color::DarkGray.paint(format!("tool_result: {} ->", res.call.name)),
-                        nu_ansi_term::Color::DarkGray.paint(&truncated_output)
-                    ));
+                    let line_count = output_str.lines().count();
+                    if !no_truncate && line_count > 3 {
+                        let is_err = is_tool_result_error(&res.output);
+                        let folded = fold_history_payload(&MessageRole::Tool, Some(&res.call.name), is_err, &output_str);
+                        parts.push(nu_ansi_term::Color::DarkGray.paint(&folded).to_string());
+                    } else {
+                        parts.push(format!(
+                            "{} {}",
+                            nu_ansi_term::Color::DarkGray.paint(format!("tool_result: {} ->", res.call.name)),
+                            nu_ansi_term::Color::DarkGray.paint(&truncated_output)
+                        ));
+                    }
                 } else {
                     let badge = format!(
                         "{} {}",
@@ -3970,9 +4077,11 @@ pub fn format_agent_pid(pid: u32) -> String {
     format!("{pid} ({})", petname_for_pid(pid))
 }
 
-/// Format a dialog trace block for rendering with hierarchical guide rails, asymmetric framing, and responsive soft-wrapping.
-pub fn format_dialog_block(
+/// Format a dialog trace block for rendering with hierarchical guide rails, asymmetric framing, model attribution, and responsive soft-wrapping.
+pub fn format_dialog_block_with_model(
     agent: &str,
+    configured_model: &str,
+    wire_model: Option<&str>,
     pid: u32,
     turn: usize,
     max_turns: usize,
@@ -4003,7 +4112,12 @@ pub fn format_dialog_block(
 
     let pid_str = format_agent_pid(pid);
     let colored_pid_str = color.paint(&pid_str).to_string();
-    let header_title = format!("{icon} [{colored_pid_str} {colored_agent} [turn {turn}/{max_turns}] {}]", dir_color.bold().paint(dir_str));
+    let model_tag = if !configured_model.is_empty() {
+        format!(" @ {}", nu_ansi_term::Color::Yellow.paint(configured_model))
+    } else {
+        String::new()
+    };
+    let header_title = format!("{icon} [{colored_pid_str} {colored_agent}{model_tag} [turn {turn}/{max_turns}] {}]", dir_color.bold().paint(dir_str));
     let outer_indent_width = depth * 6;
     let title_vis_width = visible_width(&header_title);
     let top_prefix_width = outer_indent_width + 4; // for "┌── "
@@ -4023,6 +4137,12 @@ pub fn format_dialog_block(
     let footer_bar = format!("{outer_indent}└── {footer_dashes}");
 
     let mut indented_lines = Vec::new();
+    if let Some(wire) = wire_model {
+        if !wire.is_empty() && wire != configured_model {
+            let wire_annot = format!("wire: {}", nu_ansi_term::Color::DarkGray.paint(wire));
+            indented_lines.push(format!("{line_prefix}{wire_annot}"));
+        }
+    }
     for raw_line in content.lines() {
         if raw_line.is_empty() {
             indented_lines.push(line_prefix.clone());
@@ -4041,6 +4161,32 @@ pub fn format_dialog_block(
     )
 }
 
+/// Format a dialog trace block for rendering with hierarchical guide rails, asymmetric framing, and responsive soft-wrapping.
+pub fn format_dialog_block(
+    agent: &str,
+    pid: u32,
+    turn: usize,
+    max_turns: usize,
+    direction: DialogDirection,
+    content: &str,
+) -> String {
+    format_dialog_block_with_model(agent, "", None, pid, turn, max_turns, direction, content)
+}
+
+/// Format a DialogEvent from the centralized DialogTraceSink.
+pub fn format_dialog_event(event: &DialogEvent) -> String {
+    format_dialog_block_with_model(
+        &event.agent,
+        &event.configured_model,
+        event.wire_model.as_deref(),
+        event.pid,
+        event.turn,
+        event.max_turns,
+        event.direction,
+        &event.content,
+    )
+}
+
 /// Write a complete block or line of output to `/dev/tty` (or stderr) in a single atomic
 /// write syscall, guaranteeing that concurrent subprocesses writing to the same terminal
 /// cannot interleave between the output text and its trailing newline.
@@ -4051,18 +4197,60 @@ pub fn write_atomic_terminal_output(output: &str) {
     if !buf.ends_with(b"\n") {
         buf.push(b'\n');
     }
-    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-        let _ = tty.write_all(&buf);
-        let _ = tty.flush();
-    } else {
-        let mut stderr = std::io::stderr().lock();
-        let _ = stderr.write_all(&buf);
-        let _ = stderr.flush();
+    match dialog_output_destination() {
+        DialogOutputDestination::Stderr => {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(&buf);
+            let _ = stderr.flush();
+        }
+        DialogOutputDestination::Terminal => {
+            if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                let _ = tty.write_all(&buf);
+                let _ = tty.flush();
+            } else {
+                let mut stderr = std::io::stderr().lock();
+                let _ = stderr.write_all(&buf);
+                let _ = stderr.flush();
+            }
+        }
+    }
+}
+
+/// Emit raw dialog block text respecting dialog_output_destination().
+pub fn emit_dialog_block_raw(block: &str) {
+    match dialog_output_destination() {
+        DialogOutputDestination::Stderr => {
+            use std::io::Write;
+            let mut stderr = std::io::stderr().lock();
+            let mut buf = Vec::with_capacity(block.len() + 1);
+            buf.extend_from_slice(block.as_bytes());
+            if !buf.ends_with(b"\n") {
+                buf.push(b'\n');
+            }
+            let _ = stderr.write_all(&buf);
+            let _ = stderr.flush();
+        }
+        DialogOutputDestination::Terminal => {
+            if *IS_STDOUT_TERMINAL {
+                use std::io::Write;
+                let mut stderr = std::io::stderr().lock();
+                let mut buf = Vec::with_capacity(block.len() + 1);
+                buf.extend_from_slice(block.as_bytes());
+                if !buf.ends_with(b"\n") {
+                    buf.push(b'\n');
+                }
+                let _ = stderr.write_all(&buf);
+                let _ = stderr.flush();
+            } else {
+                write_atomic_terminal_output(block);
+            }
+        }
     }
 }
 
 /// Emit a dialog trace block to /dev/tty (live terminal) or stderr.
 /// Used for standalone invocations where no AgentLoopProgress channel is attached.
+#[allow(dead_code)]
 pub fn emit_dialog_block(
     agent: &str,
     pid: u32,
@@ -4072,19 +4260,21 @@ pub fn emit_dialog_block(
     content: &str,
 ) {
     let block = format_dialog_block(agent, pid, turn, max_turns, direction, content);
-    if *IS_STDOUT_TERMINAL {
-        use std::io::Write;
-        let mut stderr = std::io::stderr().lock();
-        let mut buf = Vec::with_capacity(block.len() + 1);
-        buf.extend_from_slice(block.as_bytes());
-        if !buf.ends_with(b"\n") {
-            buf.push(b'\n');
-        }
-        let _ = stderr.write_all(&buf);
-        let _ = stderr.flush();
-    } else {
-        write_atomic_terminal_output(&block);
-    }
+    emit_dialog_block_raw(&block);
+}
+
+/// Emit a dialog trace block with model attribution to /dev/tty (live terminal) or stderr.
+pub fn emit_dialog_block_with_model(
+    agent: &str,
+    model: &str,
+    pid: u32,
+    turn: usize,
+    max_turns: usize,
+    direction: DialogDirection,
+    content: &str,
+) {
+    let block = format_dialog_block_with_model(agent, model, None, pid, turn, max_turns, direction, content);
+    emit_dialog_block_raw(&block);
 }
 
 /// Check if agent loop debug mode is active via environment variable.
@@ -4718,6 +4908,7 @@ pub fn render_event(
     if config.show_dialog {
         if let AgentLoopEvent::DialogBlock {
             agent,
+            model,
             pid: d_pid,
             turn,
             max_turns,
@@ -4725,8 +4916,19 @@ pub fn render_event(
             content,
         } = event
         {
-            let block = format_dialog_block(agent, *d_pid, *turn, *max_turns, *direction, content);
-            if *IS_STDOUT_TERMINAL {
+            let block = format_dialog_block_with_model(
+                agent,
+                model.as_deref().unwrap_or(""),
+                None,
+                *d_pid,
+                *turn,
+                *max_turns,
+                *direction,
+                content,
+            );
+            if dialog_output_destination() == DialogOutputDestination::Stderr {
+                emit_dialog_block_raw(&block);
+            } else if *IS_STDOUT_TERMINAL {
                 spinner.print_line(block)?;
             } else {
                 write_atomic_terminal_output(&block);
@@ -5902,6 +6104,7 @@ agent_loop:
         assert_eq!(
             state_from_event(&AgentLoopEvent::DialogBlock {
                 agent: "test".into(),
+                model: None,
                 pid: 1,
                 turn: 1,
                 max_turns: 20,
@@ -5918,6 +6121,7 @@ agent_loop:
         progress.emit(AgentLoopEvent::TurnStart { turn: 1, max_turns: 20 });
         progress.emit(AgentLoopEvent::DialogBlock {
             agent: "test".into(),
+            model: None,
             pid: 123,
             turn: 1,
             max_turns: 20,
@@ -5936,6 +6140,7 @@ agent_loop:
         progress.emit(AgentLoopEvent::TurnStart { turn: 2, max_turns: 20 });
         progress.emit(AgentLoopEvent::DialogBlock {
             agent: "test".into(),
+            model: None,
             pid: 123,
             turn: 2,
             max_turns: 20,
@@ -7086,6 +7291,19 @@ agent_loop:
     }
 
     #[test]
+    fn test_fold_history_payload() {
+        use crate::client::MessageRole;
+        let tool_ok = fold_history_payload(&MessageRole::Tool, Some("fs_ls"), false, "file1\nfile2\nfile3\nfile4\n");
+        assert_eq!(tool_ok, "[history: tool_result fs_ls — 4 lines folded]");
+
+        let tool_err = fold_history_payload(&MessageRole::Tool, Some("cmd_exec"), true, "error line 1\nerror line 2\nerror line 3\nerror line 4\n");
+        assert_eq!(tool_err, "[history: tool_result cmd_exec — 4 lines folded — error]");
+
+        let asst = fold_history_payload(&MessageRole::Assistant, None, false, "line 1\nline 2\nline 3\nline 4\nline 5\n");
+        assert_eq!(asst, "[history: assistant response — 5 lines folded]");
+    }
+
+    #[test]
     fn test_format_messages_dialog_preserves_system_instructions() {
         use crate::client::{Message, MessageContent, MessageRole};
         // 60 lines of system instructions
@@ -7573,6 +7791,41 @@ agent_loop:
             "Tool execution completed successfully.".to_string()
         };
         assert_eq!(fallback_text, "Tool execution completed successfully (fs_create).");
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_pipes_no_deadlock_over_64kb() {
+        use tokio::io::AsyncReadExt;
+        // 128KB of stdout data (well over Linux 64KB pipe buffer capacity)
+        let mut cmd = tokio::process::Command::new("sh");
+        cmd.arg("-c");
+        cmd.arg("python3 -c 'import sys; sys.stdout.write(\"x\" * 131072); sys.stderr.write(\"err\\n\")'");
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = cmd.spawn().expect("spawn child");
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf).await;
+            buf
+        });
+
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf).await;
+            buf
+        });
+
+        let status = child.wait().await.expect("child wait");
+        let stdout_bytes = stdout_task.await.expect("stdout join");
+        let stderr_bytes = stderr_task.await.expect("stderr join");
+
+        assert!(status.success());
+        assert_eq!(stdout_bytes.len(), 131072);
+        assert_eq!(String::from_utf8_lossy(&stderr_bytes).trim(), "err");
     }
 }
 

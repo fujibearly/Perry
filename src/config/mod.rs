@@ -578,6 +578,8 @@ pub struct Config {
     pub rag: Option<Arc<Rag>>,
     #[serde(skip)]
     pub agent: Option<Agent>,
+    #[serde(skip)]
+    pub dialog_sink: Option<Arc<crate::agent_loop::DialogTraceSink>>,
 }
 
 impl Default for Config {
@@ -657,6 +659,7 @@ impl Default for Config {
             session: None,
             rag: None,
             agent: None,
+            dialog_sink: None,
         }
     }
 }
@@ -881,6 +884,15 @@ impl Config {
 
     pub fn serve_addr(&self) -> String {
         self.serve_addr.clone().unwrap_or_else(|| SERVE_ADDR.into())
+    }
+
+    #[allow(dead_code)]
+    pub fn dialog_sink(&self) -> Option<Arc<crate::agent_loop::DialogTraceSink>> {
+        self.dialog_sink.clone()
+    }
+
+    pub fn set_dialog_sink(&mut self, sink: Arc<crate::agent_loop::DialogTraceSink>) {
+        self.dialog_sink = Some(sink);
     }
 
     pub fn log_config(is_serve: bool) -> Result<(LevelFilter, Option<PathBuf>)> {
@@ -1776,7 +1788,53 @@ impl Config {
             .clone()
             .unwrap_or_else(|| SUMMARIZE_PROMPT.into());
         let input = Input::from_str(config, &prompt, None);
+        let show_dialog = config.read().agent_loop.show_dialog;
+        let no_truncate = config.read().agent_loop.dialog_no_truncate;
+        let dialog_sink = config.read().dialog_sink();
+        let model_id = config.read().model.id().to_string();
+
+        if show_dialog {
+            let prompt_content = match input.build_messages() {
+                Ok(msgs) => crate::agent_loop::format_messages_dialog(&msgs, no_truncate),
+                Err(_) => prompt.clone(),
+            };
+            if let Some(sink) = &dialog_sink {
+                sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                    sequence: 0,
+                    trace_id: "session-compress".into(),
+                    source: crate::agent_loop::dialog_trace::DialogSource::SessionCompression,
+                    agent: "compression".into(),
+                    configured_model: model_id.clone(),
+                    wire_model: None,
+                    pid: std::process::id(),
+                    turn: 1,
+                    max_turns: 1,
+                    direction: crate::agent_loop::DialogDirection::Request,
+                    content: prompt_content,
+                });
+            }
+        }
+
         let summary = input.fetch_chat_text().await?;
+
+        if show_dialog {
+            if let Some(sink) = &dialog_sink {
+                sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                    sequence: 0,
+                    trace_id: "session-compress".into(),
+                    source: crate::agent_loop::dialog_trace::DialogSource::SessionCompression,
+                    agent: "compression".into(),
+                    configured_model: model_id,
+                    wire_model: None,
+                    pid: std::process::id(),
+                    turn: 1,
+                    max_turns: 1,
+                    direction: crate::agent_loop::DialogDirection::Response,
+                    content: summary.clone(),
+                });
+            }
+        }
+
         let summary_prompt = config
             .read()
             .summary_prompt
@@ -1834,8 +1892,54 @@ impl Config {
             None => bail!("No chat history"),
         };
         let role = config.read().retrieve_role(CREATE_TITLE_ROLE)?;
+        let model_id = role.model_id().unwrap_or_default().to_string();
         let input = Input::from_str(config, &text, Some(role));
+        let show_dialog = config.read().agent_loop.show_dialog;
+        let no_truncate = config.read().agent_loop.dialog_no_truncate;
+        let dialog_sink = config.read().dialog_sink();
+
+        if show_dialog {
+            let prompt_content = match input.build_messages() {
+                Ok(msgs) => crate::agent_loop::format_messages_dialog(&msgs, no_truncate),
+                Err(_) => text.clone(),
+            };
+            if let Some(sink) = &dialog_sink {
+                sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                    sequence: 0,
+                    trace_id: "session-autoname".into(),
+                    source: crate::agent_loop::dialog_trace::DialogSource::SessionAutoname,
+                    agent: "autoname".into(),
+                    configured_model: model_id.clone(),
+                    wire_model: None,
+                    pid: std::process::id(),
+                    turn: 1,
+                    max_turns: 1,
+                    direction: crate::agent_loop::DialogDirection::Request,
+                    content: prompt_content,
+                });
+            }
+        }
+
         let text = input.fetch_chat_text().await?;
+
+        if show_dialog {
+            if let Some(sink) = &dialog_sink {
+                sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                    sequence: 0,
+                    trace_id: "session-autoname".into(),
+                    source: crate::agent_loop::dialog_trace::DialogSource::SessionAutoname,
+                    agent: "autoname".into(),
+                    configured_model: model_id,
+                    wire_model: None,
+                    pid: std::process::id(),
+                    turn: 1,
+                    max_turns: 1,
+                    direction: crate::agent_loop::DialogDirection::Response,
+                    content: text.clone(),
+                });
+            }
+        }
+
         if let Some(session) = config.write().session.as_mut() {
             session.set_autoname(&text);
         }

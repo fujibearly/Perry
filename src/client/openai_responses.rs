@@ -9,6 +9,7 @@ use crate::config::{
     GlobalConfig, HostedWebSearchConfig, Input, MultiAgentConfig, MultiAgentHostedTool,
     MultiAgentToolChoice, RoleLike,
 };
+use crate::agent_loop::dialog_trace::{DialogEvent, DialogSource, DialogTraceSink};
 use crate::function::{eval_tool_calls_preserving_results, FunctionDeclaration};
 use crate::utils::{strip_think_tag, wait_abort_signal, AbortSignal};
 
@@ -68,12 +69,20 @@ pub async fn run_openai_responses_multi_agent(
     }
 
     let http = client.build_client()?;
+    let dialog_sink = if config.read().agent_loop.show_dialog {
+        config.read().dialog_sink()
+    } else {
+        None
+    };
+    let dialog_context = dialog_sink.map(|sink| (sink, model.id().to_string()));
+
     let mut output = run_multi_agent_loop_with_progress(
         body,
         &abort_signal,
         |body| send_openai_responses_turn(&client, &http, body, progress.clone()),
         |calls| execute_function_calls(config, calls),
         Some(&progress),
+        dialog_context,
     )
     .await?;
     output.pricing_context = pricing_context;
@@ -92,7 +101,7 @@ where
     SFut: Future<Output = Result<Value>>,
     E: FnMut(Vec<OpenAIResponsesFunctionCall>) -> Result<Vec<Value>>,
 {
-    run_multi_agent_loop_with_progress(body, abort_signal, send, execute, None).await
+    run_multi_agent_loop_with_progress(body, abort_signal, send, execute, None, None).await
 }
 
 async fn run_multi_agent_loop_with_progress<S, SFut, E>(
@@ -101,6 +110,7 @@ async fn run_multi_agent_loop_with_progress<S, SFut, E>(
     mut send: S,
     mut execute: E,
     progress: Option<&OpenAIResponsesProgress>,
+    dialog_context: Option<(Arc<DialogTraceSink>, String)>,
 ) -> Result<OpenAIResponsesOutput>
 where
     S: FnMut(Value) -> SFut,
@@ -118,7 +128,31 @@ where
     let mut turns = Vec::new();
     let mut sources = Vec::new();
 
-    for _ in 0..MAX_CONTINUATION_TURNS {
+    for continuation_idx in 0..MAX_CONTINUATION_TURNS {
+        let current_turn = continuation_idx + 1;
+        if let Some((sink, configured_model)) = &dialog_context {
+            let wire_model = body.get("model").and_then(Value::as_str).map(|s| s.to_string());
+            let filtered_input: Vec<Value> = input_items
+                .iter()
+                .filter(|item| item.get("type").and_then(Value::as_str) != Some("reasoning"))
+                .cloned()
+                .collect();
+            let content = serde_json::to_string_pretty(&filtered_input).unwrap_or_default();
+            sink.emit(DialogEvent {
+                sequence: 0,
+                trace_id: "openai-responses".into(),
+                source: DialogSource::OpenAIResponses,
+                agent: "multi-agent".into(),
+                configured_model: configured_model.clone(),
+                wire_model,
+                pid: std::process::id(),
+                turn: current_turn,
+                max_turns: MAX_CONTINUATION_TURNS,
+                direction: crate::agent_loop::DialogDirection::Request,
+                content,
+            });
+        }
+
         let response = tokio::select! {
             response = send(body.clone()) => response?,
             _ = wait_abort_signal(abort_signal) => bail!("Aborted."),
@@ -134,6 +168,34 @@ where
                 return Err(error.into());
             }
         };
+
+        if let Some((sink, configured_model)) = &dialog_context {
+            let resp_text = if let Some(text) = &result.root_final_text {
+                text.clone()
+            } else if !result.function_calls.is_empty() {
+                let call_names: Vec<String> = result
+                    .function_calls
+                    .iter()
+                    .map(|c| format!("{}({})", c.name, c.call_id))
+                    .collect();
+                format!("Tool calls: {}", call_names.join(", "))
+            } else {
+                format!("Response ID: {}", result.response_id)
+            };
+            sink.emit(DialogEvent {
+                sequence: 0,
+                trace_id: "openai-responses".into(),
+                source: DialogSource::OpenAIResponses,
+                agent: "multi-agent".into(),
+                configured_model: configured_model.clone(),
+                wire_model: None,
+                pid: std::process::id(),
+                turn: current_turn,
+                max_turns: MAX_CONTINUATION_TURNS,
+                direction: crate::agent_loop::DialogDirection::Response,
+                content: resp_text,
+            });
+        }
         if body.get("tool_choice").and_then(Value::as_str) == Some("required") {
             body["tool_choice"] = "auto".into();
         }
@@ -5171,6 +5233,7 @@ clients:
             },
             |calls| Ok(vec![json!("DONE"); calls.len()]),
             Some(&progress),
+            None,
         )
         .await
         .unwrap_err();
@@ -5219,6 +5282,7 @@ clients:
             |_| ready(Ok(response.clone())),
             |_| unreachable!("incomplete responses do not execute developer tools"),
             Some(&progress),
+            None,
         )
         .await
         .unwrap_err();
@@ -5232,5 +5296,65 @@ clients:
             format_openai_responses_usage_cost(&priced_responses_model(), &turns, pricing_context);
         assert!(summary.contains("Hosted web searches: 1 | Fee: $0.010000"));
         assert!(summary.contains("Estimated total cost: $0.010"));
+    }
+
+    #[tokio::test]
+    async fn openai_responses_dialog_events_emitted_and_filter_reasoning() {
+        let (sink, mut rx) = DialogTraceSink::new();
+        let body = json!({
+            "model": "o3-mini-wire",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "Hello world"
+                },
+                {
+                    "type": "reasoning",
+                    "content": "secret encrypted chain of thought"
+                }
+            ]
+        });
+
+        let output = run_multi_agent_loop_with_progress(
+            body,
+            &create_abort_signal(),
+            |_| {
+                ready(Ok(completed_response(
+                    "resp_1",
+                    vec![root_final("Root answer")],
+                    10,
+                    5,
+                )))
+            },
+            |_| unreachable!("no developer function calls"),
+            None,
+            Some((sink, "o3-mini".into())),
+        )
+        .await
+        .expect("multi agent loop succeeds");
+
+        assert_eq!(output.completion.text, "Root answer");
+
+        // 1. Check Request event
+        let req_event = rx.try_recv().expect("received request dialog event");
+        assert_eq!(req_event.source, DialogSource::OpenAIResponses);
+        assert_eq!(req_event.agent, "multi-agent");
+        assert_eq!(req_event.configured_model, "o3-mini");
+        assert_eq!(req_event.wire_model.as_deref(), Some("o3-mini-wire"));
+        assert_eq!(req_event.direction, crate::agent_loop::DialogDirection::Request);
+        assert_eq!(req_event.turn, 1);
+        // Reasoning should be filtered out from prompt content
+        assert!(req_event.content.contains("Hello world"));
+        assert!(!req_event.content.contains("secret encrypted chain of thought"));
+
+        // 2. Check Response event
+        let resp_event = rx.try_recv().expect("received response dialog event");
+        assert_eq!(resp_event.source, DialogSource::OpenAIResponses);
+        assert_eq!(resp_event.agent, "multi-agent");
+        assert_eq!(resp_event.configured_model, "o3-mini");
+        assert_eq!(resp_event.direction, crate::agent_loop::DialogDirection::Response);
+        assert_eq!(resp_event.turn, 1);
+        assert_eq!(resp_event.content, "Root answer");
     }
 }

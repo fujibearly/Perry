@@ -305,6 +305,29 @@ What happens:
 
 ---
 
+## 12. Full Prompt & Model Dialog Observability (`--dialog` / `--no-truncate`)
+
+Display exact prompts sent to every LLM and exact responses returned across all turns, subagents, background operations (session autonaming/compression), shell execution, and multi-agent loops.
+
+```bash
+# Live prompt & response dialog tracing
+aichat --dialog "Analyze this repository"
+
+# Live dialog tracing with full un-truncated history
+aichat --dialog --no-truncate "Analyze this repository"
+
+# Route dialog trace cleanly to stderr for script piping
+AICHAT_DIALOG_OUTPUT=stderr aichat --dialog "Explain Rust traits" > output.md 2> dialog.log
+```
+
+Key features:
+- **Model Attribution**: Displays configured model and wire model (`@ configured_model [wire: wire_model]`).
+- **Semantic History Folding**: Folds prior multi-line history messages into compact summaries (`[history: tool_result fs_ls — 42 lines folded]`), preserving single-line indicators and errors.
+- **Cross-Process Subagent Relay**: Subagents and generic shell tool child processes relay their dialog events over length-delimited stderr frames back to the parent sink without deadlocks.
+- **Clean Redirection**: Supports `AICHAT_DIALOG_OUTPUT=stderr|tty` so standard output remains 100% clean for shell redirection.
+
+---
+
 ## Environment Variables Reference
 
 | Variable | Effect |
@@ -312,6 +335,10 @@ What happens:
 | `AICHAT_FUNCTIONS_DIR` | Point at the llm-functions directory |
 | `AICHAT_AGENT_LOOP_MAX_TURNS` | Override turn budget (default: 20) |
 | `AICHAT_AGENT_LOOP_SHOW_TRACE` | Show live trace on terminal via `/dev/tty` (`true`/`false`) |
+| `AICHAT_AGENT_LOOP_SHOW_DIALOG` | Show live prompt & response dialog trace (`true`/`false`) |
+| `AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE` | Disable history folding in dialog trace (`true`/`false`) |
+| `AICHAT_DIALOG_OUTPUT` | Override dialog destination: `stderr` (pipe-safe) or `tty` (default) |
+| `AICHAT_DIALOG_RELAY` | Internal child-to-parent stderr relay trigger (`stderr`) |
 | `AICHAT_AGENT_LOOP_MAX_COST` | Cost budget in USD (e.g. `1.0`). Stops loop if exceeded. |
 | `AICHAT_AGENT_DEPTH` | (Set by aichat internally for sub-agents) |
 | `WEB_SEARCH_MODEL` | Model for `web_search_aichat` tool (e.g. `gemini:gemini-2.5-pro`) |
@@ -325,6 +352,8 @@ agent_loop:
   max_concurrency: 8      # Parallel tool limit
   max_agent_depth: 3      # Sub-agent nesting depth
   show_trace: false       # Trace to /dev/tty (live, pipe-proof)
+  show_dialog: false      # Prompt & response dialog trace (--dialog)
+  dialog_no_truncate: false # Disable history folding (--no-truncate)
   planning_tool: true     # Inject _plan pseudo-tool
   osc_title: true         # Terminal title via /dev/tty (tmux pane title)
   status_file: true       # JSON status file ($XDG_RUNTIME_DIR/aichat-<pid>.json)

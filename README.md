@@ -224,10 +224,13 @@ agent_loop:
   max_concurrency: 8
   max_agent_depth: 3
   show_trace: false
+  show_dialog: false        # Live prompt & response dialog trace (--dialog)
+  dialog_no_truncate: false # Disable history folding (--no-truncate)
   planning_tool: true
 ```
 
-Environment overrides: `AICHAT_AGENT_LOOP_MAX_TURNS`, `AICHAT_AGENT_LOOP_SHOW_TRACE`
+Environment overrides: `AICHAT_AGENT_LOOP_MAX_TURNS`, `AICHAT_AGENT_LOOP_SHOW_TRACE`, `AICHAT_AGENT_LOOP_SHOW_DIALOG`, `AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE`, `AICHAT_DIALOG_OUTPUT` (`stderr` | `tty`)
+CLI flags: `--dialog` (or `--show-dialog`), `--no-truncate` (or `--dialog-no-truncate`)
 
 #### Example: multi-agent orchestration
 
