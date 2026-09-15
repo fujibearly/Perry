@@ -19,7 +19,8 @@ extern crate log;
 
 use crate::cli::Cli;
 use crate::client::{
-    call_chat_completions, call_chat_completions_streaming, format_usage_cost, list_models,
+    call_chat_completions, call_chat_completions_streaming, format_usage_cost,
+    format_usage_cost_with, list_models,
     openai_responses::{
         format_openai_responses_live_debug_progress, format_openai_responses_live_progress,
         format_openai_responses_usage_cost, run_openai_responses_multi_agent,
@@ -407,11 +408,11 @@ async fn start_directive(
             format_openai_responses_usage_cost(&model, &output.turns, output.pricing_context)
         })
     } else {
-        let usage = run_directive(config, input, code_mode, abort_signal).await?;
+        let (usage, cost) = run_directive(config, input, code_mode, abort_signal).await?;
         config
             .read()
             .show_cost
-            .then(|| format_usage_cost(&model, usage))
+            .then(|| format_usage_cost_with(&model, usage, (cost > 0.0).then_some(cost)))
     };
     if let Some(summary) = usage_summary {
         eprintln!("{summary}");
@@ -425,7 +426,7 @@ async fn run_directive(
     input: Input,
     code_mode: bool,
     abort_signal: AbortSignal,
-) -> Result<TokenUsage> {
+) -> Result<(TokenUsage, f64)> {
     let (progress, event_rx) = crate::agent_loop::AgentLoopProgress::live();
     let params = crate::agent_loop::AgentLoopParams {
         config,
@@ -474,7 +475,7 @@ async fn run_directive(
     {
         drop(event_rx);
         let output = crate::agent_loop::run(input, params).await?;
-        return Ok(output.usage);
+        return Ok((output.usage, output.cost));
     }
 
     // Run with observability rendering
@@ -543,7 +544,7 @@ async fn run_directive(
     }
 
     let output = result?;
-    Ok(output.usage)
+    Ok((output.usage, output.cost))
 }
 
 async fn run_multi_agent_directive(

@@ -162,11 +162,39 @@ def show-output [output: string, --max-lines: int = 15, --no-truncate] {
     }
 }
 
-# Print cost info from captured stderr
+# Format float dollar cost to 6 decimal places (e.g. $0.012345)
+def fmt-cost [cost: float]: nothing -> string {
+    let parts = ($cost | math round --precision 6 | into string | split row ".")
+    let int_part = ($parts | get 0)
+    let dec_part = ($parts | get --optional 1 | default "")
+    let padded_dec = ($dec_part | fill -a left -c "0" -w 6)
+    $"$($int_part).($padded_dec)"
+}
+
+# Print cost info from captured stderr and record to cost accumulator
 def show-cost [stderr: string] {
     let cost_line = ($stderr | lines | where { $in | str contains "Estimated cost:" } | first | default "")
     if ($cost_line | str length) > 0 {
         print $"  (ansi yellow)💰 ($cost_line)(ansi reset)"
+        if ($env.AICHAT_DEMO_COST_LOG? | default "" | is-not-empty) {
+            let after_dollar = ($cost_line | split row "Estimated cost: $" | get --optional 1 | default "")
+            let first_word = ($after_dollar | split row " " | get --optional 0 | default "0" | str trim)
+            let cost = (try { $first_word | into float } catch { 0.0 })
+            let tokens_part = if ($cost_line | str contains "Tokens: ") {
+                $cost_line | split row "Tokens: " | get --optional 1 | default ""
+            } else { "" }
+            let inp = if ($tokens_part | str contains " input + ") {
+                let s = ($tokens_part | split row " input + " | get --optional 0 | default "")
+                try { $s | into int } catch { 0 }
+            } else { 0 }
+            let out = if ($tokens_part | str contains " input + ") {
+                let rest = ($tokens_part | split row " input + " | get --optional 1 | default "")
+                let s = ($rest | split row " " | get --optional 0 | default "")
+                try { $s | into int } catch { 0 }
+            } else { 0 }
+
+            $"($cost) ($inp) ($out)\n" | save --append $env.AICHAT_DEMO_COST_LOG
+        }
     }
 }
 
@@ -231,6 +259,11 @@ def main [
     if ("SUMMARIZE_MODEL" in $env) {
         hide-env SUMMARIZE_MODEL
     }
+
+    # Initialize cost accumulator log
+    let cost_log = ($nu.temp-dir | path join $"aichat-run-demos-cost-($nu.pid).txt")
+    if ($cost_log | path exists) { rm -f $cost_log }
+    $env.AICHAT_DEMO_COST_LOG = $cost_log
 
     # Resolve default aichat model dynamically if not specified via --model / -m
     let demo_model = (
@@ -362,6 +395,8 @@ let budget_warning = ($combined2 | str contains "turn limit") or ($combined2 | s
 
 # Trace visible live on terminal via /dev/tty
 report "Turn budget warning fires" $budget_warning
+show-output $demo2.stdout
+show-cost ($demo2.stderr | default "")
 }
 
 if (should-run-demo "3" $demo) {
@@ -1390,6 +1425,30 @@ if ($demo | is-empty) {
 } else {
     print $"Demo ($demo) executed. Review results above."
 }
+
+let entries = if ($cost_log | path exists) { open $cost_log | lines | where { $in | is-not-empty } } else { [] }
+let rows = ($entries | each { |line|
+    let parts = ($line | split row " ")
+    {
+        cost: (try { $parts | get 0 | into float } catch { 0.0 }),
+        inp: (try { $parts | get --optional 1 | default "0" | into int } catch { 0 }),
+        out: (try { $parts | get --optional 2 | default "0" | into int } catch { 0 })
+    }
+})
+let total_cost = if ($rows | is-empty) { 0.0 } else { $rows | get cost | math sum }
+let total_inp = if ($rows | is-empty) { 0 } else { $rows | get inp | math sum }
+let total_out = if ($rows | is-empty) { 0 } else { $rows | get out | math sum }
+
+if ($total_inp > 0) or ($total_out > 0) {
+    print $"\n  (ansi yellow_bold)💰 Grand Total Estimated Cost: (fmt-cost $total_cost) | Tokens: ($total_inp) input + ($total_out) output(ansi reset)"
+} else {
+    print $"\n  (ansi yellow_bold)💰 Grand Total Estimated Cost: (fmt-cost $total_cost)(ansi reset)"
+}
+
+if ($cost_log | path exists) {
+    rm -f $cost_log
+}
+
 print ""
 print $"(ansi white_dimmed)Trace output appears live on terminal via /dev/tty, controlled by AICHAT_AGENT_LOOP_SHOW_TRACE."
 print $"Tmux title updates via /dev/tty — works regardless of pipe state.(ansi reset)"

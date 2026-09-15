@@ -47,6 +47,7 @@ pub struct AgentLoopParams<'a> {
 #[allow(dead_code)]
 pub struct AgentLoopOutput {
     pub usage: TokenUsage,
+    pub cost: f64,
     pub final_text: String,
 }
 
@@ -193,6 +194,7 @@ struct AgentLoopProgressState {
     max_turns: usize,
     active_tools: Vec<String>,
     accumulated_cost: f64,
+    accumulated_usage: TokenUsage,
     event_sender: Option<UnboundedSender<AgentLoopEvent>>,
 }
 
@@ -204,6 +206,7 @@ pub struct AgentLoopSnapshot {
     pub active_tools: Vec<String>,
     pub elapsed: Duration,
     pub accumulated_cost: f64,
+    pub accumulated_usage: TokenUsage,
 }
 
 impl AgentLoopProgress {
@@ -246,6 +249,7 @@ impl AgentLoopProgress {
             active_tools: state.active_tools.clone(),
             elapsed,
             accumulated_cost: state.accumulated_cost,
+            accumulated_usage: state.accumulated_usage,
         }
     }
 
@@ -257,6 +261,16 @@ impl AgentLoopProgress {
     /// Get the current accumulated cost.
     pub fn cost(&self) -> f64 {
         self.state.lock().accumulated_cost
+    }
+
+    /// Add usage (tokens) to the running total.
+    pub fn add_usage(&self, usage: TokenUsage) {
+        self.state.lock().accumulated_usage.add(usage);
+    }
+
+    /// Get the current accumulated usage.
+    pub fn usage(&self) -> TokenUsage {
+        self.state.lock().accumulated_usage
     }
 
     /// Update the current turn counter (called by the loop on each iteration).
@@ -276,6 +290,7 @@ impl AgentLoopProgress {
         self.state.lock().active_tools.retain(|n| n != name);
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // Parallel tool execution
@@ -328,12 +343,17 @@ pub async fn eval_tool_calls_parallel(
 
                 let output = match result {
                     Ok(mut value) => {
-                        // Extract sub-agent cost if present
+                        // Extract sub-agent cost and usage if present
                         if let Some(obj) = value.as_object_mut() {
                             if let Some(cost_val) = obj.remove("__sub_agent_cost") {
                                 if let Some(cost) = cost_val.as_f64() {
                                     progress.add_cost(cost);
                                 }
+                            }
+                            let inp = obj.remove("__sub_agent_input_tokens").and_then(|v| v.as_u64());
+                            let out = obj.remove("__sub_agent_output_tokens").and_then(|v| v.as_u64());
+                            if inp.is_some() || out.is_some() {
+                                progress.add_usage(TokenUsage::new(inp, out));
                             }
                         }
 
@@ -2102,13 +2122,21 @@ async fn eval_single_tool(
     // Route 2: Agent tools (subprocess delegation)
     {
         if call_targets_agent(config, &call.name) {
-            let (result, sub_cost) = eval_agent_tool_subprocess(config, call).await?;
-            // Sub-agent cost will be aggregated by the caller via progress.add_cost()
-            // We encode it in the result metadata for the parallel dispatcher to pick up.
-            if sub_cost > 0.0 {
+            let (result, sub_cost, sub_usage) = eval_agent_tool_subprocess(config, call).await?;
+            // Sub-agent cost and usage will be aggregated by the caller via progress
+            // We encode them in the result metadata for the parallel dispatcher to pick up.
+            if sub_cost > 0.0 || !sub_usage.is_empty() {
                 if let serde_json::Value::Object(ref map) = result {
                     let mut enriched = map.clone();
-                    enriched.insert("__sub_agent_cost".to_string(), json!(sub_cost));
+                    if sub_cost > 0.0 {
+                        enriched.insert("__sub_agent_cost".to_string(), json!(sub_cost));
+                    }
+                    if let Some(inp) = sub_usage.input_tokens {
+                        enriched.insert("__sub_agent_input_tokens".to_string(), json!(inp));
+                    }
+                    if let Some(out) = sub_usage.output_tokens {
+                        enriched.insert("__sub_agent_output_tokens".to_string(), json!(out));
+                    }
                     return Ok(serde_json::Value::Object(enriched));
                 }
             }
@@ -2131,7 +2159,7 @@ async fn eval_single_tool(
 async fn eval_agent_tool_subprocess(
     config: &GlobalConfig,
     call: &ToolCall,
-) -> Result<(serde_json::Value, f64)> {
+) -> Result<(serde_json::Value, f64, TokenUsage)> {
     // 1. Check depth limit
     let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
         .ok()
@@ -2213,6 +2241,7 @@ async fn eval_agent_tool_subprocess(
                     }
                 }),
                 0.0,
+                TokenUsage::default(),
             ));
         }
     };
@@ -2242,11 +2271,11 @@ async fn eval_agent_tool_subprocess(
         }
     }
 
-    // Capture stdout/stderr
+    // Capture child output: stdout for result, stderr for dialog trace frames
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    // 5. Run and wait with concurrent pipe draining to prevent deadlocks
+    // Run the sub-agent
     let mut child = cmd.spawn()?;
     let _pid = child.id().unwrap_or(0);
 
@@ -2269,7 +2298,7 @@ async fn eval_agent_tool_subprocess(
     let stdout_bytes = stdout_task.await.unwrap_or_default();
     let stderr_bytes = stderr_task.await.unwrap_or_default();
 
-    // 6. Return result + parse sub-agent cost from stderr
+    // 6. Return result + parse sub-agent cost and usage from stderr
     let stderr_text = String::from_utf8_lossy(&stderr_bytes).to_string();
     let (relay_events, clean_stderr) = crate::agent_loop::dialog_trace::parse_relay_frames(&stderr_text);
     if let Some(sink) = config.read().dialog_sink() {
@@ -2277,7 +2306,7 @@ async fn eval_agent_tool_subprocess(
             sink.emit(event);
         }
     }
-    let sub_cost = parse_cost_from_stderr(&clean_stderr);
+    let (sub_usage, sub_cost) = parse_usage_and_cost_from_stderr(&clean_stderr);
 
     if status.success() {
         let text = String::from_utf8_lossy(&stdout_bytes).trim().to_string();
@@ -2329,10 +2358,11 @@ async fn eval_agent_tool_subprocess(
                         "guidance": guidance,
                     }),
                     sub_cost,
+                    sub_usage,
                 ));
             }
         }
-        Ok((json!({"output": text}), sub_cost))
+        Ok((json!({"output": text}), sub_cost, sub_usage))
     } else {
         let message = if clean_stderr.trim().is_empty() {
             format!(
@@ -2348,7 +2378,7 @@ async fn eval_agent_tool_subprocess(
                 "type": "agent_error",
                 "message": message
             }
-        }), sub_cost))
+        }), sub_cost, sub_usage))
     }
 }
 
@@ -2773,6 +2803,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
         };
 
         total_usage.add(output.usage());
+        params.progress.add_usage(output.usage());
         last_text = output.text.clone();
 
         // Track cost
@@ -2799,8 +2830,11 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                     )
                     .await;
             }
+            let total_usage = params.progress.usage();
+            let total_cost = params.progress.cost();
             return Ok(AgentLoopOutput {
                 usage: total_usage,
+                cost: total_cost,
                 final_text: last_text,
             });
         }
@@ -2833,8 +2867,11 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                 .await;
             }
 
+            let total_usage = params.progress.usage();
+            let total_cost = params.progress.cost();
             return Ok(AgentLoopOutput {
                 usage: total_usage,
+                cost: total_cost,
                 final_text: output.text,
             });
         }
@@ -3021,8 +3058,11 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                     .write()
                     .after_chat_completion(&current_input, &payload_str, &tool_results)?;
 
+                let total_usage = params.progress.usage();
+                let total_cost = params.progress.cost();
                 return Ok(AgentLoopOutput {
                     usage: total_usage,
+                    cost: total_cost,
                     final_text: payload_str,
                 });
         }
@@ -3062,8 +3102,11 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             .await;
     }
 
+    let total_usage = params.progress.usage();
+    let total_cost = params.progress.cost();
     Ok(AgentLoopOutput {
         usage: total_usage,
+        cost: total_cost,
         final_text: last_text,
     })
 }
@@ -4685,6 +4728,10 @@ struct AgentLoopStatus {
     active_tools: Vec<String>,
     elapsed_s: f64,
     cost_usd: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_tokens: Option<u64>,
     updated_at: String,
 }
 
@@ -4708,6 +4755,8 @@ fn write_status_file(snapshot: &AgentLoopSnapshot, state: &str) {
         active_tools: snapshot.active_tools.clone(),
         elapsed_s: snapshot.elapsed.as_secs_f64(),
         cost_usd: snapshot.accumulated_cost,
+        input_tokens: snapshot.accumulated_usage.input_tokens,
+        output_tokens: snapshot.accumulated_usage.output_tokens,
         updated_at: chrono_now_iso(),
     };
     let path = status_file_path();
@@ -4763,20 +4812,49 @@ pub fn cleanup_stale_status_files() {
     }
 }
 
-/// Parse estimated cost from a sub-agent's stderr output.
-/// Looks for the pattern: "Estimated cost: $0.004000"
-fn parse_cost_from_stderr(stderr: &str) -> f64 {
-    for line in stderr.lines() {
-        if let Some(pos) = line.find("Estimated cost: $") {
-            let start = pos + "Estimated cost: $".len();
-            if let Some(cost_str) = line[start..].split_whitespace().next() {
-                if let Ok(cost) = cost_str.parse::<f64>() {
-                    return cost;
+/// Parse token usage and estimated cost from a sub-agent's stderr output.
+/// Looks for patterns like:
+///   "Tokens: 100 input + 20 output | Estimated cost: $0.0123"
+pub fn parse_usage_and_cost_from_stderr(stderr: &str) -> (TokenUsage, f64) {
+    let mut usage = TokenUsage::default();
+    let mut cost = 0.0;
+    for line in stderr.lines().rev() {
+        if cost == 0.0 {
+            if let Some(pos) = line.find("Estimated cost: $") {
+                let start = pos + "Estimated cost: $".len();
+                if let Some(cost_str) = line[start..].split_whitespace().next() {
+                    let clean_cost_str = cost_str.trim_end_matches(|c: char| !c.is_ascii_digit() && c != '.');
+                    if let Ok(c) = clean_cost_str.parse::<f64>() {
+                        cost = c;
+                    }
                 }
             }
         }
+        if usage.is_empty() {
+            if let Some(pos) = line.find("Tokens: ") {
+                let tokens_part = &line[pos + "Tokens: ".len()..];
+                if let Some(input_end) = tokens_part.find(" input + ") {
+                    let input_str = tokens_part[..input_end].trim();
+                    let rest = &tokens_part[input_end + " input + ".len()..];
+                    let output_str = rest.split_whitespace().next().unwrap_or("");
+                    let input = input_str.parse::<u64>().ok();
+                    let output = output_str.parse::<u64>().ok();
+                    if input.is_some() || output.is_some() {
+                        usage = TokenUsage::new(input, output);
+                    }
+                }
+            }
+        }
+        if cost > 0.0 && !usage.is_empty() {
+            break;
+        }
     }
-    0.0
+    (usage, cost)
+}
+
+#[allow(dead_code)]
+fn parse_cost_from_stderr(stderr: &str) -> f64 {
+    parse_usage_and_cost_from_stderr(stderr).1
 }
 
 /// Simple ISO 8601 timestamp without pulling in chrono crate.
@@ -5447,6 +5525,7 @@ agent_loop:
             active_tools: vec!["fs_write".to_string(), "web_search".to_string()],
             elapsed: Duration::from_secs(5),
             accumulated_cost: 0.0,
+            accumulated_usage: TokenUsage::default(),
         };
         let msg = format_spinner_message(&snapshot);
         assert!(msg.contains("Turn 2/20"));
@@ -5462,6 +5541,7 @@ agent_loop:
             active_tools: vec![],
             elapsed: Duration::from_secs(3),
             accumulated_cost: 0.0,
+            accumulated_usage: TokenUsage::default(),
         };
         let msg = format_spinner_message(&snapshot);
         assert!(msg.contains("Turn 1/10"));
@@ -6020,6 +6100,29 @@ agent_loop:
         let stderr = "some trace line\nTokens: 100 input + 20 output | Estimated cost: $0.0123 (done)\nmore output";
         let cost = parse_cost_from_stderr(stderr);
         assert!((cost - 0.0123).abs() < 1e-9, "expected 0.0123, got {cost}");
+    }
+
+    #[test]
+    fn parse_usage_and_cost_extracts_tokens_and_cost() {
+        let stderr = "some trace line\nTokens: 1250 input + 450 output | Estimated cost: $0.034500\nmore output";
+        let (usage, cost) = parse_usage_and_cost_from_stderr(stderr);
+        assert_eq!(usage.input_tokens, Some(1250));
+        assert_eq!(usage.output_tokens, Some(450));
+        assert!((cost - 0.0345).abs() < 1e-9);
+
+        // Multiple lines: takes the last summary line
+        let stderr_multi = "Tokens: 100 input + 10 output | Estimated cost: $0.001000\nTokens: 200 input + 20 output | Estimated cost: $0.002000";
+        let (usage2, cost2) = parse_usage_and_cost_from_stderr(stderr_multi);
+        assert_eq!(usage2.input_tokens, Some(200));
+        assert_eq!(usage2.output_tokens, Some(20));
+        assert!((cost2 - 0.002).abs() < 1e-9);
+
+        // Unavailable tokens with cost
+        let stderr_unavail = "Tokens: unavailable input + unavailable output | Estimated cost: $0.050000";
+        let (usage3, cost3) = parse_usage_and_cost_from_stderr(stderr_unavail);
+        assert_eq!(usage3.input_tokens, None);
+        assert_eq!(usage3.output_tokens, None);
+        assert!((cost3 - 0.05).abs() < 1e-9);
     }
 
     #[test]
@@ -7705,6 +7808,7 @@ agent_loop:
             active_tools: vec![],
             elapsed: Duration::from_secs_f64(3.45),
             accumulated_cost: 0.0,
+            accumulated_usage: TokenUsage::default(),
         };
 
         // Without env var, falls back to snapshot.elapsed

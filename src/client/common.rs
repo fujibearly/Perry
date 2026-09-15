@@ -594,6 +594,14 @@ pub struct ChatCompletionsOutput {
 }
 
 pub fn format_usage_cost(model: &Model, usage: TokenUsage) -> String {
+    format_usage_cost_with(model, usage, None)
+}
+
+pub fn format_usage_cost_with(
+    model: &Model,
+    usage: TokenUsage,
+    explicit_cost: Option<f64>,
+) -> String {
     let input = usage
         .input_tokens
         .map(|value| value.to_string())
@@ -602,8 +610,9 @@ pub fn format_usage_cost(model: &Model, usage: TokenUsage) -> String {
         .output_tokens
         .map(|value| value.to_string())
         .unwrap_or_else(|| "unavailable".into());
-    let cost = model
-        .usage_cost(usage)
+    let cost = explicit_cost
+        .filter(|&c| c > 0.0)
+        .or_else(|| model.usage_cost(usage))
         .map(|value| format!("${value:.6}"))
         .unwrap_or_else(|| "unavailable".into());
     format!("Tokens: {input} input + {output} output | Estimated cost: {cost}")
@@ -1509,4 +1518,23 @@ responses:
             "Tokens: unavailable input + unavailable output | Estimated cost: unavailable"
         );
     }
+
+    #[test]
+    fn formats_explicit_cumulative_cost() {
+        let mut model = Model::new("test", "priced");
+        model.data_mut().input_price = Some(2.0);
+        model.data_mut().output_price = Some(8.0);
+
+        // Explicit cost overrides model calculation when provided and positive
+        assert_eq!(
+            format_usage_cost_with(&model, TokenUsage::new(Some(1_000), Some(250)), Some(0.123456)),
+            "Tokens: 1000 input + 250 output | Estimated cost: $0.123456"
+        );
+        // Falls back to model pricing when explicit_cost is None
+        assert_eq!(
+            format_usage_cost_with(&model, TokenUsage::new(Some(1_000), Some(250)), None),
+            "Tokens: 1000 input + 250 output | Estimated cost: $0.004000"
+        );
+    }
 }
+
