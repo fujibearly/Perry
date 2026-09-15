@@ -27,8 +27,8 @@
 #   20 — Orchestrator Sub-Agent Authority Escalation → mutating sub-agent authority_exceeded -> mTLS Should Gate -> Continue
 #   21 — Sub-Agent Capability Block & Re-Delegation  → readonly sub-agent capability_denied -> unwind -> permission_blocked -> orchestrator re-delegates mutating
 #
-# All live demos run under DEMO_MODEL (default gemini-2.5-flash) for a
-# consistent, cost-conscious profile — see the constant below.
+# All live demos run under the default aichat model (or overridden via --model/-m)
+# for a consistent, cost-conscious profile.
 #
 # Known soft-fails on flash (model-phrasing / environment, NOT engine bugs):
 #   - Demo 3  : flash may format the plan differently or use fs_patch vs fs_write.
@@ -67,10 +67,9 @@ let aichat_bin = (
 let functions_dir = ($env.HOME | path join "projects/llm-functions")
 let manual_pdf = ($project_dir | path join "manual.pdf")
 
-# Model used across all demos. A single cheap model keeps the harness
-# cost-conscious and consistent (the engine — tool gates, routing, delegation —
-# is what's under test, not model capability). Override by editing this line.
-const DEMO_MODEL = "gemini:gemini-2.5-flash"
+# Web search model used across grounded search tooling. Uses Gemini 2.5 Flash for
+# cost-effective Google Search retrieval.
+const DEFAULT_WEB_SEARCH_MODEL = "gemini:gemini-2.5-flash"
 
 # Base environment for all aichat invocations is constructed dynamically
 # inside def main below to honor the --dialog flag.
@@ -175,6 +174,7 @@ def should-run-demo [demo_id: string, target_demo: string] {
 }
 
 def main [
+    --model (-m): string = "", # Override model across all demos (defaults to aichat's configured default model)
     --debug (-d),             # Execute tests one by one, waiting for user input to proceed
     --dialog,                 # Display full submitted LLM prompt and response observability trace
     --no-truncate (-n),       # Cancel default truncation of dialog traces and output
@@ -194,19 +194,34 @@ def main [
     } else if ("AICHAT_WSLINKS" in $env) {
         hide-env AICHAT_WSLINKS
     }
-    # Base environment for all aichat invocations. AICHAT_MODEL makes every demo
-    # use DEMO_MODEL as its default model without needing a per-demo -m flag;
-    # WEB_SEARCH_MODEL points the researcher/web-search tooling at the same model;
+
+    # Resolve default aichat model dynamically if not specified via --model / -m
+    let demo_model = (
+        if ($model | is-not-empty) {
+            $model
+        } else if ($env.AICHAT_MODEL? | default "" | is-not-empty) {
+            $env.AICHAT_MODEL
+        } else {
+            try {
+                (^$aichat_bin --info | complete | get stdout | lines | where { $in | str starts-with "model " } | first | split column -r '\s+' key model | get model.0 | str trim)
+            } catch {
+                ""
+            }
+        }
+    )
+
+    # Base environment for all aichat invocations.
+    # AICHAT_MODEL makes every demo use the resolved model without needing a per-demo -m flag;
+    # WEB_SEARCH_MODEL points the researcher/web-search tooling at flash with search grounding;
     # AICHAT_AGENT_LOOP_SHOW_DIALOG enables the LLM dialog trace when --dialog is set.
     # AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE disables dialog truncation when --no-truncate is set.
     # AICHAT_WSLINKS enables link exploration mode for web searches across sub-agent trees when --wslinks is set.
     let base_env = {
         PATH: ($env.PATH | prepend ($project_dir | path join "target/debug") | prepend ($project_dir | path join "target/release"))
         AICHAT_FUNCTIONS_DIR: $functions_dir
-        AICHAT_MODEL: $DEMO_MODEL
-        WEB_SEARCH_MODEL: $DEMO_MODEL
-        AICHAT_SAFETY_RISK_MODEL: $DEMO_MODEL
-    } | merge (if $dialog { { AICHAT_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
+        WEB_SEARCH_MODEL: $DEFAULT_WEB_SEARCH_MODEL
+    } | merge (if ($demo_model | is-not-empty) { { AICHAT_MODEL: $demo_model, AICHAT_SAFETY_RISK_MODEL: $demo_model } } else { {} })
+      | merge (if $dialog { { AICHAT_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
       | merge (if $no_truncate { { AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE: "true" } } else { {} })
       | merge (if $debug { { AICHAT_AGENT_LOOP_DEBUG: "true" } } else { {} })
       | merge (if $wslinks { { AICHAT_WSLINKS: "true" } } else { {} })
@@ -219,6 +234,9 @@ def main [
     # ─── Preflight Checks ────────────────────────────────────────────────────────
 
     header "Preflight Checks"
+    if ($demo_model | is-not-empty) {
+        print $"  (ansi white_dimmed)Default model: ($demo_model)(ansi reset)\n"
+    }
 
 if not ($aichat_bin | path exists) {
     print $"(ansi red_bold)ERROR:(ansi reset) Binary not found at ($aichat_bin). Run: cargo build --release"
@@ -490,7 +508,8 @@ if $in_tmux {
     # OSC title codes to reach tmux. We capture trace from the status file instead.
     let aichat_cmd = ([
         $"AICHAT_FUNCTIONS_DIR=($functions_dir)"
-        $"WEB_SEARCH_MODEL=gemini:gemini-2.5-pro"
+        $"WEB_SEARCH_MODEL=($DEFAULT_WEB_SEARCH_MODEL)"
+        (if ($demo_model | is-not-empty) { $"AICHAT_MODEL=($demo_model)" } else { "" })
         $"AICHAT_AGENT_LOOP_SHOW_TRACE=true"
         (if $dialog { "AICHAT_AGENT_LOOP_SHOW_DIALOG=true" } else { "" })
         $"($aichat_bin) --show-cost -r '%functions%'"
@@ -817,7 +836,7 @@ if (should-run-demo "13" $demo) {
 # Reuses the real config dir (for the provider key + model catalog) and injects
 # the policy via AICHAT_SAFETY_POLICY_FILE — no config.yaml edits needed.
 
-header "Demo 13: Protected Policy File — forbid (live, gemini-2.5-flash)"
+header $"Demo 13: Protected Policy File — forbid (live, ($demo_model))"
 show-desc "Demonstrates policy-based tool forbidding: an owner-only 0600 policy explicitly forbids get_current_time, asserting deterministic safety blocking."
 
 let d13_dir = ($nu.temp-dir | path join $"aichat-policy-forbid-($nu.pid)")
@@ -868,7 +887,7 @@ if (should-run-demo "14" $demo) {
 # ceiling comparison in the live path, distinct from Demo 13's `forbid`.)
 # Same cheap model + tight budget.
 
-header "Demo 14: Authority Ceiling Exceeded (live, gemini-2.5-flash)"
+header $"Demo 14: Authority Ceiling Exceeded (live, ($demo_model))"
 show-desc "Demonstrates authority ceiling enforcement: policy raises get_current_time to catastrophic (> destructive ceiling), asserting it is blocked before execution."
 
 let d14_dir = ($nu.temp-dir | path join $"aichat-authority-($nu.pid)")
@@ -918,7 +937,7 @@ if (should-run-demo "15" $demo) {
 # so the arg-match fires and the gate blocks it before anything runs. (Even if
 # the gate failed, an echo is side-effect-free — no real risk in the demo.)
 
-header "Demo 15: Argument-Sensitive Policy Escalation (live, gemini-2.5-flash)"
+header $"Demo 15: Argument-Sensitive Policy Escalation (live, ($demo_model))"
 show-desc "Demonstrates argument-sensitive policy escalation: policy matches dangerous patterns (rm -rf) in arguments to dynamically elevate authority requirements."
 
 let d15_dir = ($nu.temp-dir | path join $"aichat-argpolicy-($nu.pid)")
@@ -1048,7 +1067,7 @@ if (should-run-demo "17" $demo) {
 #   4. Gate #6d durable rollback journal records pre-mutation entry (0600 fsync).
 #   5. Tool executes cleanly with piped input.
 
-header "Demo 17: Full Safety Lifecycle — Happy Path (live, gemini-2.5-flash)"
+header $"Demo 17: Full Safety Lifecycle — Happy Path (live, ($demo_model))"
 show-desc "Demonstrates full safety lifecycle happy path: executing a mutating tool (fs_write) within authorized authority with live trace logging."
 
 let d17_target = ($nu.temp-dir | path join $"aichat-safe-write-($nu.pid).txt")
@@ -1145,7 +1164,7 @@ if (should-run-demo "19" $demo) {
 # `fs_write` is disruptive -> stepped down to reversible, but reversible > safe!
 # The gate blocks with authority_exceeded and the file is NOT created.
 
-header "Demo 19: Authority Ceiling Fail-Closed (live, gemini-2.5-flash)"
+header $"Demo 19: Authority Ceiling Fail-Closed (live, ($demo_model))"
 show-desc "Demonstrates authority ceiling escalation and fail-closed defense: irreversibly destructive tool is refused when authority exceeds safe ceiling."
 
 let d19_target = ($nu.temp-dir | path join $"aichat-blocked-write-($nu.pid).txt")
@@ -1193,7 +1212,7 @@ if (should-run-demo "20" $demo) {
 # 4. Orchestrator ingests the `permission_blocked` tool result and re-delegates to coder with `disruptive` ceiling.
 # 5. Coder executes successfully within its new statically provisioned authority ceiling.
 
-header "Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation (live, gemini-2.5-flash)"
+header $"Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation (live, ($demo_model))"
 show-desc "Demonstrates hard authority ceiling sandboxing: sub-agent attempts disruptive action exceeding its reversible ceiling, is hard-blocked with zero downward permits, unwinds, and parent re-delegates with disruptive ceiling."
 
 let d20_target = ($nu.temp-dir | path join $"aichat-orch-esc-($nu.pid).txt")
@@ -1241,7 +1260,7 @@ if (should-run-demo "21" $demo) {
 #    to coder with explicit mutating permissions.
 # 5. Coder executes successfully on the second delegation and writes the file.
 
-header "Demo 21: Sub-Agent Capability Block & Re-Delegation (live, gemini-2.5-flash)"
+header $"Demo 21: Sub-Agent Capability Block & Re-Delegation (live, ($demo_model))"
 show-desc "Demonstrates sub-agent capability boundary enforcement: when a child agent lacks capability for a tool, parent re-delegates to a capable agent."
 
 let d21_target = ($nu.temp-dir | path join $"aichat-orch-redelegate-($nu.pid).txt")
