@@ -28,6 +28,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use serde::{Deserialize, Serialize};
 
 pub mod dialog_trace;
+pub mod plan;
 pub use dialog_trace::*;
 
 // ---------------------------------------------------------------------------
@@ -103,6 +104,18 @@ pub enum AgentLoopEvent {
     },
     PlanReceived {
         content: String,
+    },
+    PlanStepUpdated {
+        step_id: usize,
+        status: crate::agent_loop::plan::StepStatus,
+        intent: String,
+        tool: Option<String>,
+    },
+    PlanRiskPrepassFlagged {
+        step_id: usize,
+        tool: String,
+        tier: String,
+        rationale: Option<String>,
     },
     BudgetWarning {
         turn: usize,
@@ -1320,6 +1333,108 @@ fn risk_blocked_result(
             )
         }
     }))
+}
+
+/// Backlog #15 (Spec A): Ahead-of-time risk pre-pass over structured plan steps.
+///
+/// Invariant 2: Strictly raise-only, never a green-light. Pre-raises verdicts
+/// into the raise-only RiskCache; act-time evaluation remains non-negotiable.
+///
+/// Invariant 3: If #6c is absent on the branch/configuration, this cleanly no-ops.
+pub async fn plan_risk_prepass(
+    config: &GlobalConfig,
+    steps: &[crate::agent_loop::plan::PlanStep],
+    risk_cache: Option<std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
+    progress: Option<&AgentLoopProgress>,
+) -> Result<()> {
+    let cache = match risk_cache {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+
+    let risk_model = match config
+        .read()
+        .safety
+        .risk_model
+        .clone()
+        .or_else(|| config.read().role_model_id(crate::config::ASSESS_RISK_ROLE))
+    {
+        Some(m) => m,
+        None => return Ok(()), // Clean no-op without #6c (Invariant 3)
+    };
+
+    for step in steps {
+        let tool_name = match &step.tool {
+            Some(t) if !t.is_empty() && t != "_plan" => t,
+            _ => continue,
+        };
+
+        if call_targets_agent(config, tool_name) {
+            continue;
+        }
+
+        let (static_tier, static_reversible) = tool_tier_and_reversibility(config, tool_name);
+        let base_tier = match static_tier {
+            crate::function::StaticTier::Tier(t) => t,
+            crate::function::StaticTier::Unclassified => crate::function::BlastRadius::Destructive,
+        };
+
+        // Reads / safe actions never consult the evaluator
+        if base_tier == crate::function::BlastRadius::Safe {
+            continue;
+        }
+
+        let preview_args = step.args_preview.clone().unwrap_or(serde_json::json!({}));
+        let intent = format!("step {}: {}", step.id, step.intent);
+        let decl = find_tool_declaration(config, tool_name);
+        let agent_name = config.read().agent.as_ref().map(|a| a.name().to_string());
+        let impl_info = resolve_tool_implementation(config, tool_name, agent_name.as_deref());
+        let decl_ctx = crate::safety::extract_declaration_context(decl.as_ref(), impl_info.source());
+        let invocation = format_tool_invocation(tool_name, &preview_args);
+        let fn_dir = Config::functions_dir();
+        let helpers = if let Some(source) = impl_info.source() {
+            crate::safety::resolve_tool_helpers(&fn_dir, source)
+        } else {
+            Vec::new()
+        };
+
+        let context = crate::safety::build_evaluator_context(
+            tool_name,
+            &preview_args,
+            static_reversible,
+            &intent,
+            decl_ctx.as_ref(),
+            Some(&impl_info),
+            invocation.as_deref(),
+            if helpers.is_empty() { None } else { Some(&helpers) },
+        );
+
+        match run_risk_evaluator(config, &risk_model, &context, progress).await {
+            Ok(raw) => {
+                let verdict = crate::safety::RiskVerdict::parse(&raw, base_tier);
+                if verdict.tier > base_tier {
+                    if let Some(p) = progress {
+                        p.emit(AgentLoopEvent::PlanRiskPrepassFlagged {
+                            step_id: step.id,
+                            tool: tool_name.clone(),
+                            tier: verdict.tier.as_str().to_string(),
+                            rationale: if verdict.rationale.is_empty() {
+                                None
+                            } else {
+                                Some(verdict.rationale.clone())
+                            },
+                        });
+                    }
+                }
+                cache.lock().raise(tool_name, &preview_args, verdict);
+            }
+            Err(e) => {
+                debug!("Plan risk pre-pass evaluation skipped for step {}: {e}", step.id);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Invoke the `%assess-risk%` role with the dedicated evaluator model, returning
@@ -2659,30 +2774,96 @@ fn cost_budget_exceeded(cost: f64, max_cost: f64) -> bool {
 /// reason/decompose tasks without polluting user-visible output. The content is
 /// appended to the next turn's context but never displayed to the user.
 pub fn plan_tool_declaration() -> FunctionDeclaration {
+    let mut step_props = IndexMap::new();
+    step_props.insert(
+        "id".to_string(),
+        JsonSchema {
+            type_value: Some("integer".to_string()),
+            description: Some("Unique positive 1-based step index.".to_string()),
+            ..Default::default()
+        },
+    );
+    step_props.insert(
+        "intent".to_string(),
+        JsonSchema {
+            type_value: Some("string".to_string()),
+            description: Some("Action or goal of this step.".to_string()),
+            ..Default::default()
+        },
+    );
+    step_props.insert(
+        "tool".to_string(),
+        JsonSchema {
+            type_value: Some("string".to_string()),
+            description: Some("Name of the tool intended for this step.".to_string()),
+            ..Default::default()
+        },
+    );
+    step_props.insert(
+        "args_preview".to_string(),
+        JsonSchema {
+            type_value: Some("object".to_string()),
+            description: Some("Preview of the arguments for this tool call.".to_string()),
+            ..Default::default()
+        },
+    );
+    step_props.insert(
+        "depends_on".to_string(),
+        JsonSchema {
+            type_value: Some("array".to_string()),
+            description: Some("Step IDs that must complete before this step.".to_string()),
+            items: Some(Box::new(JsonSchema {
+                type_value: Some("integer".to_string()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        },
+    );
+
+    let step_schema = JsonSchema {
+        type_value: Some("object".to_string()),
+        properties: Some(step_props),
+        required: Some(vec!["id".to_string(), "intent".to_string()]),
+        ..Default::default()
+    };
+
+    let mut props = IndexMap::new();
+    props.insert(
+        "objective".to_string(),
+        JsonSchema {
+            type_value: Some("string".to_string()),
+            description: Some("High-level goal of the execution sequence.".to_string()),
+            ..Default::default()
+        },
+    );
+    props.insert(
+        "steps".to_string(),
+        JsonSchema {
+            type_value: Some("array".to_string()),
+            description: Some("Ordered execution steps with declared tools and intent.".to_string()),
+            items: Some(Box::new(step_schema)),
+            ..Default::default()
+        },
+    );
+    props.insert(
+        "thought".to_string(),
+        JsonSchema {
+            type_value: Some("string".to_string()),
+            description: Some("Legacy free-text reasoning scratchpad.".to_string()),
+            ..Default::default()
+        },
+    );
+
     FunctionDeclaration {
         name: "_plan".to_string(),
-        description: "Write your reasoning, task decomposition, or plan to a scratchpad. \
+        description: "Formulate or update a structured execution plan. You may output an ordered step list with tools and intent, or legacy free-text reasoning. \
             Always invoke this tool using its exact name '_plan' (with a leading underscore, do not call 'plan'). \
-            The content will be available in your next turn's context but will not be \
-            shown to the user. Use this to think through complex tasks before acting."
+            The content will be available in your next turn's context but will not be shown to the user."
             .to_string(),
         parameters: JsonSchema {
             type_value: Some("object".to_string()),
-            properties: Some({
-                let mut props = IndexMap::new();
-                props.insert(
-                    "thought".to_string(),
-                    JsonSchema {
-                        type_value: Some("string".to_string()),
-                        description: Some(
-                            "Your reasoning, plan, or task decomposition.".to_string(),
-                        ),
-                        ..Default::default()
-                    },
-                );
-                props
-            }),
-            required: Some(vec!["thought".to_string()]),
+            properties: Some(props),
+            required: None,
             ..Default::default()
         },
         agent: false,
@@ -2737,6 +2918,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     let risk_cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
     let agent_name = current_agent_name(params.config);
     let pid = std::process::id();
+    let mut plan_tracker: Option<crate::agent_loop::plan::PlanTracker> = None;
 
     for turn in 1..=max_turns {
         params.progress.set_turn(turn, max_turns);
@@ -2883,22 +3065,51 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
         // Handle plan calls: emit events, log, produce "acknowledged" results
         let mut tool_results: Vec<ToolResult> = Vec::new();
         for plan_call in &plan_calls {
-            let content = plan_call
-                .arguments
-                .get("thought")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !content.is_empty() {
-                params.progress.emit(AgentLoopEvent::PlanReceived {
-                    content: content.clone(),
-                });
-                debug!("Agent plan: {content}");
+            let payload = crate::agent_loop::plan::PlanPayload::parse_flexible(plan_call.arguments.clone());
+            match payload {
+                crate::agent_loop::plan::PlanPayload::Structured(structured_plan) => {
+                    params.progress.emit(AgentLoopEvent::PlanReceived {
+                        content: format!("objective: \"{}\"", structured_plan.objective),
+                    });
+                    for step in &structured_plan.steps {
+                        params.progress.emit(AgentLoopEvent::PlanStepUpdated {
+                            step_id: step.id,
+                            status: step.status,
+                            intent: step.intent.clone(),
+                            tool: step.tool.clone(),
+                        });
+                    }
+                    debug!("Agent structured plan: {}", structured_plan.objective);
+
+                    // Ahead-of-time risk pre-pass (#15 Spec A, #6c floor)
+                    let _ = plan_risk_prepass(
+                        params.config,
+                        &structured_plan.steps,
+                        Some(risk_cache.clone()),
+                        Some(&params.progress),
+                    )
+                    .await;
+
+                    let ack_msg = format!("Plan acknowledged with {} steps", structured_plan.steps.len());
+                    tool_results.push(ToolResult::new(
+                        plan_call.clone(),
+                        json!(ack_msg),
+                    ));
+                    plan_tracker = Some(crate::agent_loop::plan::PlanTracker::new(structured_plan));
+                }
+                crate::agent_loop::plan::PlanPayload::Legacy(content) => {
+                    if !content.is_empty() {
+                        params.progress.emit(AgentLoopEvent::PlanReceived {
+                            content: content.clone(),
+                        });
+                        debug!("Agent plan: {content}");
+                    }
+                    tool_results.push(ToolResult::new(
+                        plan_call.clone(),
+                        json!("acknowledged"),
+                    ));
+                }
             }
-            tool_results.push(ToolResult::new(
-                plan_call.clone(),
-                json!("acknowledged"),
-            ));
         }
 
         // Circuit breaker: separate tripped calls from executable calls
@@ -2941,6 +3152,22 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             ));
         }
 
+        // Advance plan tracker for executable calls
+        if let Some(ref mut tracker) = plan_tracker {
+            for call in &executable_calls {
+                if let Some(step_id) = tracker.update_active_step(&call.name) {
+                    if let Some(step) = tracker.steps.iter().find(|s| s.id == step_id) {
+                        params.progress.emit(AgentLoopEvent::PlanStepUpdated {
+                            step_id: step.id,
+                            status: step.status,
+                            intent: step.intent.clone(),
+                            tool: step.tool.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
         // Execute remaining tool calls in parallel
         if !executable_calls.is_empty() {
             let real_results = eval_tool_calls_parallel(
@@ -2951,6 +3178,29 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                 Some(risk_cache.clone()),
             )
             .await?;
+
+            // Update plan tracker status based on execution outcomes
+            if let Some(ref mut tracker) = plan_tracker {
+                for res in &real_results {
+                    let is_err = res.output.get("error").is_some()
+                        || res.output.get("status").and_then(|s| s.as_str()) == Some("permission_blocked");
+                    let updated_id = if is_err {
+                        tracker.fail_active_step()
+                    } else {
+                        tracker.complete_active_step()
+                    };
+                    if let Some(step_id) = updated_id {
+                        if let Some(step) = tracker.steps.iter().find(|s| s.id == step_id) {
+                            params.progress.emit(AgentLoopEvent::PlanStepUpdated {
+                                step_id: step.id,
+                                status: step.status,
+                                intent: step.intent.clone(),
+                                tool: step.tool.clone(),
+                            });
+                        }
+                    }
+                }
+            }
 
             // Update circuit breaker state based on results
             update_circuit_breaker(&real_results, &mut tool_failure_counts, &mut tripped_tools);
@@ -4447,6 +4697,35 @@ pub fn format_trace_event_styled(
             };
             Some(format!("{agent_tag} plan: \"{preview}\""))
         }
+        AgentLoopEvent::PlanStepUpdated {
+            step_id,
+            status,
+            intent,
+            tool,
+        } => {
+            let tool_str = tool
+                .as_deref()
+                .map(|t| format!(" ({t})"))
+                .unwrap_or_default();
+            Some(format!(
+                "{agent_tag} plan:   {} {step_id}. {intent}{tool_str}",
+                status.symbol()
+            ))
+        }
+        AgentLoopEvent::PlanRiskPrepassFlagged {
+            step_id,
+            tool,
+            tier,
+            rationale,
+        } => {
+            let rat_str = rationale
+                .as_deref()
+                .map(|r| format!(": {r}"))
+                .unwrap_or_default();
+            Some(format!(
+                "{agent_tag} plan: step {step_id} ({tool}) flagged by pre-pass: {tier}{rat_str} [cached floor]"
+            ))
+        }
         AgentLoopEvent::BudgetWarning { turn, max_turns } => {
             if is_styled {
                 let warn = nu_ansi_term::Color::Yellow.paint(format!("budget warning: turn {turn}/{max_turns}"));
@@ -5134,11 +5413,18 @@ agent_loop:
         let decl = plan_tool_declaration();
         assert_eq!(decl.name, "_plan");
         assert!(!decl.agent);
-        assert!(decl.description.contains("scratchpad"));
+        assert!(decl.description.contains("_plan"));
         let props = decl.parameters.properties.as_ref().unwrap();
+        assert!(props.contains_key("objective"));
+        assert!(props.contains_key("steps"));
         assert!(props.contains_key("thought"));
-        let required = decl.parameters.required.as_ref().unwrap();
-        assert!(required.contains(&"thought".to_string()));
+        let steps_schema = props.get("steps").unwrap();
+        let step_item_props = steps_schema.items.as_ref().unwrap().properties.as_ref().unwrap();
+        assert!(step_item_props.contains_key("id"));
+        assert!(step_item_props.contains_key("intent"));
+        assert!(step_item_props.contains_key("tool"));
+        assert!(step_item_props.contains_key("args_preview"));
+        assert!(step_item_props.contains_key("depends_on"));
     }
 
     #[test]
@@ -6737,6 +7023,45 @@ agent_loop:
                 .await
                 .is_none(),
             "with no risk_model the evaluator must be a no-op (degrade to #6b)"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("AICHAT_ROLES_DIR", v),
+            None => std::env::remove_var("AICHAT_ROLES_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&empty_dir);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_prepass_noop_without_6c() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev = std::env::var("AICHAT_ROLES_DIR").ok();
+        let empty_dir = crate::utils::temp_file("-test-empty-roles-", "");
+        std::fs::create_dir_all(&empty_dir).unwrap();
+        std::env::set_var("AICHAT_ROLES_DIR", &empty_dir);
+
+        let config = config_with_tiers();
+        assert!(config.read().safety.risk_model.is_none());
+
+        let cache = std::sync::Arc::new(parking_lot::Mutex::new(crate::safety::RiskCache::new()));
+        let steps = vec![crate::agent_loop::plan::PlanStep {
+            id: 1,
+            intent: "Restart critical database".to_string(),
+            tool: Some("restart_svc".to_string()),
+            args_preview: Some(json!({ "svc": "database" })),
+            depends_on: vec![],
+            status: crate::agent_loop::plan::StepStatus::Pending,
+        }];
+
+        let result = plan_risk_prepass(&config, &steps, Some(cache.clone()), None).await;
+        assert!(result.is_ok(), "plan_risk_prepass must succeed as a clean no-op without 6c");
+        assert!(
+            cache
+                .lock()
+                .get("restart_svc", &json!({ "svc": "database" }))
+                .is_none(),
+            "cache must remain untouched when pre-pass degrades"
         );
 
         match prev {
