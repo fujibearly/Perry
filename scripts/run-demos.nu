@@ -194,6 +194,9 @@ def main [
     } else if ("AICHAT_WSLINKS" in $env) {
         hide-env AICHAT_WSLINKS
     }
+    if ("SUMMARIZE_MODEL" in $env) {
+        hide-env SUMMARIZE_MODEL
+    }
 
     # Resolve default aichat model dynamically if not specified via --model / -m
     let demo_model = (
