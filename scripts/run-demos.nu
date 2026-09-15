@@ -86,9 +86,43 @@ def show-desc [desc: string] {
     print $"  (ansi cyan_bold)ℹ(ansi reset) (ansi white)($desc)(ansi reset)\n"
 }
 
-# Print the command being run (human-readable, no env boilerplate)
-def show-cmd [cmd: string] {
-    print $"  (ansi yellow)▶(ansi reset) (ansi white_dimmed)($cmd)(ansi reset)"
+# Print the command being run with all relevant execution environment variables and exact arguments
+def show-cmd [env_or_cmd: any, cmd_args: list<string> = []] {
+    let display_str = if ($env_or_cmd | describe) =~ "^record" {
+        let env_record = $env_or_cmd
+        let has_web_search = ($cmd_args | any { |a| ($a in ["orchestrator", "researcher"]) or ($a | str contains "web_search") or ($a | str contains "fetch_and_summarize") })
+        # Select relevant execution environment variables to display (ignoring PATH and standard system vars)
+        let candidate_keys = [
+            "AICHAT_MODEL",
+            (if $has_web_search { "WEB_SEARCH_MODEL" } else { "" }),
+            "AICHAT_SAFETY_DEFAULT_CEILING",
+            "AICHAT_SAFETY_POLICY_FILE",
+            "AICHAT_AGENT_LOOP_SHOW_TRACE",
+            "AICHAT_AGENT_LOOP_SHOW_DIALOG",
+            "AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE",
+            "AICHAT_AGENT_LOOP_MAX_TURNS",
+            "AICHAT_WSLINKS",
+            "AICHAT_AGENT_PARENT_ADDR",
+            "AICHAT_SAFETY_VERDICT_TIMEOUT_SECS",
+            "AICHAT_CONFIG_DIR",
+        ] | where { ($in | str length) > 0 }
+        let env_parts = ($candidate_keys | where { $in in $env_record } | each { |k|
+            let val = ($env_record | get $k)
+            $"($k)=($val)"
+        })
+        let formatted_args = ($cmd_args | each { |arg|
+            if ($arg | str contains " ") or ($arg | str contains "\n") or ($arg | str contains "'") or ($arg | str contains '"') {
+                $"\"($arg | str replace -a '\"' '\\\"')\""
+            } else {
+                $arg
+            }
+        })
+        let parts = ($env_parts | append "aichat" | append $formatted_args)
+        $parts | str join " "
+    } else {
+        $env_or_cmd
+    }
+    print $"  (ansi yellow)▶(ansi reset) (ansi white_dimmed)($display_str)(ansi reset)"
 }
 
 # Print pass/fail
@@ -282,12 +316,13 @@ header "Demo 1: Parallel Tool Execution"
 show-desc "Verifies parallel tool execution: calls slow_task 3 times concurrently, confirming total wall-clock time is ~2s rather than 6s sequential."
 
 let demo1_prompt = "You MUST call slow_task exactly 3 times in parallel: label='first' delay=2, label='second' delay=2, label='third' delay=2. Do NOT answer without calling the tools."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "($demo1_prompt)"'
+let demo1_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo1_args = [--show-cost -r "%functions%" $demo1_prompt]
+show-cmd $demo1_env $demo1_args
 step-pause $should_pause
 
-let demo1_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo1 = (do {
-    "" | with-env $demo1_env { ^$aichat_bin --show-cost -r "%functions%" $demo1_prompt }
+    "" | with-env $demo1_env { ^$aichat_bin ...$demo1_args }
 } | complete)
 
 let trace1 = ($demo1.stderr | default "")
@@ -313,12 +348,13 @@ header "Demo 2: Turn Budget"
 show-desc "Verifies turn budget enforcement: sets max turns to 1 and asserts that the agent triggers a turn limit warning when more turns are required."
 
 let demo2_prompt = "Read each of the files /etc/hostname, /etc/os-release, /etc/shells, /etc/fstab one by one and summarize each"
-show-cmd $'AICHAT_AGENT_LOOP_MAX_TURNS=1 aichat --show-cost -r %functions% "($demo2_prompt)"'
+let demo2_env = ($base_env | merge { AICHAT_AGENT_LOOP_MAX_TURNS: "1", AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo2_args = [--show-cost -r "%functions%" $demo2_prompt]
+show-cmd $demo2_env $demo2_args
 step-pause $should_pause
 
-let demo2_env = ($base_env | merge { AICHAT_AGENT_LOOP_MAX_TURNS: "1", AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo2 = (do {
-    "" | with-env $demo2_env { ^$aichat_bin --show-cost -r "%functions%" $demo2_prompt }
+    "" | with-env $demo2_env { ^$aichat_bin ...$demo2_args }
 } | complete)
 
 let combined2 = $"($demo2.stdout)($demo2.stderr | default '')"
@@ -335,14 +371,15 @@ header "Demo 3: Planning Tool (_plan)"
 show-desc "Demonstrates structured planning: orchestrator formulates an upfront plan with _plan before delegating tasks, keeping the plan internal to trace."
 
 let demo3_prompt = "Read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo3_prompt)"'
-step-pause $should_pause
-
 if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
 
 let demo3_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo3_args = [--show-cost --agent orchestrator $demo3_prompt]
+show-cmd $demo3_env $demo3_args
+step-pause $should_pause
+
 let demo3 = (do {
-    "" | with-env $demo3_env { ^$aichat_bin --show-cost --agent orchestrator $demo3_prompt }
+    "" | with-env $demo3_env { ^$aichat_bin ...$demo3_args }
 } | complete)
 
 let trace3 = ($demo3.stderr | default "")
@@ -388,12 +425,18 @@ let demo4_desc = if $wslinks {
 show-desc $demo4_desc
 
 let demo4_prompt = "You MUST delegate this to the researcher agent (do NOT answer yourself): Search the web for 'what is Model Context Protocol MCP by Anthropic' and return a summary with sources."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost($wslinks_cmd_str) --agent orchestrator "($demo4_prompt)"'
+let demo4_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo4_args = [
+    --show-cost
+    ...$wslinks_args
+    --agent orchestrator
+    $demo4_prompt
+]
+show-cmd $demo4_env $demo4_args
 step-pause $should_pause
 
-let demo4_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo4 = (do {
-    "" | with-env $demo4_env { ^$aichat_bin --show-cost ...$wslinks_args --agent orchestrator $demo4_prompt }
+    "" | with-env $demo4_env { ^$aichat_bin ...$demo4_args }
 } | complete)
 
 let trace4 = ($demo4.stderr | default "")
@@ -425,12 +468,18 @@ let demo5_desc = if $wslinks {
 show-desc $demo5_desc
 
 let demo5_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost($wslinks_cmd_str) --agent orchestrator "($demo5_prompt)"'
+let demo5_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo5_args = [
+    --show-cost
+    ...$wslinks_args
+    --agent orchestrator
+    $demo5_prompt
+]
+show-cmd $demo5_env $demo5_args
 step-pause $should_pause
 
-let demo5_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo5 = (do {
-    "" | with-env $demo5_env { ^$aichat_bin --show-cost ...$wslinks_args --agent orchestrator $demo5_prompt }
+    "" | with-env $demo5_env { ^$aichat_bin ...$demo5_args }
 } | complete)
 
 let trace5 = ($demo5.stderr | default "")
@@ -457,15 +506,16 @@ if (should-run-demo "5b" $demo) {
 # ─── Demo 5b: Parallel Delegation (Direct Grounded Search) ──────────────────────
 
 header "Demo 5b: Parallel Delegation (Direct Grounded Search)"
-show-desc "Demonstrates parallel sub-agent delegation with direct grounded web search (default, no --wslinks): orchestrator invokes two researcher agents concurrently, using grounded search results without secondary page scraping."
+show-desc "Demonstrates parallel sub-agent delegation explicitly pinned to direct grounded web search (AICHAT_WSLINKS=false): orchestrator invokes two researcher agents concurrently, using direct grounded search results without secondary page scraping."
 
 let demo5b_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost --agent orchestrator "($demo5b_prompt)"'
+let demo5b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true", AICHAT_WSLINKS: "false" })
+let demo5b_args = [--show-cost --agent orchestrator $demo5b_prompt]
+show-cmd $demo5b_env $demo5b_args
 step-pause $should_pause
 
-let demo5b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true", AICHAT_WSLINKS: "false" })
 let demo5b = (do {
-    "" | with-env $demo5b_env { ^$aichat_bin --show-cost --agent orchestrator $demo5b_prompt }
+    "" | with-env $demo5b_env { ^$aichat_bin ...$demo5b_args }
 } | complete)
 
 let trace5b = ($demo5b.stderr | default "")
@@ -493,7 +543,9 @@ header "Demo 6: External Observability (status file + tmux title)"
 show-desc "Demonstrates external observability: asserts background JSON status file emission in XDG_RUNTIME_DIR and dynamic tmux pane title updates."
 
 let demo6_prompt = "You MUST call slow_task with label=observability-test and delay=8. Do NOT answer without calling the tool."
-show-cmd $'aichat --show-cost -r %functions% "($demo6_prompt)"'
+let demo6_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo6_args = [--show-cost -r "%functions%" $demo6_prompt]
+show-cmd $demo6_env $demo6_args
 step-pause $should_pause
 
 let in_tmux = ($env | get TMUX? | default "" | str length) > 0
@@ -577,18 +629,19 @@ if $in_tmux {
 }
 
 if (should-run-demo "7" $demo) {
-# ─── Demo 7: Auto-Capping ────────────────────────────────────────────────────
+# ─── Demo 7: Tool Output Auto-Capping ────────────────────────────────────────────
 
 header "Demo 7: Tool Output Auto-Capping"
 show-desc "Demonstrates tool output auto-capping: large tool output exceeding thresholds is safely written to disk and summarized to avoid token bloat."
 
 let demo7_prompt = "Use fs_cat to read the file /usr/share/dict/cracklib-small"
-show-cmd $'aichat --show-cost -r %functions% "($demo7_prompt)"'
+let demo7_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo7_args = [--show-cost -r "%functions%" $demo7_prompt]
+show-cmd $demo7_env $demo7_args
 step-pause $should_pause
 
-let demo7_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo7 = (do {
-    "" | with-env $demo7_env { ^$aichat_bin --show-cost -r "%functions%" $demo7_prompt }
+    "" | with-env $demo7_env { ^$aichat_bin ...$demo7_args }
 } | complete)
 
 # Trace visible live on terminal via /dev/tty
@@ -618,12 +671,13 @@ header "Demo 8: Pipe Routing (fetch_and_summarize)"
 show-desc "Demonstrates pipe routing: executes fetch_and_summarize tool pipeline where fetched web content is parsed to Markdown via html-to-markdown and piped directly to summarizer without LLM token consumption."
 
 let demo8_prompt = "You MUST call the fetch_and_summarize tool with url 'https://example.com'. Do not use any other tool."
-show-cmd $'aichat --show-cost -r %functions% "($demo8_prompt)"'
+let demo8_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo8_args = [--show-cost -r "%functions%" $demo8_prompt]
+show-cmd $demo8_env $demo8_args
 step-pause $should_pause
 
-let demo8_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo8 = (do {
-    "" | with-env $demo8_env { ^$aichat_bin --show-cost -r "%functions%" $demo8_prompt }
+    "" | with-env $demo8_env { ^$aichat_bin ...$demo8_args }
 } | complete)
 
 let trace8 = ($demo8.stderr | default "")
@@ -646,12 +700,13 @@ header "Demo 9: File Destination (generate_data)"
 show-desc "Demonstrates file destination routing: tool data is written directly to a designated file path on disk without polluting model context."
 
 let demo9_prompt = "You MUST call generate_data with rows=20. Do NOT answer without calling the tool."
-show-cmd $'aichat --show-cost -r %functions% "($demo9_prompt)"'
+let demo9_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo9_args = [--show-cost -r "%functions%" $demo9_prompt]
+show-cmd $demo9_env $demo9_args
 step-pause $should_pause
 
-let demo9_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo9 = (do {
-    "" | with-env $demo9_env { ^$aichat_bin --show-cost -r "%functions%" $demo9_prompt }
+    "" | with-env $demo9_env { ^$aichat_bin ...$demo9_args }
 } | complete)
 
 let trace9 = ($demo9.stderr | default "")
@@ -688,12 +743,13 @@ header "Demo 10: PDF Reading (manual.pdf)"
 show-desc "Demonstrates native PDF reading: executes read_pdf on manual.pdf and verifies extracted text is processed by the model."
 
 let demo10_prompt = $"Use read_pdf to read the file ($manual_pdf) and tell me what this document is about. List the main sections."
-show-cmd "aichat --show-cost -r %functions% \"Use read_pdf to read ./manual.pdf and tell me what this document is about.\""
+let demo10_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo10_args = [--show-cost -r "%functions%" $demo10_prompt]
+show-cmd $demo10_env $demo10_args
 step-pause $should_pause
 
-let demo10_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo10 = (do {
-    "" | with-env $demo10_env { ^$aichat_bin --show-cost -r "%functions%" $demo10_prompt }
+    "" | with-env $demo10_env { ^$aichat_bin ...$demo10_args }
 } | complete)
 
 let trace10 = ($demo10.stderr | default "")
@@ -714,11 +770,13 @@ header "Demo 10b: PDF Page Selection + Compact"
 show-desc "Demonstrates targeted PDF extraction: reads specific page ranges (5-10) with compact formatting for token efficiency."
 
 let demo10b_prompt = $"You MUST call read_pdf with path='($manual_pdf)', pages='5-10', and the compact flag. Then summarize what those pages cover."
-show-cmd "aichat --show-cost -r %functions% \"read_pdf ./manual.pdf --pages='5-10' --compact\""
+let demo10b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo10b_args = [--show-cost -r "%functions%" $demo10b_prompt]
+show-cmd $demo10b_env $demo10b_args
 step-pause $should_pause
 
 let demo10b = (do {
-    "" | with-env ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" }) { ^$aichat_bin --show-cost -r "%functions%" $demo10b_prompt }
+    "" | with-env $demo10b_env { ^$aichat_bin ...$demo10b_args }
 } | complete)
 
 let trace10b = ($demo10b.stderr | default "")
@@ -739,18 +797,29 @@ let demo11_title = if $wslinks {
     "Demo 11: Combined (plan + delegate + synthesize)"
 }
 header $demo11_title
-show-desc "Demonstrates complete composite workflow: orchestrator plans with _plan, delegates research, and synthesizes findings end-to-end."
+let demo11_desc = if $wslinks {
+    "Demonstrates complete composite workflow with link exploration (--wslinks): orchestrator plans with _plan, delegates research to researcher agent with link discovery, and synthesizes findings end-to-end."
+} else {
+    "Demonstrates complete composite workflow: orchestrator plans with _plan, delegates research, and synthesizes findings end-to-end."
+}
+show-desc $demo11_desc
 
 let demo11_prompt = "You MUST plan first using the exact tool named '_plan' (with leading underscore, do NOT call 'plan'). Then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. In your final answer, state the findings and mention the researcher agent. Do NOT answer from memory — you MUST delegate."
-show-cmd $'AICHAT_AGENT_LOOP_SHOW_TRACE=true AICHAT_AGENT_LOOP_MAX_TURNS=15 aichat --show-cost($wslinks_cmd_str) --agent orchestrator "($demo11_prompt)"'
-step-pause $should_pause
-
 let demo11_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "15"
 })
+let demo11_args = [
+    --show-cost
+    ...$wslinks_args
+    --agent orchestrator
+    $demo11_prompt
+]
+show-cmd $demo11_env $demo11_args
+step-pause $should_pause
+
 let demo11 = (do {
-    "" | with-env $demo11_env { ^$aichat_bin --show-cost ...$wslinks_args --agent orchestrator $demo11_prompt }
+    "" | with-env $demo11_env { ^$aichat_bin ...$demo11_args }
 } | complete)
 
 let trace11 = ($demo11.stderr | default "")
@@ -798,17 +867,20 @@ mkdir $crash_cfg_dir
 "model: openai:gpt-4o-mini\nclients:\n- type: openai\n  api_key: sk-fake-crash-demo\n" | save -f ($crash_cfg_dir | path join "config.yaml")
 
 # Override AICHAT_MODEL (inherited from base_env) to match this throwaway
+# Override AICHAT_MODEL (inherited from base_env) to match this throwaway
 # config's own client, so the ONLY failure is the unknown agent — not an
 # unrelated "unknown model" error from the harness-wide flash default.
 let crash_env = ($base_env | merge {
     AICHAT_CONFIG_DIR: $crash_cfg_dir
     AICHAT_MODEL: "openai:gpt-4o-mini"
+    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
 })
-show-cmd 'aichat --agent __nonexistent_crash_test__ "trigger crash"'
+let demo12_args = [--agent "__nonexistent_crash_test__" "trigger crash"]
+show-cmd $crash_env $demo12_args
 step-pause $should_pause
 
 let demo12 = (do {
-    "" | with-env $crash_env { ^$aichat_bin --agent "__nonexistent_crash_test__" "trigger crash" }
+    "" | with-env $crash_env { ^$aichat_bin ...$demo12_args }
 } | complete)
 
 let crash_stderr = ($demo12.stderr | default "")
@@ -849,16 +921,17 @@ let d13_policy = ($d13_dir | path join "policy.yaml")
 chmod 0600 $d13_policy
 
 let d13_prompt = "You MUST call the get_current_time tool exactly once to tell me the current time. Do not answer from memory."
-show-cmd 'AICHAT_SAFETY_POLICY_FILE=[0600 policy: forbid get_current_time] aichat --show-cost -r %functions% "<prompt>"'
-step-pause $should_pause
-
 let d13_env = ($base_env | merge {
     AICHAT_SAFETY_POLICY_FILE: $d13_policy
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "2"
 })
+let demo13_args = [--show-cost -r "%functions%" $d13_prompt]
+show-cmd $d13_env $demo13_args
+step-pause $should_pause
+
 let demo13 = (do {
-    "" | with-env $d13_env { ^$aichat_bin --show-cost -r "%functions%" $d13_prompt }
+    "" | with-env $d13_env { ^$aichat_bin ...$demo13_args }
 } | complete)
 
 let trace13 = ($demo13.stderr | default "")
@@ -900,17 +973,18 @@ let d14_policy = ($d14_dir | path join "policy.yaml")
 chmod 0600 $d14_policy
 
 let d14_prompt = "You MUST call the get_current_time tool exactly once to tell me the current time. Do not answer from memory."
-show-cmd 'AICHAT_SAFETY_POLICY_FILE=[raise get_current_time to catastrophic] AICHAT_SAFETY_DEFAULT_CEILING=destructive aichat --show-cost -r %functions% "<prompt>"'
-step-pause $should_pause
-
 let d14_env = ($base_env | merge {
     AICHAT_SAFETY_POLICY_FILE: $d14_policy
     AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "2"
 })
+let demo14_args = [--show-cost -r "%functions%" $d14_prompt]
+show-cmd $d14_env $demo14_args
+step-pause $should_pause
+
 let demo14 = (do {
-    "" | with-env $d14_env { ^$aichat_bin --show-cost -r "%functions%" $d14_prompt }
+    "" | with-env $d14_env { ^$aichat_bin ...$demo14_args }
 } | complete)
 
 let trace14 = ($demo14.stderr | default "")
@@ -950,17 +1024,18 @@ let d15_policy = ($d15_dir | path join "policy.yaml")
 chmod 0600 $d15_policy
 
 let d15_prompt = "You MUST call execute_command exactly once with this exact command: echo 'the phrase rm -rf is dangerous'. Do not answer without calling the tool."
-show-cmd 'AICHAT_SAFETY_POLICY_FILE=[execute_command arg_contains rm -rf -> catastrophic] AICHAT_SAFETY_DEFAULT_CEILING=destructive aichat --show-cost -r %functions% "<prompt>"'
-step-pause $should_pause
-
 let d15_env = ($base_env | merge {
     AICHAT_SAFETY_POLICY_FILE: $d15_policy
     AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "2"
 })
+let demo15_args = [--show-cost -r "%functions%" $d15_prompt]
+show-cmd $d15_env $demo15_args
+step-pause $should_pause
+
 let demo15 = (do {
-    "" | with-env $d15_env { ^$aichat_bin --show-cost -r "%functions%" $d15_prompt }
+    "" | with-env $d15_env { ^$aichat_bin ...$demo15_args }
 } | complete)
 
 let trace15 = ($demo15.stderr | default "")
@@ -1015,10 +1090,11 @@ let d16_env_degrade = ($base_env | merge {
     AICHAT_SAFETY_POLICY_FILE: $d16_policy
     AICHAT_SAFETY_DEFAULT_CEILING: "read_only"
 })
-show-cmd 'AICHAT_SAFETY_DEFAULT_CEILING=read_only [no parent] aichat --agent esc_demo_agent "trigger over-ceiling tool"'
+let d16_args = [--agent "esc_demo_agent" "trigger"]
+show-cmd $d16_env_degrade $d16_args
 step-pause $should_pause
 let demo16_degrade = (do {
-    "" | with-env $d16_env_degrade { ^$aichat_bin --agent "esc_demo_agent" "trigger" }
+    "" | with-env $d16_env_degrade { ^$aichat_bin ...$d16_args }
 } | complete)
 let d16_degrade_passed = ($demo16_degrade.exit_code != 0)
 report "Zero-config degrade path cleanly blocks when parent absent" $d16_degrade_passed
@@ -1035,19 +1111,21 @@ let d16_env_escalate = ($d16_env_degrade | merge {
     AICHAT_SAFETY_VERDICT_TIMEOUT_SECS: "1"
     AICHAT_SAFETY_ESCALATION_DIR: ($d16_dir | path join "journals")
 })
-show-cmd 'AICHAT_AGENT_PARENT_ADDR=127.0.0.1:1 [unreachable parent] aichat --agent esc_demo_agent "fail-closed escalation"'
+show-cmd $d16_env_escalate $d16_args
 let t_start = (date now)
 let demo16_escalate = (do {
-    "" | with-env $d16_env_escalate { ^$aichat_bin --agent "esc_demo_agent" "trigger" }
+    "" | with-env $d16_env_escalate { ^$aichat_bin ...$d16_args }
 } | complete)
 let t_elapsed = ((date now) - $t_start)
 let d16_escalate_passed = ($demo16_escalate.exit_code != 0) and ($t_elapsed < 3sec)
 report "Escalation to unreachable parent fails closed safely in <= 1s" $d16_escalate_passed $"elapsed=($t_elapsed)"
 
 # Run offline assertions via cargo test harness for mTLS and Journal durability
+show-cmd "cargo test --bin aichat safety::tests::journal_"
 let t_journal = (do {
     ^cargo test --bin aichat safety::tests::journal_
 } | complete)
+show-cmd "cargo test --bin aichat escalation::tests::"
 let t_escalation = (do {
     ^cargo test --bin aichat escalation::tests::
 } | complete)
@@ -1077,16 +1155,17 @@ let d17_target = ($nu.temp-dir | path join $"aichat-safe-write-($nu.pid).txt")
 if ($d17_target | path exists) { rm -f $d17_target }
 
 let d17_prompt = $"You MUST use the exact tool 'fs_write' to write the text 'SAFETY_VERIFIED' to ($d17_target). Do not answer without calling the tool."
-show-cmd $'AICHAT_SAFETY_DEFAULT_CEILING=destructive AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "<prompt>"'
-step-pause $should_pause
-
 let d17_env = ($base_env | merge {
     AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "2"
 })
+let demo17_args = [--show-cost -r "%functions%" $d17_prompt]
+show-cmd $d17_env $demo17_args
+step-pause $should_pause
+
 let demo17 = (do {
-    "" | with-env $d17_env { ^$aichat_bin --show-cost -r "%functions%" $d17_prompt }
+    "" | with-env $d17_env { ^$aichat_bin ...$demo17_args }
 } | complete)
 
 let trace17 = ($demo17.stderr | default "")
@@ -1121,23 +1200,24 @@ if (should-run-demo "18" $demo) {
 # opportunistically creates an atomic backup in the durable rollback journal UPFRONT,
 # stepping down the required authority to `reversible` and allowing the gate to pass!
 
-header "Demo 18: Pre-flight Opportunistic Remediation (Option B — live)"
+header $"Demo 18: Pre-flight Opportunistic Remediation (Option B — live, ($demo_model))"
 show-desc "Demonstrates Option B pre-flight reversibility: creates file backups prior to mutation to enable opportunistic remediation and safe execution."
 
 let d18_target = ($nu.temp-dir | path join $"aichat-remediated-write-($nu.pid).txt")
 if ($d18_target | path exists) { rm -f $d18_target }
 
 let d18_prompt = $"You MUST call fs_write to write 'REMEDIATION_SUCCESS' to ($d18_target). Do not answer without calling the tool."
-show-cmd $'AICHAT_SAFETY_DEFAULT_CEILING=reversible AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "<prompt>"'
-step-pause $should_pause
-
 let d18_env = ($base_env | merge {
     AICHAT_SAFETY_DEFAULT_CEILING: "reversible"
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "2"
 })
+let demo18_args = [--show-cost -r "%functions%" $d18_prompt]
+show-cmd $d18_env $demo18_args
+step-pause $should_pause
+
 let demo18 = (do {
-    "" | with-env $d18_env { ^$aichat_bin --show-cost -r "%functions%" $d18_prompt }
+    "" | with-env $d18_env { ^$aichat_bin ...$demo18_args }
 } | complete)
 
 let trace18 = ($demo18.stderr | default "")
@@ -1174,16 +1254,17 @@ let d19_target = ($nu.temp-dir | path join $"aichat-blocked-write-($nu.pid).txt"
 if ($d19_target | path exists) { rm -f $d19_target }
 
 let d19_prompt = $"You MUST call fs_write to write 'UNAUTHORIZED_DATA' to ($d19_target). Do not answer without calling the tool."
-show-cmd $'AICHAT_SAFETY_DEFAULT_CEILING=safe AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat --show-cost -r %functions% "<prompt>"'
-step-pause $should_pause
-
 let d19_env = ($base_env | merge {
     AICHAT_SAFETY_DEFAULT_CEILING: "safe"
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "2"
 })
+let demo19_args = [--show-cost -r "%functions%" $d19_prompt]
+show-cmd $d19_env $demo19_args
+step-pause $should_pause
+
 let demo19 = (do {
-    "" | with-env $d19_env { ^$aichat_bin --show-cost -r "%functions%" $d19_prompt }
+    "" | with-env $d19_env { ^$aichat_bin ...$demo19_args }
 } | complete)
 
 let trace19 = ($demo19.stderr | default "")
@@ -1222,15 +1303,16 @@ let d20_target = ($nu.temp-dir | path join $"aichat-orch-esc-($nu.pid).txt")
 if ($d20_target | path exists) { rm -f $d20_target }
 
 let d20_prompt = $"Delegate to coder with permissions_mask 'mutating' and permissions_ceiling 'reversible': write the exact text HARD_CEILING_OK to ($d20_target) using fs_write. When coder reports permission_blocked due to authority_exceeded, re-delegate with permissions_ceiling 'disruptive' to complete the task."
-show-cmd 'aichat --show-cost --agent orchestrator "Delegate to coder [reversible ceiling] -> authority_exceeded blocked -> re-delegate disruptive"'
-step-pause $should_pause
-
 let d20_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "5"
 })
+let demo20_args = [--show-cost --agent orchestrator $d20_prompt]
+show-cmd $d20_env $demo20_args
+step-pause $should_pause
+
 let demo20 = (do {
-    "" | with-env $d20_env { ^$aichat_bin --show-cost --agent orchestrator $d20_prompt }
+    "" | with-env $d20_env { ^$aichat_bin ...$demo20_args }
 } | complete)
 
 let trace20 = ($demo20.stderr | default "")
@@ -1270,15 +1352,16 @@ let d21_target = ($nu.temp-dir | path join $"aichat-orch-redelegate-($nu.pid).tx
 if ($d21_target | path exists) { rm -f $d21_target }
 
 let d21_prompt = $"Delegate to coder: write the exact text PERMISSION_UNWOUND_OK to ($d21_target) using fs_write. Do NOT specify permissions upfront. When coder reports permission_blocked, re-delegate with mutating permissions."
-show-cmd 'aichat --show-cost --agent orchestrator "Delegate to coder [default readonly] -> permission_blocked -> re-delegate mutating"'
-step-pause $should_pause
-
 let d21_env = ($base_env | merge {
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "5"
 })
+let demo21_args = [--show-cost --agent orchestrator $d21_prompt]
+show-cmd $d21_env $demo21_args
+step-pause $should_pause
+
 let demo21 = (do {
-    "" | with-env $d21_env { ^$aichat_bin --show-cost --agent orchestrator $d21_prompt }
+    "" | with-env $d21_env { ^$aichat_bin ...$demo21_args }
 } | complete)
 
 let trace21 = ($demo21.stderr | default "")
