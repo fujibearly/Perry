@@ -4192,11 +4192,20 @@ pub fn format_dialog_event(event: &DialogEvent) -> String {
 /// cannot interleave between the output text and its trailing newline.
 pub fn write_atomic_terminal_output(output: &str) {
     use std::io::Write;
-    let mut buf = Vec::with_capacity(output.len() + 1);
-    buf.extend_from_slice(output.as_bytes());
-    if !buf.ends_with(b"\n") {
-        buf.push(b'\n');
-    }
+    let normalized = if *IS_STDOUT_TERMINAL {
+        let mut out = crate::utils::normalize_crlf(output);
+        if !out.ends_with("\r\n") && !out.ends_with('\n') {
+            out.push_str("\r\n");
+        }
+        out
+    } else {
+        let mut out = output.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out
+    };
+    let buf = normalized.into_bytes();
     match dialog_output_destination() {
         DialogOutputDestination::Stderr => {
             let mut stderr = std::io::stderr().lock();
@@ -4218,27 +4227,30 @@ pub fn write_atomic_terminal_output(output: &str) {
 
 /// Emit raw dialog block text respecting dialog_output_destination().
 pub fn emit_dialog_block_raw(block: &str) {
+    use std::io::Write;
+    let normalized = if *IS_STDOUT_TERMINAL {
+        let mut out = crate::utils::normalize_crlf(block);
+        if !out.ends_with("\r\n") && !out.ends_with('\n') {
+            out.push_str("\r\n");
+        }
+        out
+    } else {
+        let mut out = block.to_string();
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out
+    };
+    let buf = normalized.into_bytes();
     match dialog_output_destination() {
         DialogOutputDestination::Stderr => {
-            use std::io::Write;
             let mut stderr = std::io::stderr().lock();
-            let mut buf = Vec::with_capacity(block.len() + 1);
-            buf.extend_from_slice(block.as_bytes());
-            if !buf.ends_with(b"\n") {
-                buf.push(b'\n');
-            }
             let _ = stderr.write_all(&buf);
             let _ = stderr.flush();
         }
         DialogOutputDestination::Terminal => {
             if *IS_STDOUT_TERMINAL {
-                use std::io::Write;
                 let mut stderr = std::io::stderr().lock();
-                let mut buf = Vec::with_capacity(block.len() + 1);
-                buf.extend_from_slice(block.as_bytes());
-                if !buf.ends_with(b"\n") {
-                    buf.push(b'\n');
-                }
                 let _ = stderr.write_all(&buf);
                 let _ = stderr.flush();
             } else {

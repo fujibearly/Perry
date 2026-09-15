@@ -98,11 +98,20 @@ impl SpinnerInner {
         }
         use std::io::Write;
         let mut writer = stderr();
-        let mut buf = line.into_bytes();
-        if !buf.ends_with(b"\n") {
-            buf.push(b'\n');
-        }
-        writer.write_all(&buf)?;
+        let normalized = if *IS_STDOUT_TERMINAL {
+            let mut out = normalize_crlf(&line);
+            if !out.ends_with("\r\n") && !out.ends_with('\n') {
+                out.push_str("\r\n");
+            }
+            out
+        } else {
+            let mut out = line;
+            if !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out
+        };
+        writer.write_all(normalized.as_bytes())?;
         writer.flush()?;
         Ok(())
     }
@@ -177,6 +186,24 @@ fn truncate_display_width(value: &str, max_width: usize, mark_truncation: bool) 
 
 fn display_width(value: &str) -> usize {
     UnicodeWidthStr::width(value).max(UnicodeWidthStr::width_cjk(value))
+}
+
+pub fn normalize_crlf(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut prev_is_cr = false;
+    for c in text.chars() {
+        if c == '\n' {
+            if !prev_is_cr {
+                out.push('\r');
+            }
+            out.push('\n');
+            prev_is_cr = false;
+        } else {
+            prev_is_cr = c == '\r';
+            out.push(c);
+        }
+    }
+    out
 }
 
 pub enum SpinnerEvent {
@@ -341,5 +368,14 @@ mod tests {
         assert_eq!(format_spinner_line("⠋", " ready", 20), "⠋ ready");
         assert_eq!(format_spinner_line("⠋", " long", 2), "⠋");
         assert_eq!(format_spinner_line("⠋", " long", 1), "");
+    }
+
+    #[test]
+    fn test_normalize_crlf_replaces_bare_lf() {
+        assert_eq!(normalize_crlf("a\nb\nc"), "a\r\nb\r\nc");
+        assert_eq!(normalize_crlf("a\r\nb\r\nc"), "a\r\nb\r\nc");
+        assert_eq!(normalize_crlf("\nleading"), "\r\nleading");
+        assert_eq!(normalize_crlf("trailing\n"), "trailing\r\n");
+        assert_eq!(normalize_crlf("mixed\r\na\nb"), "mixed\r\na\r\nb");
     }
 }
