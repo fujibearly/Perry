@@ -911,7 +911,7 @@ if (should-run-demo "13" $demo) {
 # Reuses the real config dir (for the provider key + model catalog) and injects
 # the policy via AICHAT_SAFETY_POLICY_FILE — no config.yaml edits needed.
 
-header $"Demo 13: Protected Policy File — forbid (live, ($demo_model))"
+header $"Demo 13: Protected Policy File — forbid \(live, ($demo_model)\)"
 show-desc "Demonstrates policy-based tool forbidding: an owner-only 0600 policy explicitly forbids get_current_time, asserting deterministic safety blocking."
 
 let d13_dir = ($nu.temp-dir | path join $"aichat-policy-forbid-($nu.pid)")
@@ -963,7 +963,7 @@ if (should-run-demo "14" $demo) {
 # ceiling comparison in the live path, distinct from Demo 13's `forbid`.)
 # Same cheap model + tight budget.
 
-header $"Demo 14: Authority Ceiling Exceeded (live, ($demo_model))"
+header $"Demo 14: Authority Ceiling Exceeded \(live, ($demo_model)\)"
 show-desc "Demonstrates authority ceiling enforcement: policy raises get_current_time to catastrophic (> destructive ceiling), asserting it is blocked before execution."
 
 let d14_dir = ($nu.temp-dir | path join $"aichat-authority-($nu.pid)")
@@ -1014,7 +1014,7 @@ if (should-run-demo "15" $demo) {
 # so the arg-match fires and the gate blocks it before anything runs. (Even if
 # the gate failed, an echo is side-effect-free — no real risk in the demo.)
 
-header $"Demo 15: Argument-Sensitive Policy Escalation (live, ($demo_model))"
+header $"Demo 15: Argument-Sensitive Policy Escalation \(live, ($demo_model)\)"
 show-desc "Demonstrates argument-sensitive policy escalation: policy matches dangerous patterns (rm -rf) in arguments to dynamically elevate authority requirements."
 
 let d15_dir = ($nu.temp-dir | path join $"aichat-argpolicy-($nu.pid)")
@@ -1148,7 +1148,7 @@ if (should-run-demo "17" $demo) {
 #   4. Gate #6d durable rollback journal records pre-mutation entry (0600 fsync).
 #   5. Tool executes cleanly with piped input.
 
-header $"Demo 17: Full Safety Lifecycle — Happy Path (live, ($demo_model))"
+header $"Demo 17: Full Safety Lifecycle — Happy Path \(live, ($demo_model)\)"
 show-desc "Demonstrates full safety lifecycle happy path: executing a mutating tool (fs_write) within authorized authority with live trace logging."
 
 let d17_target = ($nu.temp-dir | path join $"aichat-safe-write-($nu.pid).txt")
@@ -1200,7 +1200,7 @@ if (should-run-demo "18" $demo) {
 # opportunistically creates an atomic backup in the durable rollback journal UPFRONT,
 # stepping down the required authority to `reversible` and allowing the gate to pass!
 
-header $"Demo 18: Pre-flight Opportunistic Remediation (Option B — live, ($demo_model))"
+header $"Demo 18: Pre-flight Opportunistic Remediation \(Option B — live, ($demo_model)\)"
 show-desc "Demonstrates Option B pre-flight reversibility: creates file backups prior to mutation to enable opportunistic remediation and safe execution."
 
 let d18_target = ($nu.temp-dir | path join $"aichat-remediated-write-($nu.pid).txt")
@@ -1247,7 +1247,7 @@ if (should-run-demo "19" $demo) {
 # `fs_write` is disruptive -> stepped down to reversible, but reversible > safe!
 # The gate blocks with authority_exceeded and the file is NOT created.
 
-header $"Demo 19: Authority Ceiling Fail-Closed (live, ($demo_model))"
+header $"Demo 19: Authority Ceiling Fail-Closed \(live, ($demo_model)\)"
 show-desc "Demonstrates authority ceiling escalation and fail-closed defense: irreversibly destructive tool is refused when authority exceeds safe ceiling."
 
 let d19_target = ($nu.temp-dir | path join $"aichat-blocked-write-($nu.pid).txt")
@@ -1296,7 +1296,7 @@ if (should-run-demo "20" $demo) {
 # 4. Orchestrator ingests the `permission_blocked` tool result and re-delegates to coder with `disruptive` ceiling.
 # 5. Coder executes successfully within its new statically provisioned authority ceiling.
 
-header $"Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation (live, ($demo_model))"
+header $"Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation \(live, ($demo_model)\)"
 show-desc "Demonstrates hard authority ceiling sandboxing: sub-agent attempts disruptive action exceeding its reversible ceiling, is hard-blocked with zero downward permits, unwinds, and parent re-delegates with disruptive ceiling."
 
 let d20_target = ($nu.temp-dir | path join $"aichat-orch-esc-($nu.pid).txt")
@@ -1345,7 +1345,7 @@ if (should-run-demo "21" $demo) {
 #    to coder with explicit mutating permissions.
 # 5. Coder executes successfully on the second delegation and writes the file.
 
-header $"Demo 21: Sub-Agent Capability Block & Re-Delegation (live, ($demo_model))"
+header $"Demo 21: Sub-Agent Capability Block & Re-Delegation \(live, ($demo_model)\)"
 show-desc "Demonstrates sub-agent capability boundary enforcement: when a child agent lacks capability for a tool, parent re-delegates to a capable agent."
 
 let d21_target = ($nu.temp-dir | path join $"aichat-orch-redelegate-($nu.pid).txt")
