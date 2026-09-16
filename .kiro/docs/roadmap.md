@@ -1,4 +1,6 @@
-# aichat Fork — Roadmap, Traction & Backlog
+# aichat Fork — Roadmap, Traction & Backlog (Project Perry / Agent P)
+
+> **Codename: Perry (Agent P)** — An unpretentious, compact SRE harness engineered to disarm catastrophic infrastructure "-Inators" on 64MB bastions through deterministic containment and supervisory escalation.
 
 **Single source of truth** for the fork's direction, current state, and work queue.
 Consolidates what were previously three drifting docs (`roadmap.md` + `progress.md` +

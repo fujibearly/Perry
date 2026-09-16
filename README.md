@@ -185,7 +185,10 @@ A web platform to compare different LLMs side-by-side.
 
 ![aichat-llm-arena](https://github.com/user-attachments/assets/edabba53-a1ef-4817-9153-38542ffbfec6)
 
-## Fork Enhancements
+## Fork Enhancements (Codename: Perry / Agent P)
+
+> **Codename: Perry (in honor of Agent P)**  
+> Like its namesake, this enhanced fork appears mild-mannered and unassuming on the outside (a single static musl binary that deploys effortlessly to a 64MB bastion host); put on the brown fedora (`agent: true`), and it operates as an elite, quiet SRE harness engineered to disarm catastrophic infrastructure "-Inators" through deterministic actuation governance, process-isolated sub-agents, mTLS supervisory escalation, and progressive runbook disclosure.
 
 This fork preserves upstream's philosophy — tools are shell scripts, roles are markdown prompts, agents compose both — but adds **runtime intelligence to the dispatch layer**. The same definitions run through a fundamentally better engine without any format changes.
 

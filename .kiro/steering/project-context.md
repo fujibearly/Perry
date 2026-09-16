@@ -1,6 +1,9 @@
-# Project Context
+# Project Context: Project Perry (Agent P)
 
-This is the `aichat` project — an all-in-one Rust CLI tool for interacting with multiple LLM providers.
+This is the enhanced `aichat` fork, codenamed **Perry** (in honor of *Agent P*).
+
+> **Codename: Perry (Agent P)**  
+> Deceptively compact, mild-mannered, and provider-agnostic on the outside (runs as a static musl binary on a 64MB bastion host); put on the fedora (`agent: true`) and it becomes an elite, undercover agentic SRE harness. Its core operational mission: disarming catastrophic infrastructure "-Inators" through deterministic actuation governance, process-isolated subagents, mTLS supervisory escalation to Major Monogram (the human-in-the-loop / orchestrator), durable rollback journals, and progressive runbook disclosure without ever granting an LLM "pardoning" power.
 
 ## Build & Test
 

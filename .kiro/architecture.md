@@ -1,6 +1,6 @@
-# aichat Architecture
+# aichat Architecture (Project Perry / Agent P)
 
-A Rust CLI tool (v0.31.0-fork.9) that provides a unified interface to multiple LLM providers. Authored by sigoden, forked with enhancements for native MCP, a provider-agnostic agent loop, declarative stream routing, and external observability. Operates in three modes: **command-line** (one-shot queries), **REPL** (interactive chat), and **HTTP server** (exposes OpenAI-compatible APIs).
+A Rust CLI tool and agentic SRE harness (v0.31.0-fork.9, codename **Perry** / **Agent P**) that provides a unified interface to multiple LLM providers. Authored by sigoden, forked with enhancements for native MCP, a provider-agnostic agent loop, deterministic actuation governance, mTLS escalation, progressive runbook disclosure, declarative stream routing, and external observability. Operates in three modes: **command-line** (one-shot queries), **REPL** (interactive chat), and **HTTP server** (exposes OpenAI-compatible APIs).
 
 This is not a typical coding agent confined to a single Git repository or worktree. It is a **general-purpose, Unix-native AI execution engine operating with system-level scope** (interacting with filesystems, daemons, network tools, Kubernetes clusters, and APIs).
 

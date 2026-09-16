@@ -1,8 +1,11 @@
-# The Philosophy & Architecture of the `aichat` Enhanced Fork
+# The Philosophy & Architecture of Project Perry (Agent P: The Enhanced aichat Fork)
 
 ---
 
-## 1. Executive Vision: The Unix Philosophy for Autonomous AI
+## 1. Executive Vision: The Unix Philosophy for Autonomous AI (Project Perry)
+
+> **Codename: Perry (Agent P)**  
+> Deceptively mild-mannered and lightweight on the outside; put on the brown fedora (`agent: true`) and it operates as an elite, quiet SRE harness engineered to disarm catastrophic infrastructure "-Inators" on 64MB bastions through deterministic containment and supervisory escalation.
 
 Modern AI frameworks (such as LangChain, AutoGen, CrewAI) often suffer from heavyweight abstractions, complex Python runtime dependencies, opaque execution states, and monolithic context bloat.
 
