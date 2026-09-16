@@ -1082,7 +1082,7 @@ fn safety_block_reason(value: &serde_json::Value) -> Option<String> {
 /// **Pure and deterministic** — this is the unit-testable heart of the #6c
 /// overlay; the live model call ([`run_risk_evaluator`]) is a thin wrapper that
 /// feeds this. Given the deterministic base authority, this agent's ceiling, and
-/// a parsed [`RiskVerdict`], it:
+/// a parsed [`crate::safety::RiskVerdict`], it:
 ///   1. applies the stricter-only clamp (verdict may only raise), then
 ///   2. **fails toward blocking**: a `Low`-confidence verdict is treated as an
 ///      escalation trigger (pre-#6d: a block), even if the clamped tier still

@@ -2,6 +2,10 @@
 
 A Rust CLI tool and agentic SRE harness (v0.31.0-fork.9, codename **Perry** / **Agent P**) that provides a unified interface to multiple LLM providers. Authored by sigoden, forked with enhancements for native MCP, a provider-agnostic agent loop, deterministic actuation governance, mTLS escalation, progressive runbook disclosure, declarative stream routing, and external observability. Operates in three modes: **command-line** (one-shot queries), **REPL** (interactive chat), and **HTTP server** (exposes OpenAI-compatible APIs).
 
+> [!NOTE]
+> **Canonical Glossary:** For precise definitions of Perry's SRE terminology, blast-radius tiers, capability masks, and rollback mechanisms, see the [Project Perry Glossary](docs/glossary.md).
+
+
 This is not a typical coding agent confined to a single Git repository or worktree. It is a **general-purpose, Unix-native AI execution engine operating with system-level scope** (interacting with filesystems, daemons, network tools, Kubernetes clusters, and APIs).
 
 The operational reality of **Systems Administration, DevOps, and SRE** serves as the primary stress test for this architecture: because system-wide operations involve high blast radiuses, massive unconstrained log outputs, and deployment to stripped-down bastions, the engine is intentionally designed around OS process isolation, declarative stream routing, bounded budgets, and zero-dependency static binaries.

@@ -1,8 +1,10 @@
-# aichat Fork — Roadmap, Traction & Backlog (Project Perry / Agent P)
+# Project Perry (Agent P) — Roadmap, Traction & Backlog
+*(Hardened `aichat` Fork)*
 
 > **Codename: Perry (Agent P)** — An unpretentious, compact SRE harness engineered to disarm catastrophic infrastructure "-Inators" on 64MB bastions through deterministic containment and supervisory escalation.
 
-**Single source of truth** for the fork's direction, current state, and work queue.
+
+**Single source of truth** for Project Perry's direction, current state, and work queue.
 Consolidates what were previously three drifting docs (`roadmap.md` + `progress.md` +
 `backlog.md`) into one document with **three aligned views**, all keyed by the same
 item IDs (`#N`):
@@ -16,7 +18,7 @@ item IDs (`#N`):
 > View 3 (item bodies) *reference* items by ID and describe strategy/detail, but must **not**
 > restate status. Update status in the table only.
 
-**Related docs:** [`architecture.md`](../architecture.md) · [`fork-philosophy-and-architecture.md`](fork-philosophy-and-architecture.md) · [`architecture-blueprint-2026-08-28-to-2026-09-02.md`](architecture-blueprint-2026-08-28-to-2026-09-02.md) (origin of the 4-Layer Taxonomy and the #5-#10 capabilities) · [`sre-and-supervisory-landscape.md`](sre-and-supervisory-landscape.md).
+**Related docs:** [`glossary.md`](glossary.md) (canonical terminology) · [`architecture.md`](../architecture.md) · [`fork-philosophy-and-architecture.md`](fork-philosophy-and-architecture.md) · [`architecture-blueprint-2026-08-28-to-2026-09-02.md`](architecture-blueprint-2026-08-28-to-2026-09-02.md) · [`sre-and-supervisory-landscape.md`](sre-and-supervisory-landscape.md).
 
 ---
 ---

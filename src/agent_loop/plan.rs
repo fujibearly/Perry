@@ -77,8 +77,16 @@ pub enum PlanPayload {
 }
 
 impl PlanPayload {
+    /// **Dual-Arm Parser** (Canonical Glossary & Spec 15).
+    ///
     /// Deserializes JSON input with guaranteed fallback to Legacy mode.
-    /// Never returns an Err; invalid or malformed shapes degrade gracefully (Fix 1 & Fix 5).
+    /// - **Arm 1 (Strict Schema Deserialization):** Parses typed `{objective, steps: [...]}` payloads
+    ///   into validated [`StructuredPlan`] structs.
+    /// - **Arm 2 (Lenient Fallback):** Catches prose-wrapped JSON, legacy `{"thought": "..."}` objects,
+    ///   or arbitrary text without failing, returning [`PlanPayload::Legacy`].
+    ///
+    /// *Disambiguation Note:* This in-process plan parser is distinct from the Vertex AI
+    /// AST kwargs recovery parser in `src/client/vertexai.rs` which repairs provider function calls.
     pub fn parse_flexible(raw: serde_json::Value) -> Self {
         if let Ok(raw_payload) = serde_json::from_value::<RawPlanPayload>(raw.clone()) {
             match raw_payload {

@@ -403,6 +403,19 @@ impl SafetyClass {
 /// distinct from the orthogonal *proven-reversibility* boolean (`FunctionDeclaration::
 /// reversible`) — the tier is the impact axis, the boolean is the proof axis; they
 /// are combined only when computing required authority (see `src/safety.rs`).
+///
+/// ### Semantic Axis Disambiguation (Canonical Glossary)
+///
+/// 1. **Impact Axis vs. Authority Axis:**
+///    `BlastRadius::Safe` represents **intrinsic impact** (radius 0, reads, zero state mutation).
+///    It is orthogonal to `AuthorityCeiling::UpTo(BlastRadius::Safe)` which governs **agent authority**
+///    (the maximum blast radius an agent may actuate autonomously). The binary capability mask
+///    `ToolMode::Readonly` (#6a) admits only tools whose static impact is `BlastRadius::Safe`.
+///
+/// 2. **`HumanReserved` is NOT a Tier:**
+///    This enum has strictly 5 variants (`Safe` through `Catastrophic`). Actions requiring
+///    unconditional human intervention live in [`crate::safety::RequiredAuthority::Human`],
+///    which sits above all autonomous agent ceilings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BlastRadius {

@@ -37,6 +37,15 @@ use std::path::{Path, PathBuf};
 /// autonomously executable iff its `RequiredAuthority` is within the ceiling.
 /// `Human` sits above every autonomous ceiling — it always escalates to a human
 /// (or blocks, before #6d's escalation channel exists).
+///
+/// ### Glossary Invariant: Authority Axis vs. Impact Axis
+/// `Human` is **not** a 6th blast-radius tier. The blast-radius taxonomy ([`crate::function::BlastRadius`])
+/// has strictly 5 variants (`Safe` through `Catastrophic`). `Human` is an **authority requirement**
+/// that triggers when:
+/// 1. A tool is undeclared ([`crate::function::StaticTier::Unclassified`]),
+/// 2. A protected policy rule has `forbid: true`,
+/// 3. An action is evaluated as `Catastrophic`, or
+/// 4. An evaluation produces low confidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequiredAuthority {
     /// The action requires (at most) authority for this blast-radius tier.
