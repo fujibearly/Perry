@@ -297,3 +297,16 @@ This repository maintains continuous, chronological session handoff summaries do
       * **CLI Aliases & Demo Runner Integration:** Added `--dialog` (`--show-dialog`) and `--no-truncate` (`--dialog-no-truncate`) CLI aliases and mapped them into `scripts/run-demos.nu`.
       * **Verification & Testing:** All 516 unit/integration tests passing; full live demo suite verified green across Demos 1, 2, 3, 4, 5, and 5b.
       * **State:** on branch `feat/dialog-observability-all-prompts-and-models` @ `3a1bf79`; local-only.
+
+  26. **Session 26: Structured Plan Execution (#15) & Progressive Skill Runbooks with Provenance-Based Taint (#17)**
+    * **Period:** `2026-09-15`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-15-session26.md`](.kiro/docs/session-summary-2026-09-15-session26.md)
+    * **Focus Areas:**
+      * **Backlog #15 (Spec A: Structured `_plan` & Ahead-of-Time Pre-Pass):** Designed and implemented structured `_plan` JSON Schema, flexible dual-arm parser (supporting structured steps and legacy/degraded strings), state tracker (`PlanTracker`), and live progress events (`PlanReceived`, `PlanStepUpdated`, `PlanRiskPrepassFlagged`). Implemented `plan_risk_prepass()` ahead-of-time risk checking populating the monotonic, raise-only `RiskCache`, with clean no-op degradation when #6c's `%assess-risk%` is absent.
+      * **Backlog #17 (Spec B: Progressive Skill Runbooks & Taint Tracking):** Implemented `SkillRegistry` with 3-tier discovery precedence (`Workspace` > `Global` > `Builtin`). Workspace skills are automatically marked `WorkspaceTainted`. Added YAML frontmatter parser for `SKILL.md` (no mandatory hash/signature gate). Implemented agent eligibility gating (`skills: all | false | [...]`) and strict exclusion of nano utility workers (`@meta nano true` / `nano: true` / `AICHAT_AGENT_NANO=true`). System prompts are augmented with the `### Available Skills` metadata catalog only for eligible agents.
+      * **Dynamic Tool Injection & Execution:** Dynamically declared and dispatched `read_skill(name)`, returning instructions, description, path, and provenance.
+      * **Active Taint Lifecycle & Step Binding:** Implemented `ActiveSkillTracker` providing plan-step bound taint tracking. Loading a workspace skill activates taint (`untrusted_runbook: true` and `active_tainted_skills`). Taint is maintained across step execution and cleared upon step completion (`complete_step`) or explicit consumption.
+      * **Evaluator Integration & Prepass Taint Simulation:** Added heightened scrutiny directive 5 in `assets/roles/%assess-risk%.md` and wired taint status into `src/safety.rs`. Simulated `read_skill` step loads in `plan_risk_prepass` so downstream steps evaluate with `untrusted_runbook: true`.
+      * **Verification & Testing:** All 6 unit tests in `src/skill.rs` passing; all 128 tests in `agent_loop::tests` passing; all 64 tests in `safety::tests` passing; 529 total tests passing with zero failures. Clippy clean (`-D warnings`).
+      * **State:** on branch `feat/structured-plan-and-skills` (`66199b4`); local-only.
+

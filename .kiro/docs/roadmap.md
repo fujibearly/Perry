@@ -55,6 +55,8 @@ Maps each strategic strand to its tracked item. **Status lives in the [Status Ta
 | Scoped shared artifact store (engine-level cross-agent memory) | L2 | **#13** | Structured, root-PID-scoped, read-mostly. Engine-level counterpart to the L4 Hive-Mind — NOT a free-form blackboard. |
 | Per-machine consolidated audit log (auditability, not just observability) | L2→L4 | **#14** | Durable append-only JSONL per agent, consolidated per-machine via correlation IDs; read by external auditors/observability platforms. Distinct *audit plane* from #6d's control + rollback planes. |
 | Web-search style & branch-wide grounding control (`--wslinks`) | L1/L2 | **#16** | Branch-wide toggle between direct grounded search (default 1-turn) vs. link exploration (`--wslinks` multi-step). |
+| Serious Structured `_plan` / Plan-Driven Execution | L2 | **#15** | Structured step execution, progress tracking & whole-plan risk pre-pass into raise-only RiskCache. |
+| Progressive Disclosure Runbooks & Skills (`read_skill`) | L2 | **#17** | Progressive runbook disclosure, 3-tier discovery, eligibility gating, nano exclusion & step-scoped taint tracking. |
 | Gemini Interactions API | L2 | **#2** | Covered via OpenRouter + client loop. |
 | CLI flag parity (`--show-trace/--max-turns/--max-cost`) | L2 | *(folded into #3)* | Flags exist; no distinct open item. |
 | **Adopt `dot-agent-deck`** (SRE mission control, HITL cards) | L3 | 🧭 *(external, not our code)* | #1 SRE supervisor recommendation. Engine already emits the status-file/`/dev/tty` signals it consumes. |
@@ -98,11 +100,11 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 
 # View 2 — Traction (progress)
 
-### Current State (2026-09-12 — Session 23)
+### Current State (2026-09-15 — Session 26)
 
-**Branch:** `feat/branch-exclusive-agent-colors` — **Branch-Exclusive Agent Colors & Nano Caller Inheritance**.
+**Branch:** `feat/structured-plan-and-skills` — **Structured Plan Execution (#15) & Progressive Skill Runbooks (#17)**.
 **Version:** v0.31.0-fork.9
-**Tests:** 515 pass, 0 fail (507 unit/integration + 5 catalog-override + 3 web asset security) — suite passing; clippy clean (`-D warnings`); debug and release binaries verified.
+**Tests:** 529 pass, 0 fail (521 unit/integration + 5 catalog-override + 3 web asset security) — suite passing; clippy clean (`-D warnings`); debug and release binaries verified.
 **#6d transport decision (Path 1′):** mutual-TLS over a raw loopback TCP stream + hand-rolled length-delimited JSON framing — **not** WebSocket (deferred behind the `EscalationTransport` trait). Only new crate `rcgen` (+ tiny `yasna`); `rustls`/`tokio-rustls` reused (single version, no OpenSSL). Child auth = channel-bound HMAC (no literal token).
 **E2E demos (2026-09-12, live on `gemini-2.5-flash`):** 22 demos in `scripts/run-demos.nu` (`1`–`21` and `10b`). Features unified scannable grammar (`ALLOW <tool>: risk <tier> <= ceiling <tier>`, `BLOCK <tool>: risk <tier> > ceiling <tier>`), interactive debug stepping (`--debug`), selective targeted execution (`--demo <ID>`), pre-pause demo objective banners (`ℹ`) and command rendering, agent hierarchy 6-column guide rails (`│     `), color-coded agent traces with branch-exclusive stratified palettes (`allocate_subagent_color`, `AICHAT_AGENT_COLOR`, `AICHAT_SUBAGENT_SEQ`), compact British humour petnames (`12345 (SnazzyBoffin)`), nanoworker parent petname and color inheritance (`nano-SnazzyBoffin-1`), LLM dialog observability (`--dialog`) with semantic role coloring and historic corpus dimming, untruncated trace observability (`--no-truncate` / `-n`), multi-step sub-agent research pipelines via `web_search --links` + native `html-to-markdown --url`, branch-wide web-search grounding control (`--wslinks` / `AICHAT_WSLINKS`), streamlined trace display (omitting redundant loop trace headers), dual-layer `MALFORMED_FUNCTION_CALL` recovery (system prompt + AST/kwargs parser), truthful `FAILED` tool reporting, and empty-response/transient backoff resilience in `call_llm_raw`.
 **Agent Loop Coverage:** unit-test (`cargo test`) line coverage of `src/agent_loop.rs` rose **46.8% → 64.7%** (+17.9 pts) from #5 — see [coverage re-measurement 2026-09-02](coverage-remeasurement-2026-09-02.md). NB: not comparable to the older 72.9% figure (live E2E harness, different methodology — [2026-08-31 report](coverage-evaluation-2026-08-31.md)).
@@ -130,8 +132,9 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 | 12 | Remote MCP Transports (HTTP/WSS) | 🔜 Proposed | Medium | `feat/remote-mcp-transports` | Native MCP speaks only stdio to local servers; L4 control planes and remote MCP servers need HTTP/WSS. | **Transparent MCP + Pillar 6:** remote tools still appear as normal `FunctionDeclaration`s; stdio stays the zero-config default. | M — ~200-400 lines; transport abstraction + auth/reconnect in `src/mcp.rs`. |
 | 13 | Scoped Shared Artifact Store for Orchestration Trees | 🔜 Proposed | Low | `feat/shared-artifact-store` | No way for sibling sub-agents in one tree to share intermediate artifacts without round-tripping the parent. Engine-level counterpart to the L4 "Hive-Mind", scoped to a local tree. | **Pillars 1 & 2 (managed tension):** structured append-only, root-PID-scoped, read-mostly — NOT a free-form blackboard. | M — ~150-300 lines; own spec; interacts with #7 (WAL) and #9 (worktrees). |
 | 14 | Per-Machine Consolidated Audit Log (auditability) | 🔜 Proposed | Medium | `feat/audit-log` | Observability today is live/ephemeral/single-process (`/dev/tty`, OSC, per-PID status files that vanish). No durable, consolidated, historical record for an external auditor/SRE/platform. Auditability is a *distinct goal* from observability. | **Pillar 4 extended to durability + Pillars 1/2:** each isolated agent authors its own append-only JSONL; consolidated per-machine at read time via correlation IDs. | M — ~200-400 lines; also the natural home to fix the `$0.000000` cost bug; own spec. |
-| 15 | Serious Structured `_plan` / Plan-Driven Execution | 🔜 Proposed | Medium | `feat/structured-plan` | Current `_plan` is a free-text scratchpad that never drives execution; a structured, plan-driven planner enables progress tracking, replanning, and a whole-plan risk pre-pass that pre-raises the #6c `RiskCache` (earlier/cheaper red-light with cross-step context). | **Pillar 1 + "the LLM is not a Pardoner":** plan-time is a red-light only; act-time evaluation stays the non-negotiable floor. Splits out of #6c's superseded plan-time model. | M — plan schema + loop plan-state/replanning + plan-time `%assess-risk%` pass writing the raise-only cache; own spec; touches hot path. |
+| 15 | Serious Structured `_plan` / Plan-Driven Execution | ✓ Done (unmerged) | Medium | `feat/structured-plan-and-skills` | Current `_plan` was a free-text scratchpad that never drove execution; structured, plan-driven execution enables progress tracking, replanning, and an ahead-of-time risk pre-pass that pre-raises the #6c `RiskCache` with cross-step context. Resilient dual-arm parser tolerates legacy string & partial object formats. Clean no-op degradation when #6c absent. | **Pillar 1 + "the LLM is not a Pardoner":** plan-time is a red-light only; act-time evaluation stays the non-negotiable floor. Monotonic pre-pass degrades cleanly to no-op if #6c unconfigured. | M — done (~390 lines). Spec: [`.kiro/specs/structured-plan-and-skills/spec-15-structured-plan.md`](../specs/structured-plan-and-skills/spec-15-structured-plan.md) |
 | 16 | Web-Search Style & Branch-Wide Grounding Control (`--wslinks`) | ✓ Done (unmerged) | High | `feat/tool-safety-permission-boundary` | Control web-search style across the entire orchestrator process tree: default grounded direct LLM summary (fast 1-turn synthesis, no intermediate page scraping) vs. multi-step link exploration (`--wslinks`, URL discovery + `fetch_and_summarize` piped to `summarize_text`). | **Pillar 1 (Delegation over Context Monoliths) + Pillar 3 (Declarative Data Flow):** adapts researcher instruction and tool execution dynamically, avoiding unnecessary scrape turns and token burn. | S–M — done (~180 lines). `cli.rs`, `agent_loop.rs`, `agent.rs`, `variables.rs`, `web_search_aichat.sh`, `researcher/index.yaml`, Demos 5/5b. |
+| 17 | Progressive Disclosure Runbooks & Skills (`read_skill`) | ✓ Done (unmerged) | Medium | `feat/structured-plan-and-skills` | Progressive disclosure of procedural runbooks reduces system prompt context bloat; workspace skills marked `WorkspaceTainted` to trigger heightened `%assess-risk%` scrutiny without greenlighting. Plain frontmatter parser, nano-agent exclusion, step-scoped taint lifecycle. | **Pillar 1 (Delegation over Context Monoliths) + Pillar 5 (Deterministic Safety):** 3-tier precedence, dynamic catalogue injection, step-scoped taint lifecycle. | M — done (~620 lines). Spec: [`.kiro/specs/structured-plan-and-skills/spec-17-skills.md`](../specs/structured-plan-and-skills/spec-17-skills.md) |
 | 2 | Gemini Interactions API | ⏸ Deferred | Low | — (covered via OpenRouter/client loop) | Future-proofs against `generateContent` deprecation, but Google's API may still shift and OpenRouter + client loop already cover Gemini agentic use. | **Weakest fit.** Provider-specific server-side vs. the fork's provider-agnostic thesis; #3 already makes Gemini agentic. | L — ~1000-1500 lines + new `gemini_interactions.rs`; external API stability risk. |
 
 Legend: ✓ Done · 🔨 in progress · 🔜 proposed & tracked · ⏸ deferred.
@@ -204,6 +207,10 @@ Legend: ✓ Done · 🔨 in progress · 🔜 proposed & tracked · ⏸ deferred.
   - `15bd96a` — feat(fetch_url_via_curl): add --skip-images to omit image elements and data URIs
   - `4adf72e` — feat(meta): add @meta nano support to build scripts and tools
 
+### `feat/structured-plan-and-skills` (off `main`, #15 & #17)
+- `dc27f01` — docs(specs): add specifications for #15 (structured plan) and #17 (skills)
+- `654657b` — feat(agent-loop): add structured _plan support, plan-state tracking, and risk pre-pass (#15)
+- `66199b4` — feat(skills): implement progressive skill registry, read_skill, and provenance-based taint (#17)
 
 ## What's Implemented
 
@@ -268,6 +275,18 @@ Fourth increment — persistent mTLS control plane, human-in-the-loop, durable r
 - **Live Demos 17–20:** Demos 17 (Happy Path autonomous write), 18 (Option B Pre-flight Remediation), 19 (Ceiling Fail-Closed), 20 (Orchestrator to Coder Multi-Process Escalation).
 - +37 unit/integration tests (506 total workspace tests); Demo 16 offline fail-closed and journal durability verified.
 
+### #15 Serious Structured `_plan` / Plan-Driven Execution ✓ (unmerged)
+- **Structured Plan Schema & Dual-Arm Parser:** Published formal schema with typed `objective`, `steps: [{ id, intent, tool, args_preview, depends_on }]`, and `thought`. Resilient `PlanPayload` deserializer parses structured objects while gracefully accepting legacy string or partial object payloads (`{"thought": "..."}`) without dropping context or erroring.
+- **Plan State Tracking & Live Progress Events:** State tracker (`PlanTracker`) provides `start_step`, `complete_step`, `fail_step`, and human-readable plan summaries. Emits `PlanReceived` and `PlanStepUpdated` events.
+- **Ahead-of-Time Risk Pre-Pass (`plan_risk_prepass`):** Evaluates all planned tool calls in advance against `#6c`'s `%assess-risk%` evaluator, populating the monotonic, raise-only `RiskCache`. Emits `PlanRiskPrepassFlagged` on risky steps. Degrades cleanly to a no-op when `#6c` is absent.
+
+### #17 Progressive Disclosure Runbooks & Skills (`read_skill`) ✓ (unmerged)
+- **Progressive Discovery & 3-Tier Precedence:** Discover skills from workspace roots (`.kiro/skills`, `.agents/skills`, `.skills`), global config (`$XDG_CONFIG_HOME/aichat/skills`), and system builtins with workspace > global > builtin precedence.
+- **YAML Frontmatter Parser:** Lightweight YAML frontmatter parser for `SKILL.md` (no mandatory SHA/hash verification, zero developer friction).
+- **Agent Eligibility & Nano Exclusion:** Agent configs specify `skills: all | false | [...]`. Nano utility workers (`@meta nano true` / `nano: true` / `AICHAT_AGENT_NANO=true`) strictly receive an empty catalogue and no `read_skill` tool. Eligible agents receive an injected `### Available Skills` metadata catalog in their system prompts.
+- **Dynamic Tool Injection & Execution:** Automatically registers `read_skill(name)` which executes and returns instruction text, description, path, and provenance.
+- **Step-Scoped Active Taint Lifecycle (`ActiveSkillTracker`):** Loading a workspace-tainted skill sets `untrusted_runbook: true` and tracks `active_tainted_skills`. Taint is bound to the active plan step and cleared immediately upon step completion.
+- **Evaluator Integration & Prepass Simulation:** Added heightened scrutiny Directive 5 to `%assess-risk%` without pardoning authority. Simulated planned skill loads in `plan_risk_prepass` to flag downstream steps in advance.
 
 ### PDF Loader Enhancement
 Default `document_loaders.pdf` switched from `pdftotext` to `pdf2md --compact --raw` (firecrawl/pdf-inspector). Structured Markdown for better RAG chunking and token efficiency.
@@ -580,6 +599,13 @@ A **serious** planner would make the plan a first-class object that the loop exe
 
 **Dependencies:** consumes #6c's `RiskCache` and `%assess-risk%` evaluator. Interacts with #7 (WAL — plan state is checkpointable) and #10 (staged/dry-run ops). Priority **Medium**; own spec required; touches the hot path.
 
+### As-Built & Verification (Session 26)
+- **Structured Plan Schema & Resilient Dual-Arm Parser (`src/agent_loop/plan.rs`)**: Formal `_plan` JSON Schema featuring `objective`, typed `steps` (`id`, `intent`, `tool`, `args_preview`, `depends_on`), and `thought`. Resilient `PlanPayload` deserializes structured payloads while gracefully falling back to legacy strings or partial object structures without erroring or discarding intent.
+- **Plan State Tracking & Live Progress Events**: Added `PlanTracker` tracking step states (`Pending`, `InProgress`, `Completed`, `Failed`, `Skipped`). Emits `PlanReceived` and `PlanStepUpdated` events across the agent loop.
+- **Ahead-of-Time Risk Pre-Pass (`plan_risk_prepass`)**: Evaluates planned tools in advance against `#6c`'s `%assess-risk%` evaluator, storing pre-raised ceilings in the monotonic, raise-only `RiskCache`. Emits `PlanRiskPrepassFlagged` on risky steps. Degrades cleanly to a no-op when `#6c` is absent (`test_prepass_noop_without_6c`).
+- **Verification**: All 128 tests in `agent_loop::tests` pass; all 529 workspace tests pass.
+- **Spec:** [`.kiro/specs/structured-plan-and-skills/spec-15-structured-plan.md`](../specs/structured-plan-and-skills/spec-15-structured-plan.md)
+
 ---
 
 ## 16. Web-Search Style & Branch-Wide Grounding Control (`--wslinks`)
@@ -608,6 +634,25 @@ A **serious** planner would make the plan a first-class object that the loop exe
 - **Verification**: Unit tests `test_allocate_subagent_color_exclusivity` and `test_nano_worker_inherits_caller_env_color` pass; all 117 tests in `agent_loop::tests` pass; all 507 unit/integration tests pass.
 
 **Spec:** [`.kiro/specs/web-search-style-control/`](../specs/web-search-style-control/)
+
+---
+
+## 17. Progressive Disclosure Runbooks & Skills (`read_skill`)
+
+**Driver:** Standard agent architectures inject extensive procedural runbooks, troubleshooting guides, and API schemas directly into the initial system prompt, causing severe context-window bloat, token inefficiency, and confusion when multiple runbooks conflict. Progressive disclosure patterns (like Anthropic Skills and Antigravity) instead present a compact metadata catalog (`name`, `description`) in the system prompt, allowing the agent to dynamically inspect detailed instructions on demand via a tool (`read_skill`). However, untrusted workspace runbooks present a critical security threat: malicious repository runbooks could attempt to prompt-inject or "pardon" destructive operations.
+
+### Approach
+1. **Unified Skill Discovery (`src/skill.rs`)**: Scans 3 discovery tiers with strict precedence: Workspace (`.kiro/skills`, `.agents/skills`, `.skills`) > Global (`~/.config/aichat/skills`) > Builtin. Workspace skills are explicitly tagged `SkillProvenance::WorkspaceTainted`.
+2. **Plain YAML Frontmatter Parser**: Parses standard `SKILL.md` frontmatter (`name`, `description`) without requiring mandatory cryptographic signatures or hashes, ensuring developer ergonomics.
+3. **Agent Eligibility Gating (`src/config/agent.rs`)**: Agent configs configure `skills: all | false | [skill1, skill2]`. Nano utility workers (`@meta nano true` / `nano: true` / `AICHAT_AGENT_NANO=true`) are completely excluded from skill discovery and tool injection.
+4. **Dynamic Tool Injection & Execution (`src/config/mod.rs` & `src/agent_loop.rs`)**: When eligible skills exist, `read_skill` is injected and handled via Route 0 in `eval_single_tool`, returning JSON containing `name`, `description`, `instructions`, `provenance`, and `path`.
+5. **Step-Scoped Active Taint Lifecycle (`ActiveSkillTracker`)**: Loading a workspace skill activates taint (`untrusted_runbook: true` and `active_tainted_skills`). Taint is tracked per plan step and cleared when the step completes (`complete_step`) or when consumed.
+6. **Evaluator Integration & Prepass Simulation (`src/safety.rs` & `src/agent_loop.rs`)**: Added heightened scrutiny Directive 5 in `%assess-risk%`. Planned `read_skill` steps simulate taint in `plan_risk_prepass` so downstream steps evaluate under heightened scrutiny in advance.
+
+### As-Built & Verification (Session 26)
+- **Core Implementation**: Implemented `src/skill.rs`, updated `src/config/agent.rs`, `src/config/mod.rs`, `src/safety.rs`, `src/agent_loop.rs`, and `assets/roles/%assess-risk%.md`.
+- **Verification**: All 6 unit tests in `src/skill.rs` pass; all 128 tests in `agent_loop::tests` pass; all 64 tests in `safety::tests` pass; full test suite (529 pass, 0 fail); clippy clean (`-D warnings`).
+- **Spec:** [`.kiro/specs/structured-plan-and-skills/spec-17-skills.md`](../specs/structured-plan-and-skills/spec-17-skills.md)
 
 ---
 
