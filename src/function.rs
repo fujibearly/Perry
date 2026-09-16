@@ -521,6 +521,15 @@ impl FunctionDeclaration {
             None => StaticTier::Unclassified,
         }
     }
+
+    /// Resolve this tool's static impact tier if declared.
+    #[allow(dead_code)]
+    pub fn impact_tier(&self) -> Option<ImpactTier> {
+        match self.static_tier() {
+            StaticTier::Tier(b) => Some(ImpactTier(b)),
+            StaticTier::Unclassified => None,
+        }
+    }
 }
 
 /// Strongly-typed delegation permissions contract (Backlog #6d, FR-6d.18).
@@ -1315,6 +1324,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(mu.static_tier(), StaticTier::Tier(BlastRadius::Disruptive));
+        assert_eq!(mu.impact_tier(), Some(ImpactTier(BlastRadius::Disruptive)));
     }
 
     #[test]
@@ -1324,6 +1334,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(decl.static_tier(), StaticTier::Unclassified);
+        assert_eq!(decl.impact_tier(), None);
     }
 
     #[test]

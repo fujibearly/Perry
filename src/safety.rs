@@ -75,10 +75,7 @@ impl AuthorityCeiling {
     pub fn permits(&self, required: RequiredAuthority) -> bool {
         match required {
             RequiredAuthority::Human => false,
-            RequiredAuthority::Tier(t) => {
-                let AuthorityCeiling::UpTo(max) = *self;
-                t <= max
-            }
+            RequiredAuthority::Tier(t) => self.permits_impact(crate::function::ImpactTier(t)),
         }
     }
 
@@ -86,7 +83,6 @@ impl AuthorityCeiling {
     /// Returns true if the action's impact does not exceed this ceiling.
     /// Clarifies the semantic relationship between an action's intrinsic impact
     /// and an agent's authority boundary.
-    #[allow(dead_code)]
     #[inline]
     pub fn permits_impact(&self, impact: crate::function::ImpactTier) -> bool {
         let AuthorityCeiling::UpTo(tier) = *self;

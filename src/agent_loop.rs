@@ -963,7 +963,12 @@ fn authority_denied_result(
     let mut required = required_authority(static_tier, policy_outcome, reversible);
     let ceiling = current_authority_ceiling(config);
 
-    if ceiling.permits(required) {
+    let permitted = match required {
+        RequiredAuthority::Tier(t) => ceiling.permits_impact(crate::function::ImpactTier(t)),
+        RequiredAuthority::Human => false,
+    };
+
+    if permitted {
         if let Some(p) = progress {
             let risk_token = format_risk_token(static_tier, required, base_mechanism);
             let comparison = format!("{} <= ceiling {}", risk_token, ceiling.tier().as_str());
@@ -988,7 +993,11 @@ fn authority_denied_result(
 
         if can_be_reversible {
             let remediated_required = required_authority(static_tier, policy_outcome, true);
-            if ceiling.permits(remediated_required) {
+            let remediated_permitted = match remediated_required {
+                RequiredAuthority::Tier(t) => ceiling.permits_impact(crate::function::ImpactTier(t)),
+                RequiredAuthority::Human => false,
+            };
+            if remediated_permitted {
                 if let Some(_entry_id) = record_pre_mutation_journal_entry(config, call, progress) {
                     if let Some(flag) = proven_reversible_applied {
                         *flag = true;
