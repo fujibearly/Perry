@@ -274,6 +274,14 @@ impl Agent {
         output
     }
 
+    pub fn is_nano(&self) -> bool {
+        self.config.is_nano()
+    }
+
+    pub fn skills_setting(&self) -> SkillSetting {
+        self.config.skills_setting()
+    }
+
     pub fn agent_prelude(&self) -> Option<&str> {
         self.config.agent_prelude.as_deref()
     }
@@ -360,7 +368,29 @@ impl Agent {
 
 impl RoleLike for Agent {
     fn to_role(&self) -> Role {
-        let prompt = self.interpolated_instructions();
+        let mut prompt = self.interpolated_instructions();
+        if !self.is_nano() && self.skills_setting().is_enabled() {
+            let workspace_dir = std::env::var("AICHAT_WORKSPACE_DIR")
+                .ok()
+                .map(PathBuf::from)
+                .or_else(|| std::env::current_dir().ok());
+            let global_dir = Config::skills_dir();
+            let builtin_dir = std::env::var("AICHAT_BUILTIN_SKILLS_DIR")
+                .ok()
+                .map(PathBuf::from);
+            let registry = crate::skill::SkillRegistry::discover(
+                workspace_dir.as_deref(),
+                Some(&global_dir),
+                builtin_dir.as_deref(),
+            );
+            let eligible = registry.filter_eligible(&self.skills_setting(), false);
+            if let Some(catalogue) = registry.format_prompt_catalogue(&eligible) {
+                if !prompt.is_empty() {
+                    prompt.push_str("\n\n");
+                }
+                prompt.push_str(&catalogue);
+            }
+        }
         let mut role = Role::new("", &prompt);
         role.sync(self);
         role
@@ -400,6 +430,42 @@ impl RoleLike for Agent {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum SkillSetting {
+    Bool(bool),
+    String(String),
+    List(Vec<String>),
+}
+
+impl Default for SkillSetting {
+    fn default() -> Self {
+        SkillSetting::Bool(true)
+    }
+}
+
+impl SkillSetting {
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            SkillSetting::Bool(b) => *b,
+            SkillSetting::String(s) => s != "disabled" && s != "false",
+            SkillSetting::List(l) => !l.is_empty(),
+        }
+    }
+
+    pub fn allows(&self, skill_name: &str) -> bool {
+        match self {
+            SkillSetting::Bool(b) => *b,
+            SkillSetting::String(s) => match s.as_str() {
+                "all" | "true" => true,
+                "disabled" | "false" => false,
+                other => other == skill_name,
+            },
+            SkillSetting::List(list) => list.iter().any(|s| s == skill_name),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AgentConfig {
     #[serde(rename(serialize = "model", deserialize = "model"))]
@@ -416,6 +482,10 @@ pub struct AgentConfig {
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
     pub variables: AgentVariables,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<SkillSetting>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nano: Option<bool>,
     #[cfg(feature = "mcp")]
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
@@ -459,11 +529,28 @@ impl AgentConfig {
         if let Some(v) = read_env_value::<String>(&with_prefix("instructions")) {
             self.instructions = v;
         }
+        if let Some(v) = read_env_value::<bool>(&with_prefix("nano")) {
+            self.nano = v;
+        }
         if let Ok(v) = env::var(with_prefix("variables")) {
             if let Ok(v) = serde_json::from_str(&v) {
                 self.variables = v;
             }
         }
+    }
+
+    pub fn is_nano(&self) -> bool {
+        if std::env::var("AICHAT_AGENT_NANO")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        self.nano.unwrap_or(false)
+    }
+
+    pub fn skills_setting(&self) -> SkillSetting {
+        self.skills.clone().unwrap_or_default()
     }
 }
 

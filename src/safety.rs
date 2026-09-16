@@ -1007,6 +1007,32 @@ pub fn build_evaluator_context(
     invocation: Option<&str>,
     helpers: Option<&[HelperScriptContext]>,
 ) -> String {
+    build_evaluator_context_with_taint(
+        tool_name,
+        arguments,
+        proven_reversible,
+        intent,
+        declaration,
+        implementation,
+        invocation,
+        helpers,
+        false,
+        &[],
+    )
+}
+
+pub fn build_evaluator_context_with_taint(
+    tool_name: &str,
+    arguments: &serde_json::Value,
+    proven_reversible: bool,
+    intent: &str,
+    declaration: Option<&ToolDeclarationContext>,
+    implementation: Option<&ToolImplementation>,
+    invocation: Option<&str>,
+    helpers: Option<&[HelperScriptContext]>,
+    untrusted_runbook: bool,
+    active_tainted_skills: &[String],
+) -> String {
     let mut payload = serde_json::Map::new();
     payload.insert("tool".to_string(), serde_json::json!(tool_name));
     if let Some(inv) = invocation {
@@ -1014,6 +1040,16 @@ pub fn build_evaluator_context(
     }
     payload.insert("arguments".to_string(), arguments.clone());
     payload.insert("intent".to_string(), serde_json::json!(intent));
+
+    if untrusted_runbook {
+        payload.insert("untrusted_runbook".to_string(), serde_json::json!(true));
+        if !active_tainted_skills.is_empty() {
+            payload.insert(
+                "active_tainted_skills".to_string(),
+                serde_json::json!(active_tainted_skills),
+            );
+        }
+    }
 
     let mut has_source = false;
     if let Some(imp) = implementation {

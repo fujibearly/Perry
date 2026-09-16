@@ -3,7 +3,7 @@ mod input;
 mod role;
 mod session;
 
-pub use self::agent::{complete_agent_variables, list_agents, Agent, AgentVariables};
+pub use self::agent::{complete_agent_variables, list_agents, Agent, AgentVariables, SkillSetting};
 pub use self::input::Input;
 pub use self::role::{
     Role, RoleLike, ASSESS_RISK_ROLE, CODE_ROLE, CREATE_TITLE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE,
@@ -63,6 +63,7 @@ const FUNCTIONS_DIR_NAME: &str = "functions";
 const FUNCTIONS_FILE_NAME: &str = "functions.json";
 const FUNCTIONS_BIN_DIR_NAME: &str = "bin";
 const AGENTS_DIR_NAME: &str = "agents";
+const SKILLS_DIR_NAME: &str = "skills";
 
 const CLIENTS_FIELD: &str = "clients";
 
@@ -792,6 +793,13 @@ impl Config {
         match env::var(get_env_name("functions_dir")) {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(FUNCTIONS_DIR_NAME),
+        }
+    }
+
+    pub fn skills_dir() -> PathBuf {
+        match env::var(get_env_name("skills_dir")) {
+            Ok(value) => PathBuf::from(value),
+            Err(_) => Self::local_path(SKILLS_DIR_NAME),
         }
     }
 
@@ -2357,6 +2365,11 @@ impl Config {
             // Inject _plan pseudo-tool when planning_tool is enabled
             if self.agent_loop.planning_tool {
                 functions.push(crate::agent_loop::plan_tool_declaration());
+            }
+            // Inject read_skill tool when eligible skills exist
+            let eligible_skills = crate::skill::get_eligible_skills_for_config(self);
+            if !eligible_skills.is_empty() {
+                functions.push(crate::skill::read_skill_tool_declaration());
             }
             Some(functions)
         }

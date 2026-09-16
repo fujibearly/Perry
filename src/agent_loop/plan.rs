@@ -193,6 +193,7 @@ impl PlanTracker {
         None
     }
 
+    #[allow(dead_code)]
     pub fn render_summary(&self) -> String {
         let mut lines = Vec::new();
         lines.push(format!("objective: \"{}\"", self.objective));

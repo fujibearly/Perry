@@ -11,6 +11,7 @@ mod render;
 mod repl;
 mod safety;
 mod serve;
+mod skill;
 #[macro_use]
 mod utils;
 

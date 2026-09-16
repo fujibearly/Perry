@@ -320,6 +320,7 @@ pub async fn eval_tool_calls_parallel(
     abort_signal: AbortSignal,
     progress: &AgentLoopProgress,
     risk_cache: Option<std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
+    skill_tracker: Option<std::sync::Arc<parking_lot::Mutex<crate::skill::ActiveSkillTracker>>>,
 ) -> Result<Vec<ToolResult>> {
     if calls.is_empty() {
         return Ok(vec![]);
@@ -342,6 +343,7 @@ pub async fn eval_tool_calls_parallel(
             let _abort_signal = abort_signal.clone();
             let progress = progress.clone();
             let risk_cache = risk_cache.clone();
+            let skill_tracker = skill_tracker.clone();
             async move {
                 let _permit = semaphore.acquire().await.unwrap();
                 let start = Instant::now();
@@ -351,7 +353,14 @@ pub async fn eval_tool_calls_parallel(
                 });
                 progress.add_active_tool(&call.name);
 
-                let result = eval_single_tool(&config, &call, risk_cache.as_ref(), Some(&progress)).await;
+                let result = eval_single_tool(
+                    &config,
+                    &call,
+                    risk_cache.as_ref(),
+                    Some(&progress),
+                    skill_tracker.as_ref(),
+                )
+                .await;
                 let duration = start.elapsed();
 
                 let output = match result {
@@ -1163,9 +1172,11 @@ async fn risk_evaluator_denied_result(
     proven_reversible: bool,
     cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
     progress: Option<&AgentLoopProgress>,
+    untrusted_runbook: bool,
+    active_tainted_skills: &[String],
 ) -> Option<serde_json::Value> {
     use crate::safety::{
-        build_evaluator_context, clamp_verdict, required_authority, PolicyFile, RequiredAuthority,
+        clamp_verdict, required_authority, PolicyFile, RequiredAuthority,
         RiskVerdict,
     };
 
@@ -1262,7 +1273,7 @@ async fn risk_evaluator_denied_result(
     } else {
         Vec::new()
     };
-    let context = build_evaluator_context(
+    let context = crate::safety::build_evaluator_context_with_taint(
         &call.name,
         &call.arguments,
         reversible,
@@ -1271,6 +1282,8 @@ async fn risk_evaluator_denied_result(
         Some(&impl_info),
         invocation.as_deref(),
         if helpers.is_empty() { None } else { Some(&helpers) },
+        untrusted_runbook,
+        active_tainted_skills,
     );
 
     if let Some(p) = progress {
@@ -1346,6 +1359,7 @@ pub async fn plan_risk_prepass(
     steps: &[crate::agent_loop::plan::PlanStep],
     risk_cache: Option<std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
     progress: Option<&AgentLoopProgress>,
+    skill_tracker: Option<&std::sync::Arc<parking_lot::Mutex<crate::skill::ActiveSkillTracker>>>,
 ) -> Result<()> {
     let cache = match risk_cache {
         Some(c) => c,
@@ -1363,7 +1377,27 @@ pub async fn plan_risk_prepass(
         None => return Ok(()), // Clean no-op without #6c (Invariant 3)
     };
 
+    let mut prepass_skill_tracker = skill_tracker
+        .map(|t| t.lock().clone())
+        .unwrap_or_default();
+
     for step in steps {
+        if let Some(tool) = &step.tool {
+            if tool == "read_skill" {
+                if let Some(skill_name) = step
+                    .args_preview
+                    .as_ref()
+                    .and_then(|a| a.get("name"))
+                    .and_then(|n| n.as_str())
+                {
+                    let registry = crate::skill::SkillRegistry::discover_default(config);
+                    if let Some(s) = registry.get(skill_name) {
+                        prepass_skill_tracker.load(skill_name, s.provenance);
+                    }
+                }
+            }
+        }
+
         let tool_name = match &step.tool {
             Some(t) if !t.is_empty() && t != "_plan" => t,
             _ => continue,
@@ -1398,7 +1432,10 @@ pub async fn plan_risk_prepass(
             Vec::new()
         };
 
-        let context = crate::safety::build_evaluator_context(
+        let untrusted = prepass_skill_tracker.is_untrusted();
+        let tainted_skills = prepass_skill_tracker.active_tainted_skills();
+
+        let context = crate::safety::build_evaluator_context_with_taint(
             tool_name,
             &preview_args,
             static_reversible,
@@ -1407,6 +1444,8 @@ pub async fn plan_risk_prepass(
             Some(&impl_info),
             invocation.as_deref(),
             if helpers.is_empty() { None } else { Some(&helpers) },
+            untrusted,
+            &tainted_skills,
         );
 
         match run_risk_evaluator(config, &risk_model, &context, progress).await {
@@ -2093,6 +2132,7 @@ async fn eval_single_tool(
     call: &ToolCall,
     risk_cache: Option<&std::sync::Arc<parking_lot::Mutex<crate::safety::RiskCache>>>,
     progress: Option<&AgentLoopProgress>,
+    skill_tracker: Option<&std::sync::Arc<parking_lot::Mutex<crate::skill::ActiveSkillTracker>>>,
 ) -> Result<serde_json::Value> {
     // Backlog #6a: capability-mask gate — a hard process sandbox boundary.
     // NO in-flight escalation over mTLS (a mask is a static permission, not an authorization).
@@ -2145,10 +2185,26 @@ async fn eval_single_tool(
         }
     }
 
-    // Backlog #6c: `%assess-risk%` LLM evaluator overlay.
+    // Backlog #6c / #17: `%assess-risk%` LLM evaluator overlay with runbook taint tracking.
     // The evaluator can only TIGHTEN restrictions, never relax them ("the LLM is not a Pardoner").
     // Mandatory for all non-safe actions.
-    if let Some(denied) = risk_evaluator_denied_result(config, call, proven_reversible_applied, risk_cache, progress).await {
+    let (untrusted, tainted_skills) = if let Some(tracker) = skill_tracker {
+        let guard = tracker.lock();
+        (guard.is_untrusted(), guard.active_tainted_skills())
+    } else {
+        (false, Vec::new())
+    };
+
+    if let Some(denied) = risk_evaluator_denied_result(
+        config,
+        call,
+        proven_reversible_applied,
+        risk_cache,
+        progress,
+        untrusted,
+        &tainted_skills,
+    )
+    .await {
         let is_child = current_agent_depth() > 0 || crate::escalation::ParentConnInfo::from_env().is_some();
         if is_child {
             // Sub-agents fail closed on risk denial; cannot elevate ceiling or bypass risk over mTLS
@@ -2186,6 +2242,22 @@ async fn eval_single_tool(
     // Record pre-mutation entry in durable journal (FR-6d.6)
     if !proven_reversible_applied {
         record_pre_mutation_journal_entry(config, call, progress);
+    }
+
+    // Route 0: Builtin skill reading and activation (#17 Spec B)
+    if call.name == "read_skill" {
+        let res = crate::skill::eval_read_skill(config, call);
+        if let Some(tracker) = skill_tracker {
+            if let Some(name) = res.get("name").and_then(|n| n.as_str()) {
+                let prov = match res.get("provenance").and_then(|p| p.as_str()) {
+                    Some("workspace") => crate::skill::SkillProvenance::WorkspaceTainted,
+                    Some("builtin") => crate::skill::SkillProvenance::Builtin,
+                    _ => crate::skill::SkillProvenance::Global,
+                };
+                tracker.lock().load(name, prov);
+            }
+        }
+        return Ok(res);
     }
 
     // Route 1: MCP tools (async native)
@@ -2668,7 +2740,7 @@ async fn route_to_pipe(
     // Execute the target tool. No shared risk cache here (this is a derived
     // pipe-target actuation outside the turn loop) — it is still fully gated,
     // just evaluated fresh rather than cache-reused.
-    let result = eval_single_tool(config, &pipe_call, None, None).await?;
+    let result = eval_single_tool(config, &pipe_call, None, None, None).await?;
 
     // Recursively apply routing to the target's result (handles chained pipes)
     Ok(apply_output_routing(config, target_tool, result, tool_output_limit).await)
@@ -2919,6 +2991,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     let agent_name = current_agent_name(params.config);
     let pid = std::process::id();
     let mut plan_tracker: Option<crate::agent_loop::plan::PlanTracker> = None;
+    let active_skill_tracker = std::sync::Arc::new(parking_lot::Mutex::new(crate::skill::ActiveSkillTracker::new()));
 
     for turn in 1..=max_turns {
         params.progress.set_turn(turn, max_turns);
@@ -3087,6 +3160,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                         &structured_plan.steps,
                         Some(risk_cache.clone()),
                         Some(&params.progress),
+                        Some(&active_skill_tracker),
                     )
                     .await;
 
@@ -3156,6 +3230,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
         if let Some(ref mut tracker) = plan_tracker {
             for call in &executable_calls {
                 if let Some(step_id) = tracker.update_active_step(&call.name) {
+                    active_skill_tracker.lock().set_active_step(Some(step_id));
                     if let Some(step) = tracker.steps.iter().find(|s| s.id == step_id) {
                         params.progress.emit(AgentLoopEvent::PlanStepUpdated {
                             step_id: step.id,
@@ -3176,20 +3251,26 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                 params.abort_signal.clone(),
                 &params.progress,
                 Some(risk_cache.clone()),
+                Some(active_skill_tracker.clone()),
             )
             .await?;
 
             // Update plan tracker status based on execution outcomes
-            if let Some(ref mut tracker) = plan_tracker {
-                for res in &real_results {
-                    let is_err = res.output.get("error").is_some()
-                        || res.output.get("status").and_then(|s| s.as_str()) == Some("permission_blocked");
-                    let updated_id = if is_err {
+            for res in &real_results {
+                let is_err = res.output.get("error").is_some()
+                    || res.output.get("status").and_then(|s| s.as_str()) == Some("permission_blocked");
+                let updated_id = if let Some(ref mut tracker) = plan_tracker {
+                    if is_err {
                         tracker.fail_active_step()
                     } else {
                         tracker.complete_active_step()
-                    };
-                    if let Some(step_id) = updated_id {
+                    }
+                } else {
+                    None
+                };
+                if let Some(step_id) = updated_id {
+                    active_skill_tracker.lock().complete_step(step_id);
+                    if let Some(ref tracker) = plan_tracker {
                         if let Some(step) = tracker.steps.iter().find(|s| s.id == step_id) {
                             params.progress.emit(AgentLoopEvent::PlanStepUpdated {
                                 step_id: step.id,
@@ -7019,7 +7100,7 @@ agent_loop:
         let config = config_with_tiers();
         assert!(config.read().safety.risk_model.is_none());
         assert!(
-            risk_evaluator_denied_result(&config, &call("restart_svc"), false, None, None)
+            risk_evaluator_denied_result(&config, &call("restart_svc"), false, None, None, false, &[])
                 .await
                 .is_none(),
             "with no risk_model the evaluator must be a no-op (degrade to #6b)"
@@ -7054,7 +7135,7 @@ agent_loop:
             status: crate::agent_loop::plan::StepStatus::Pending,
         }];
 
-        let result = plan_risk_prepass(&config, &steps, Some(cache.clone()), None).await;
+        let result = plan_risk_prepass(&config, &steps, Some(cache.clone()), None, None).await;
         assert!(result.is_ok(), "plan_risk_prepass must succeed as a clean no-op without 6c");
         assert!(
             cache
@@ -7086,7 +7167,7 @@ agent_loop:
         assert!(config.read().safety.risk_model.is_none());
 
         let (progress, mut rx) = AgentLoopProgress::live();
-        let _ = risk_evaluator_denied_result(&config, &call("restart_svc"), false, None, Some(&progress)).await;
+        let _ = risk_evaluator_denied_result(&config, &call("restart_svc"), false, None, Some(&progress), false, &[]).await;
         
         let mut start_ev = None;
         while let Ok(event) = rx.try_recv() {
@@ -7117,7 +7198,7 @@ agent_loop:
         let config = config_with_tiers();
         config.write().safety.risk_model = Some("nonexistent:model".into());
         assert!(
-            risk_evaluator_denied_result(&config, &call("read_logs"), false, None, None)
+            risk_evaluator_denied_result(&config, &call("read_logs"), false, None, None, false, &[])
                 .await
                 .is_none(),
             "Safe tools must skip the evaluator (fast-path), not error on a bogus model"
@@ -7146,7 +7227,7 @@ agent_loop:
             },
         );
 
-        let denied = risk_evaluator_denied_result(&config, &c, false, Some(&cache), None)
+        let denied = risk_evaluator_denied_result(&config, &c, false, Some(&cache), None, false, &[])
             .await
             .expect("a cached Human floor must block");
         assert_eq!(denied["error"]["type"], "risk_blocked");
@@ -7178,7 +7259,7 @@ agent_loop:
         );
 
         assert!(
-            risk_evaluator_denied_result(&config, &c, false, Some(&cache), None)
+            risk_evaluator_denied_result(&config, &c, false, Some(&cache), None, false, &[])
                 .await
                 .is_none(),
             "a cached in-ceiling floor should proceed without re-calling the model"
@@ -7292,7 +7373,7 @@ agent_loop:
             },
         );
 
-        let result = risk_evaluator_denied_result(&config, &c, false, Some(&cache), Some(&progress)).await;
+        let result = risk_evaluator_denied_result(&config, &c, false, Some(&cache), Some(&progress), false, &[]).await;
         assert!(result.is_none());
 
         let ev = rx.try_recv().expect("must emit RiskAssessmentCacheHit");
@@ -7685,7 +7766,7 @@ agent_loop:
         // restart_svc is disruptive, exceeding the safe ceiling
         let call = ToolCall::new("restart_svc".to_string(), json!({}), None);
 
-        let res = eval_single_tool(&config, &call, None, None).await.unwrap();
+        let res = eval_single_tool(&config, &call, None, None, None).await.unwrap();
         assert_eq!(res["error"]["type"], "authority_exceeded");
 
         match prev_ceiling {
@@ -8014,6 +8095,7 @@ agent_loop:
             vec![call],
             create_abort_signal(),
             &progress,
+            None,
             None,
         )
         .await
