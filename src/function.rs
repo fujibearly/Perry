@@ -416,7 +416,7 @@ impl SafetyClass {
 ///    This enum has strictly 5 variants (`Safe` through `Catastrophic`). Actions requiring
 ///    unconditional human intervention live in [`crate::safety::RequiredAuthority::Human`],
 ///    which sits above all autonomous agent ceilings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BlastRadius {
     /// Radius 0: reads, idempotent queries — never changes state.
@@ -457,7 +457,37 @@ impl BlastRadius {
     }
 }
 
-/// The static (deterministic, pre-policy, pre-LLM) blast-radius classification of/// a tool, including the "no declaration" case.
+/// The inherent impact or blast radius of an action.
+/// Describes what an action *is capable of* (its destructive potential).
+/// Used to classify tools: "what is this action's intrinsic impact?"
+/// Example: `fs_write` is classified as `ImpactTier(BlastRadius::Reversible)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ImpactTier(pub BlastRadius);
+
+impl ImpactTier {
+    #[allow(dead_code)]
+    #[inline]
+    pub fn as_blast_radius(&self) -> BlastRadius {
+        self.0
+    }
+}
+
+impl From<BlastRadius> for ImpactTier {
+    #[inline]
+    fn from(b: BlastRadius) -> Self {
+        ImpactTier(b)
+    }
+}
+
+impl From<ImpactTier> for BlastRadius {
+    #[inline]
+    fn from(i: ImpactTier) -> Self {
+        i.0
+    }
+}
+
+/// The static (deterministic, pre-policy, pre-LLM) blast-radius classification of a tool, including the "no declaration" case.
 ///
 /// Mirrors [`SafetyClass`] but on the 5-tier axis: an *undeclared* tool
 /// (`Unclassified`) is strictly more conservative than any concrete tier — it is
@@ -1465,5 +1495,37 @@ mod tests {
         assert_eq!(received.trace_id, "relay-test");
         assert_eq!(received.agent, "sub-tool");
         assert_eq!(received.content, "internal prompt");
+    }
+
+    #[test]
+    fn test_impact_tier_roundtrip_and_serde_transparency() {
+        use super::{BlastRadius, ImpactTier};
+
+        let raw = BlastRadius::Safe;
+        let impact: ImpactTier = raw.into();
+        assert_eq!(impact.as_blast_radius(), BlastRadius::Safe);
+        assert_eq!(BlastRadius::from(impact), BlastRadius::Safe);
+
+        // Verify serde transparency
+        let json = serde_json::to_string(&impact).unwrap();
+        assert_eq!(json, "\"safe\"");
+        let deserialized: ImpactTier = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, impact);
+
+        // Test other variants
+        for tier in [
+            BlastRadius::Safe,
+            BlastRadius::Reversible,
+            BlastRadius::Disruptive,
+            BlastRadius::Destructive,
+            BlastRadius::Catastrophic,
+        ] {
+            let impact_tier = ImpactTier::from(tier);
+            assert_eq!(impact_tier.as_blast_radius(), tier);
+            assert_eq!(BlastRadius::from(impact_tier), tier);
+            let s = serde_json::to_string(&impact_tier).unwrap();
+            let d: ImpactTier = serde_json::from_str(&s).unwrap();
+            assert_eq!(d, impact_tier);
+        }
     }
 }
