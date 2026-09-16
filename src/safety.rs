@@ -82,6 +82,17 @@ impl AuthorityCeiling {
         }
     }
 
+    /// Query: does this ceiling permit the given impact tier to execute autonomously?
+    /// Returns true if the action's impact does not exceed this ceiling.
+    /// Clarifies the semantic relationship between an action's intrinsic impact
+    /// and an agent's authority boundary.
+    #[allow(dead_code)]
+    #[inline]
+    pub fn permits_impact(&self, impact: crate::function::ImpactTier) -> bool {
+        let AuthorityCeiling::UpTo(tier) = *self;
+        impact.0 <= tier
+    }
+
     /// The tier this ceiling permits up to (for lowering / min operations).
     pub fn tier(&self) -> BlastRadius {
         let AuthorityCeiling::UpTo(t) = *self;
@@ -1809,6 +1820,14 @@ mod tests {
         // Human is never within any ceiling.
         assert!(!ceiling.permits(RequiredAuthority::Human));
         assert!(!AuthorityCeiling::UpTo(Catastrophic).permits(RequiredAuthority::Human));
+
+        // Intrinsic ImpactTier permissions check
+        use crate::function::ImpactTier;
+        assert!(ceiling.permits_impact(ImpactTier(Safe)));
+        assert!(ceiling.permits_impact(ImpactTier(Reversible)));
+        assert!(ceiling.permits_impact(ImpactTier(Disruptive)));
+        assert!(!ceiling.permits_impact(ImpactTier(Destructive)));
+        assert!(!ceiling.permits_impact(ImpactTier(Catastrophic)));
     }
 
     #[test]
