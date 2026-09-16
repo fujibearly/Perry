@@ -1021,6 +1021,7 @@ pub fn build_evaluator_context(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_evaluator_context_with_taint(
     tool_name: &str,
     arguments: &serde_json::Value,

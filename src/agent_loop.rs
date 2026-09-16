@@ -3479,7 +3479,7 @@ async fn call_llm_raw(
                     let has_prior_tools = active_input
                         .tool_calls()
                         .as_ref()
-                        .map_or(false, |tc| !tc.tool_results.is_empty());
+                        .is_some_and(|tc| !tc.tool_results.is_empty());
 
                     if retries < MAX_EMPTY_RETRIES && !params.abort_signal.aborted() {
                         retries += 1;
@@ -4452,6 +4452,7 @@ pub fn format_agent_pid(pid: u32) -> String {
 }
 
 /// Format a dialog trace block for rendering with hierarchical guide rails, asymmetric framing, model attribution, and responsive soft-wrapping.
+#[allow(clippy::too_many_arguments)]
 pub fn format_dialog_block_with_model(
     agent: &str,
     configured_model: &str,

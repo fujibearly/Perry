@@ -413,13 +413,7 @@ pub fn eval_read_skill(config: &GlobalConfig, call: &crate::function::ToolCall) 
         .arguments
         .get("name")
         .and_then(|v| v.as_str())
-        .or_else(|| {
-            if let Some(s) = call.arguments.as_str() {
-                Some(s)
-            } else {
-                None
-            }
-        });
+        .or_else(|| call.arguments.as_str());
 
     let name = match skill_name {
         Some(n) if !n.trim().is_empty() => n.trim(),
