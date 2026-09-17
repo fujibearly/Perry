@@ -68,8 +68,18 @@ Maps each strategic strand to its tracked item. **Status lives in the [Status Ta
 | **Agent of Empires (AoE)** (tmux fleet dashboard) | L3 | 🧭 *(external option)* | Host-dependent; lower portability. |
 | **Fleet Commander / "Hive-Mind"** (cloud shared semantic cache, fleet coordination) | L4 | 💭 *(concept only — see #13 for the engine-level slice)* | Not built, not in the backlog. A cloud/fleet aspiration above the engine. |
 | **TrueForge / enterprise K8s gateway** (RBAC, cloud audit) | L4 | 💭 *(external / concept)* | Also `Portkey` — LLM gateway/observability. Out of engine scope entirely. |
+| | | | |
+| ***Distilled from TrueForge & KubeIntellect study (Session 27)*** | | | |
+| Dedicated SRE Telemetry Actuators (`kubectl.sh`, `helm.sh`, `prometheus.sh`, `loki.sh`) | L1 | **#18** | 🆕 Entirely new. Schema-bounded `argc` tools replacing unbounded `execute_command.sh` for K8s/observability. |
+| Autonomy Ladder (`--autonomy=a0\|a1\|a2`) | L2 | **#19** | 🔧 Enhancement of **#6** (tool safety tiers) and **#6d** (escalation). Session-level posture presets. |
+| Zero-Token Pre-Flight Triage (`--preflight`) | L1/L2 | **#20** | 🆕 Entirely new. Deterministic bash check short-circuits before agent loop at $0.00 cost. |
+| In-Loop Clarification Tool (`ask_user`) | L2 | **#21** | 🔧 Enhancement of **#6d** (escalation). Extends the `/dev/tty`/mTLS channel from safety-only to clarification. |
+| Deferred Tool Loading (lazy schema injection) | L2 | **#22** | 🔧 Enhancement of **#8** (context compaction) and **#17** (progressive disclosure). Applies progressive disclosure to tool schemas. |
+| Flight Recorder & Session Replay (`--replay`) | L2 | **#23** | 🔧 Enhancement of **#7** (WAL) and **#14** (audit log). Adds hash-chaining and replay over their event stream. |
+| Read-Only Batch Actuator Execution (`run_batch`) | L2 | **#24** | ⚡ Overlaps **#3** (parallel dispatch) and **#15** (plan execution). Read-only-gated multi-tool batch in a single turn. |
+| Lightweight Incident Episode Store | L2 | **#25** | 🔧 Enhancement of **#13** (shared artifact store). Cross-session SQLite episode persistence — new subsystem, not a RAG extension. |
 
-Legend: 🧭 external tool to adopt · 💭 concept only (no backlog item). Tracked items (`#N`) carry their status in the [Status Table](#status-table-canonical).
+Legend: 🧭 external tool to adopt · 💭 concept only (no backlog item) · 🆕 entirely new · 🔧 enhancement of existing item · ⚡ overlaps existing items. Tracked items (`#N`) carry their status in the [Status Table](#status-table-canonical).
 
 ## Honest Status Notes
 
@@ -117,31 +127,44 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 
 **This is the single source of truth for each item's status.** Full item detail is in [View 3](#view-3--backlog-item-detail); strategic mapping in [View 1](#roadmap--item-crosswalk).
 
-| # | Item | Status | Priority | Scope / Branch | Rationale | Alignment (Pillars/Tenets) | Effort |
-|---|------|--------|----------|----------------|-----------|----------------------------|--------|
-| 1 | Rust MCP Bridge | ✓ Done (merged) | High | `feat/rust-mcp-bridge` | Foundation. Replaces the Node.js MCP bridge with an in-process Rust client, unblocking tool-ecosystem access with no new abstractions or runtime dependency. | **Pillar 6 (Portability) + Tenet 5:** removes the Node runtime; single static musl binary deployable on 64MB bastions. | L — done (~1272 lines) |
-| 3 | Client-Side Agent Loop | ✓ Done (merged) | High | `feat/agent-loop-enhancements` | The only provider-agnostic orchestration; parallel tools, turn budget, sub-agents, `_plan` give *every* provider agentic capability without server-side support. | **Pillars 1, 2, 5:** hierarchical delegation, process-isolated sub-agents, turn/cost circuit breakers. Core of the fork thesis. | L — done (Phases A–F) |
-| 4 | Tool Output Routing | ✓ Done (merged) | Medium | `feat/tool-output-routing` | Every tool result re-enters LLM context, wasteful for large/final outputs; routing to file/pipe makes composition practical without burning context. | **Pillar 3 (Declarative Data Flow):** Unix-style pipes, file targets, auto-capping. | M — done (~200 lines) |
-| 5 | Test Suite & Coverage Hardening | ✓ Done (merged) | Medium | `feat/test-suite-hardening` | Coverage analysis showed strong baseline but untested edges in error handling, crash isolation, cyclic pipe aborts, budget conditions. | **Pillar 5 (Deterministic Safety):** validates circuit-breaker/budget guarantees. | M — done. +25 unit tests + Demo 12 (offline crash isolation). agent_loop.rs 46.8%→64.7% line. Merged to main. |
-| 6 | Tool Safety Modes & Actuation Governance (umbrella) | ✓ Done (unmerged) | High | `feat/tool-safety-6a…6d` | Parallel sub-agents must never cause catastrophe; a graduated, safety-governed model gates *which* agent may perform *which* action: non-pardonable deterministic floor + LLM risk overlay + escalation to humans. | **Tenet 4 ("triage in parallel, actuate in sequence") + Pillar 5:** the missing enforcement layer for the SRE stress-test. | Umbrella; 4 stacked increments (#6a–#6d) that degrade gracefully. Spec: [`.kiro/specs/tool-safety-modes/`](../specs/tool-safety-modes/) |
-| 6a | ↳ Deterministic capability mask (floor / fallback) | ✓ Implemented (`feat/tool-safety-6a`, unmerged) | High | `feat/tool-safety-6a` | Binary `readonly`/`mutating` mask; sub-agents read-only by default; **unclassified tools reserved to humans**. The permanent floor everything degrades to. | **Pillar 2 + Pillar 5:** mask rides the child-PID env channel (like `AICHAT_AGENT_DEPTH`). | S–M — done. `function.rs` (`ToolMode`/`SafetyClass`), `agent_loop.rs` (mask + `capability_denied` gate), `mcp.rs`. +8 tests. |
-| 6b | ↳ Blast-radius tiers + proven reversibility + Protected Policy File + authority gradient | ✓ Implemented + hardened (`feat/tool-safety-6b`, unmerged) | High | `feat/tool-safety-6b` | 5-tier radius (`Safe`→`Catastrophic`), orthogonal *proven* reversibility (catastrophic = hard human-only floor), non-pardonable Protected Policy File, root-favoring authority ceiling. Delegation not gated (decision B). Fully deterministic. | **Tenet 4 + Pillar 5:** deterministic floor before any LLM; authority grows toward the root. | M — done. New `src/safety.rs`; top-level `safety:` config + `AICHAT_SAFETY_*` env; `ToolBlocked` trace; all 31 tools classified (`llm-functions` repo). +33 tests; demos 13–15. |
-| 6c | ↳ `%assess-risk%` LLM evaluator (stricter-only overlay) | ✓ Implemented + audited + hardened (`feat/tool-safety-permission-boundary`, unmerged) | High | `feat/tool-safety-permission-boundary` | Dedicated cheap model (`safety.risk_model`) + minimal-context `%assess-risk%` role returns a structured verdict that can only make things *stricter*. `Safe` fast-path skips it; fail-toward (low-confidence/error → block); monotonic **raise-only `RiskCache`** reuses assessments without ever green-lighting. **Unbiased, Grounded Risk Assessment (`FR-6c.11`):** Eliminates anchoring bias (`static_tier`, prompt outcome hints, `# @meta risk` leakage) and dead parameter schemas; feeds evaluator 100% concrete execution facts (tool, invocation, args, intent, script source, active rollback safeguards). **Verdict-Level Caching:** Caches full `RiskVerdict` in `RiskCache` to preserve rationale and dynamic act-time reversibility discounting. Absent `risk_model` → degrades to exactly #6b. | **Principle: "the LLM is not a Pardoner."** Advisory overlay clamped in Rust; assessment is an earlier red-light, never a green-light. | M — done. Role asset + `safety.rs` (verdict parse/clamp/cache/context) + `agent_loop.rs` wiring. +28 tests + context inspection tests. Tasks 6c.13/6c.14/6c.15 complete. |
-| 6d | ↳ Escalation & control protocol + human-in-the-loop | ✓ Implemented + hardened (`feat/tool-safety-permission-boundary`, unmerged) | High | `feat/tool-safety-permission-boundary` | Persistent per-process mTLS inter-agent channel (child dials parent, loopback raw-TLS + length-delimited JSON framing; WS deferred), actor-serialized single-writer, demuxed oneshot reader, bounded drop-newest event backpressure, immediate socket-drop fail-closed, typed `Escalation`/`Verdict`/`Cancel`, durable rollback journal, **Option B Pre-flight Opportunistic Remediation**, **reversibility-aware verdict clamp**, evaluator `rollback_mechanism` context, **Supervisory Policy Enforcement & Risk Evaluation** ("The Should Gate"), **Permission vs. Authorization Redesign** (`DelegatedPermissions` upfront provisioning, no in-flight capability elevation, deterministic unwind, bounded re-delegation cap), **Observability Event Pipeline Unification** (`DialogBlock` strict FIFO ordering across all 4 tiers), **Full Untruncated Trace Observability (`FR-6d.23`)** (`dialog_no_truncate` config/CLI/env, `--no-truncate` / `-n` demo harness flag), **Prohibition of Downward Permit Propagation & Hard Child Authority Ceilings (`FR-6d.24`)**, **Hierarchical Guide Rails, Semantic Role Badging & Turn Delta Observability (`FR-6d.25`)**, **ANSI-Aware Soft-Wrapping & Guide Rail Continuity**, **Nanoworker Traceability & British Humour Petnames**, **Ephemeral Inheritable Agent Palette & Error/Escalation Styling**, **Dialog Role Keyword Coloring & History Dimming**, branch-only suspension, upward propagation, interactive HITL CLI prompt (`[c]ontinue \| [h]alt \| [r]evert \| [e]xplain \| [g]uide`), headless Layer 3. | **Pillar 2 (process-isolated control) + Pillar 5.** Control plane = persistent mTLS conn; durability plane = on-disk 0600 journal; audit plane = #14. Child auth = channel-bound HMAC. | L — tasks 6d.1–6d.39 complete. `src/escalation.rs` + `src/safety.rs` + `src/agent_loop.rs` + `src/function.rs`. mTLS listener + persistent client actor, RollbackJournal, Option B, Should Gate, hierarchical permissions contract, bounded re-delegation, strict FIFO dialog event pipeline, prohibition of downward permits, hierarchical guide rails & soft-wrapping, nanoworker traceability, British petnames, ephemeral color palette, role coloring & history dimming, Demos 1–21 and 10b. 506 workspace tests. |
-| 7 | Session Resumption & WAL Journaling (`--resume`) | 🔜 Proposed | High | `feat/session-wal-resumption` | Long diagnostic sessions must survive network dropouts, rate-limits, `SIGINT` without re-running expensive probes. | **Tenet 1 (system-level scope) + Pillar 4 (Observability):** status files → durable WAL. | L — ~250-350 lines + new `session_wal.rs`; replay/checkpoint correctness is the hard part. |
-| 8 | Dynamic Multi-Turn Context Compaction | 🔜 Proposed | Medium | `feat/context-compaction` | Extended 15+ turn investigations accumulate context monoliths; rolling micro-summaries keep the working context dense. | **Pillar 1 (Delegation over Context Monoliths):** complementary in-thread fallback to delegation/routing. | M — ~200-300 lines; summarization-quality tuning adds uncertainty. |
-| 9 | Ephemeral Git Worktree Isolation for Coders | 🔜 Proposed | Medium | `feat/ephemeral-git-worktrees` | Concurrent `coder` sub-agents in a Git repo must build/edit/test without file clobbering or build collision. | **Pillar 2 (Process Isolation)** extended to filesystem isolation. Scoped to the coding sub-case ("worktree trap") — opt-in. | M — ~150-250 lines; worktree lifecycle/cleanup edge cases. |
-| 10 | Staged Config & Dry-Run Protocol for Ops | 🔜 Proposed | Medium | `feat/staged-ops-protocol` | Host config mutations (Caddyfile, K8s manifests) require pre-flight validation + rollback before live activation. | **Tenet 4 + Pillar 5:** stage → validate → atomic apply/rollback. | S–M — mostly `llm-functions` tooling + prompt contracts, little engine code. |
-| 11 | Mock-Client Test Seam for Loop Coverage | 🔜 Proposed | Low | `feat/mock-client-seam` | #5 covered the loop's decision helpers; `run()` orchestration (turn iteration, streaming, tripped-call dispatch, sub-agent recursion) is gated behind a live LLM, only reached by the billed E2E harness. | **Pillar 5:** deterministic, offline coverage of the loop wiring. Touches the hot path → own spec. | M — ~150-300 lines; injectable LLM turn source + scripted-turn tests. |
-| 12 | Remote MCP Transports (HTTP/WSS) | 🔜 Proposed | Medium | `feat/remote-mcp-transports` | Native MCP speaks only stdio to local servers; L4 control planes and remote MCP servers need HTTP/WSS. | **Transparent MCP + Pillar 6:** remote tools still appear as normal `FunctionDeclaration`s; stdio stays the zero-config default. | M — ~200-400 lines; transport abstraction + auth/reconnect in `src/mcp.rs`. |
-| 13 | Scoped Shared Artifact Store for Orchestration Trees | 🔜 Proposed | Low | `feat/shared-artifact-store` | No way for sibling sub-agents in one tree to share intermediate artifacts without round-tripping the parent. Engine-level counterpart to the L4 "Hive-Mind", scoped to a local tree. | **Pillars 1 & 2 (managed tension):** structured append-only, root-PID-scoped, read-mostly — NOT a free-form blackboard. | M — ~150-300 lines; own spec; interacts with #7 (WAL) and #9 (worktrees). |
-| 14 | Per-Machine Consolidated Audit Log (auditability) | 🔜 Proposed | Medium | `feat/audit-log` | Observability today is live/ephemeral/single-process (`/dev/tty`, OSC, per-PID status files that vanish). No durable, consolidated, historical record for an external auditor/SRE/platform. Auditability is a *distinct goal* from observability. | **Pillar 4 extended to durability + Pillars 1/2:** each isolated agent authors its own append-only JSONL; consolidated per-machine at read time via correlation IDs. | M — ~200-400 lines; also the natural home to fix the `$0.000000` cost bug; own spec. |
-| 15 | Serious Structured `_plan` / Plan-Driven Execution | ✓ Done (unmerged) | Medium | `feat/structured-plan-and-skills` | Current `_plan` was a free-text scratchpad that never drove execution; structured, plan-driven execution enables progress tracking, replanning, and an ahead-of-time risk pre-pass that pre-raises the #6c `RiskCache` with cross-step context. Resilient dual-arm parser tolerates legacy string & partial object formats. Clean no-op degradation when #6c absent. | **Pillar 1 + "the LLM is not a Pardoner":** plan-time is a red-light only; act-time evaluation stays the non-negotiable floor. Monotonic pre-pass degrades cleanly to no-op if #6c unconfigured. | M — done (~390 lines). Spec: [`.kiro/specs/structured-plan-and-skills/spec-15-structured-plan.md`](../specs/structured-plan-and-skills/spec-15-structured-plan.md) |
-| 16 | Web-Search Style & Branch-Wide Grounding Control (`--wslinks`) | ✓ Done (unmerged) | High | `feat/tool-safety-permission-boundary` | Control web-search style across the entire orchestrator process tree: default grounded direct LLM summary (fast 1-turn synthesis, no intermediate page scraping) vs. multi-step link exploration (`--wslinks`, URL discovery + `fetch_and_summarize` piped to `summarize_text`). | **Pillar 1 (Delegation over Context Monoliths) + Pillar 3 (Declarative Data Flow):** adapts researcher instruction and tool execution dynamically, avoiding unnecessary scrape turns and token burn. | S–M — done (~180 lines). `cli.rs`, `agent_loop.rs`, `agent.rs`, `variables.rs`, `web_search_aichat.sh`, `researcher/index.yaml`, Demos 5/5b. |
-| 17 | Progressive Disclosure Runbooks & Skills (`read_skill`) | ✓ Done (unmerged) | Medium | `feat/structured-plan-and-skills` | Progressive disclosure of procedural runbooks reduces system prompt context bloat; workspace skills marked `WorkspaceTainted` to trigger heightened `%assess-risk%` scrutiny without greenlighting. Plain frontmatter parser, nano-agent exclusion, step-scoped taint lifecycle. | **Pillar 1 (Delegation over Context Monoliths) + Pillar 5 (Deterministic Safety):** 3-tier precedence, dynamic catalogue injection, step-scoped taint lifecycle. | M — done (~620 lines). Spec: [`.kiro/specs/structured-plan-and-skills/spec-17-skills.md`](../specs/structured-plan-and-skills/spec-17-skills.md) |
-| 2 | Gemini Interactions API | ⏸ Deferred | Low | — (covered via OpenRouter/client loop) | Future-proofs against `generateContent` deprecation, but Google's API may still shift and OpenRouter + client loop already cover Gemini agentic use. | **Weakest fit.** Provider-specific server-side vs. the fork's provider-agnostic thesis; #3 already makes Gemini agentic. | L — ~1000-1500 lines + new `gemini_interactions.rs`; external API stability risk. |
+| # | Feature / Item | Status | Pri. | Val. | Effort | LHF | Notes / Relationship |
+|:---:|:---|:---|:---|:---|:---|:---:|:---|
+| | **▼ MERGED & SHIPPED** | | | | | | |
+| **1** | **Rust MCP Bridge** | 🟢 Done | 🔥 High | 💎 High | 🏋️ Large | | Foundation |
+| **3** | **Client-Side Agent Loop** | 🟢 Done | 🔥 High | 💎 High | 🏋️ Large | | Core fork thesis |
+| **6** | **Tool Safety Modes (umbrella)** | 🟢 Done | 🔥 High | 💎 High | 🎒 Multi | | — |
+| 6a | ↳ Deterministic capability mask | 🟢 Done | 🔥 High | 💎 High | 🚶 S-M | 🎯 | *(Retroactively LHF)* |
+| 6b | ↳ Blast-radius tiers + reversibility | 🟢 Done | 🔥 High | 💎 High | 🚶 Med | | — |
+| 6c | ↳ `%assess-risk%` LLM evaluator | 🟢 Done | 🔥 High | 💎 High | 🚶 Med | | — |
+| 6d | ↳ Escalation & HITL protocol | 🟢 Done | 🔥 High | 💎 High | 🏋️ Large | | — |
+| **16**| **Web-Search Grounding Control** | 🟢 Done | 🔥 High | 💎 High | 🚶 S-M | 🎯 | *(Retroactively LHF)* |
+| **4** | **Tool Output Routing** | 🟢 Done | ➖ Med | 🔹 Med | 🚶 Med | | — |
+| **5** | **Test Suite & Coverage Hardening** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | — |
+| **15**| **Plan-Driven Execution** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | Consumes #6c |
+| **17**| **Progressive Disclosure Skills** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | — |
+| &nbsp; | | | | | | | |
+| | **▼ PROPOSED (TO DO)** | | | | | | |
+| **7** | **Session WAL Journaling** | 🟡 Prop. | 🔥 High | 💎 High | 🏋️ Large | | — |
+| **18**| **SRE Telemetry Actuators** | 🟡 Prop. | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🆕 New (plugs into #6) |
+| **19**| **Autonomy Ladder** | 🟡 Prop. | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🔧 Enhances #6 + #6d |
+| **8** | **Dynamic Context Compaction** | 🟡 Prop. | ➖ Med | 🔹 Med | 🚶 Med | | — |
+| **9** | **Ephemeral Git Worktrees** | 🟡 Prop. | ➖ Med | 🔹 Med | 🚶 Med | | — |
+| **10**| **Staged Config & Dry-Run** | 🟡 Prop. | ➖ Med | 💎 High | 🚶 S-M | 🎯 | — |
+| **12**| **Remote MCP Transports** | 🟡 Prop. | ➖ Med | 💎 High | 🚶 Med | | Enables L4 control planes |
+| **14**| **Per-Machine Audit Log** | 🟡 Prop. | ➖ Med | 🔹 Med | 🚶 Med | | Shares writer with #7 |
+| **20**| **Zero-Token Pre-Flight Triage** | 🟡 Prop. | ➖ Med | 💎 High | 🏃 Small | 🎯 | 🆕 Entirely new |
+| **21**| **In-Loop Clarification (`ask_user`)** | 🟡 Prop. | ➖ Med | 💎 High | 🏃 Small | 🎯 | 🔧 Enhances #6d |
+| **22**| **Deferred Tool Loading** | 🟡 Prop. | ➖ Med | 🔹 Med | 🚶 Med | | 🔧 Enhances #8 + #17 |
+| **11**| **Mock-Client Test Seam** | 🟡 Prop. | 🧊 Low | ◽ Low | 🚶 Med | | Extends #5 |
+| **13**| **Scoped Shared Artifact Store** | 🟡 Prop. | 🧊 Low | ◽ Low | 🚶 Med | | Interacts #7, #9 |
+| **23**| **Flight Recorder & Replay** | 🟡 Prop. | 🧊 Low | 🔹 Med | 🏃 Small | | *(Blocked by #7 & #14)* |
+| **24**| **Read-Only Batch Actuation** | 🟡 Prop. | 🧊 Low | 🔹 Med | 🚶 Med | | ⚡ Overlaps #3 + #15 |
+| **25**| **Lightweight Episode Store** | 🟡 Prop. | 🧊 Low | 🔹 Med | 🚶 Med | | 🔧 Enhances #13 |
+| &nbsp; | | | | | | | |
+| | **▼ DEFERRED** | | | | | | |
+| **2** | **Gemini Interactions API** | 🔴 Def. | 🧊 Low | ◽ Low | 🏋️ Large | | Covered by OpenRouter |
 
-Legend: ✓ Done · 🔨 in progress · 🔜 proposed & tracked · ⏸ deferred.
+Legend: 🟢 Done · 🟡 Proposed · 🔴 Deferred. LHF (Low Hanging Fruit) = 🎯 (High/Med Value, S/S-M Effort, Unblocked).
 
 **Effort scale:** S ≈ under ~150 lines / a few hours · M ≈ ~150-400 lines / 1-2 days · L ≈ ~400+ lines or new modules / multi-day. Pillar/Tenet references map to [`fork-philosophy-and-architecture.md`](fork-philosophy-and-architecture.md).
 
@@ -657,6 +680,124 @@ A **serious** planner would make the plan a first-class object that the loop exe
 - **Core Implementation**: Implemented `src/skill.rs`, updated `src/config/agent.rs`, `src/config/mod.rs`, `src/safety.rs`, `src/agent_loop.rs`, and `assets/roles/%assess-risk%.md`.
 - **Verification**: All 6 unit tests in `src/skill.rs` pass; all 128 tests in `agent_loop::tests` pass; all 64 tests in `safety::tests` pass; full test suite (529 pass, 0 fail); clippy clean (`-D warnings`).
 - **Spec:** [`.kiro/specs/structured-plan-and-skills/spec-17-skills.md`](../specs/structured-plan-and-skills/spec-17-skills.md)
+
+---
+
+## Items #18–#25: Distilled from TrueForge & KubeIntellect (Session 27)
+
+> These items were distilled from studying [`truefoundry/trueforge`](https://github.com/truefoundry/trueforge) and [`MSKazemi/kubeintellect`](https://github.com/MSKazemi/kubeintellect). Full analysis: [`sre-and-supervisory-landscape.md`](sre-and-supervisory-landscape.md). Detailed ranking & justification: [perry-enhancements-from-trueforge-kubeintellect.md](file:///home/istari/.gemini/antigravity-cli/brain/6469c488-bfa7-45d4-b062-3ced2df64dd6/perry-enhancements-from-trueforge-kubeintellect.md).
+
+## 18. Dedicated SRE Telemetry Actuators (`kubectl.sh`, `helm.sh`, `prometheus.sh`, `loki.sh`)
+
+**Driver:** `llm-functions` currently relies on generic `execute_command.sh` for infrastructure operations, meaning the LLM emits unbounded, hallucination-prone bash strings. KubeIntellect's 4-pillar triage model (Pod/Metrics/Logs/Events subagents) demonstrates the value of structured, schema-bounded infrastructure tools.
+
+**Predecessor:** 🆕 Entirely new — no existing backlog item covers dedicated SRE actuators. Risk annotations plug into existing **#6** (tool safety tiers).
+
+### Approach
+1. **`kubectl.sh`** — bounded subcommands (`get`, `describe`, `logs`, `events`, `apply`, `delete`) with `--namespace`, `--output`, `--selector` flag validation. `# @meta risk read-only` for queries; `# @meta risk dangerous` for mutations.
+2. **`helm.sh`** — release lifecycle (`status`, `history`, `diff`, `upgrade`, `rollback`). `# @meta risk read-only` for inspection; `# @meta risk dangerous` for mutations.
+3. **`prometheus.sh`** — PromQL query evaluation via `/api/v1/query` and `query_range`, with automatic table/metric formatting and `--step` / `--start` / `--end` flag validation. `# @meta risk read-only`.
+4. **`loki.sh`** — LogQL query execution via `/loki/api/v1/query_range` with windowed output, `--limit`, `--start`, `--end`. `# @meta risk read-only`.
+
+**Notes:** Zero Rust engine changes. Pure Bash + `curl` + `jq` in the companion `llm-functions` repository. Each tool is ~50-80 lines. Highest-leverage, lowest-risk enhancement in this batch.
+
+## 19. Autonomy Ladder (`--autonomy=a0|a1|a2`)
+
+**Driver:** KubeIntellect implements an A0–A3 governance ladder with RBAC enforcement. Perry already has the foundation (graduated `ToolSafetyTier` in #6, escalation transports in #6d), but no single CLI switch to express an operational posture.
+
+**Predecessor:** 🔧 Enhancement of **#6** (tool safety modes) and **#6d** (escalation & HITL). Session-level macro presetting existing safety mechanisms.
+
+### Approach
+1. **`--autonomy=a0` (Observer):** Hard ceiling forcing all mutating tools to be rejected or dry-run simulated. `ToolSafetyTier` max = `ReadOnly`. The agent can investigate but never touch anything. Mathematical guarantee regardless of model behavior.
+2. **`--autonomy=a1` (Copilot — Default SRE):** Read-only tools auto-execute; any `reversible` or `dangerous` action pauses for explicit operator confirmation via the #6d escalation transport (`/dev/tty` prompt or Layer 3 supervisor FIFO/mTLS).
+3. **`--autonomy=a2` (Bounded Autopilot):** Read-only and `reversible` actions (with automatic `.bak` snapshots per #10) auto-execute; only `dangerous` (un-rollbackable) actions halt for confirmation.
+4. **Implementation:** ~50 lines in `src/cli.rs` (flag parsing + preset mapping) and `src/agent_loop.rs` (applying the preset to existing `ToolSafetyTier` + escalation config).
+
+**Dependencies:** requires #6 (done). Enhanced by #10 (staging/dry-run for `a2` reversible auto-execution).
+
+## 20. Zero-Token Pre-Flight Triage (`--preflight`)
+
+**Driver:** KubeIntellect's compiled playbook predicates (`kq findings`) evaluate cluster state without any LLM call. Perry should not burn a $0.02–$0.10 LLM reasoning loop when a deterministic bash check can resolve the question in <50ms at $0.00.
+
+**Predecessor:** 🆕 Entirely new. #17 (Runbooks) discloses instructions *to* the LLM; preflight bypasses the LLM entirely.
+
+### Approach
+1. **CLI flag:** `--preflight <command>` — executes the command as a subprocess before initializing the agent loop.
+2. **Short-circuit on success:** If exit code = 0, print captured stdout and terminate immediately. No LLM API call, no token cost.
+3. **Grounded context on failure:** If exit code ≠ 0, capture stdout + stderr as structured telemetry and inject as grounded initial context into the normal agent loop.
+4. **Example:** `aichat --preflight "curl -sf http://localhost:9090/-/healthy" --agent sre "Why is Prometheus unhealthy?"`
+
+**Notes:** ~80-120 lines Rust. The short-circuit path is before `run()` — no interaction with the agent loop, safety pipeline, or tool dispatch.
+
+## 21. In-Loop Clarification Tool (`ask_user`)
+
+**Driver:** TrueForge implements human checkpoints for ask-user-questions and Generative UI. During live incident triage, agents encounter ambiguous states (pod name in multiple namespaces, unclear scope for destructive operations) and either halt with text or guess — both dangerous in production.
+
+**Predecessor:** 🔧 Enhancement of **#6d** (escalation & HITL). Extends the existing `/dev/tty` / mTLS escalation channel from safety-only to general clarification.
+
+### Approach
+1. **Built-in tool:** `ask_user` registered as a Route 0 built-in (like `read_skill` in #17).
+2. **Prompt to `/dev/tty`:** Write the structured question to `/dev/tty` (visible even in pipes, per Pillar 4).
+3. **Read response:** Read a line from `/dev/tty` (interactive) or from the #6d escalation transport (headless/Layer 3 supervisor).
+4. **Return as tool output:** The operator's response becomes the tool result, feeding back into the LLM context for the next turn.
+
+**Notes:** ~30 lines of Rust. Zero dependencies on unshipped backlog items — leverages existing `/dev/tty` infrastructure and the #6d `EscalationTransport` trait. Can land immediately.
+
+## 22. Deferred Tool Loading (Lazy Schema Injection)
+
+**Driver:** TrueForge implements deferred tool loading as part of its context engineering. Perry currently injects all tool JSON schemas (~2,000–4,000 tokens) into the system prompt on every turn, even when most tools go unused in a session.
+
+**Predecessor:** 🔧 Enhancement of **#8** (context compaction) and **#17** (progressive disclosure runbooks). Applies the progressive disclosure principle from #17 (runbook schemas loaded on demand) to tool schemas.
+
+### Approach
+1. **Agent config schema extension:** Declare tool groups with a `load: deferred | immediate` flag.
+2. **Lightweight catalog injection:** For deferred groups, inject only tool names and one-line descriptions into the system prompt.
+3. **`list_tools(group)` meta-tool:** When the model signals intent to use a tool domain, it calls `list_tools("sre")` which injects the full schemas for that group into subsequent turns.
+4. **Graceful degradation:** If the model calls a deferred tool directly without calling `list_tools` first, the engine auto-loads the schema and proceeds.
+
+**Dependencies:** none strictly, but enhanced by #8 (compaction) and #17 (skill discovery infrastructure).
+
+## 23. Flight Recorder & Session Replay (`--replay`)
+
+**Driver:** KubeIntellect's flight recorder (`kq replay`) provides hash-chained, tamper-evident decision logs for incident post-mortems and compliance auditing. Perry's existing observability (status files, `/dev/tty` traces) is live/ephemeral — no durable, integrity-verified historical record.
+
+**Predecessor:** 🔧 Enhancement of **#7** (WAL journaling) and **#14** (audit log). Adds hash-chaining and a replay CLI on top of their event stream infrastructure.
+
+### Approach
+1. **SHA-256 hash chain:** Each JSONL event line (from #7 WAL / #14 audit log) includes a `prev_hash` field containing the SHA-256 hash of the previous line. Provides tamper-evidence on minimal bastions without requiring external PKI.
+2. **`--replay` CLI subcommand:** `aichat --replay session.wal` steps through past sessions, rendering each turn's prompt, tool calls, outputs, operator approvals, and cost — color-coded and formatted for terminal post-mortems.
+3. **Integrity verification:** `--replay --verify` validates the full hash chain and reports any broken links.
+
+**Dependencies:** **Blocked on #7 (WAL) and #14 (Audit Log).** The hash chain itself is ~15 lines of Rust; the replay CLI is ~100 lines. The value is in landing *after* the event stream exists.
+
+## 24. Read-Only Batch Actuator Execution (`run_batch`)
+
+**Driver:** TrueForge's Code Mode allows batch tool execution in a single turn. During SRE discovery phases, agents waste 5–8 sequential turns running simple read commands (`df -h`, `uptime`, `kubectl get nodes`, `promql up{}`).
+
+**Predecessor:** ⚡ Overlaps **#3** (agent loop — parallel Tokio dispatch) and **#15** (plan-driven execution — structured multi-step execution with risk pre-pass). `run_batch` is a lightweight, read-only-gated subset of #15's plan executor.
+
+### Approach
+1. **`run_batch` meta-tool:** Accepts a JSON array of tool invocations `[{tool, args}, ...]`.
+2. **Parallel dispatch:** Uses existing #3 Tokio parallel tool dispatch infrastructure.
+3. **Aggregated return:** All results returned as a single structured tool output.
+4. **⚠️ Hard-gated to `read-only` tools only.** Any batch containing a `reversible` or `dangerous` tool is rejected at the engine level, forcing the model to issue those calls individually through the normal #6 safety pipeline. This is non-negotiable — batch execution bypasses per-tool safety gates, and Perry's safety model evaluates each invocation individually.
+5. **Alternative path:** If #15's plan executor lands first, `run_batch` may be unnecessary — the plan executor with a whole-plan risk pre-pass can batch execution naturally while preserving full safety screening.
+
+**Notes:** Priority is Low precisely because of the #15 overlap. If #15 ships, this may be folded into it.
+
+## 25. Lightweight Incident Episode Store
+
+**Driver:** KubeIntellect's temporal memory hierarchy preserves past incident episodes and bi-temporal knowledge graphs. When a recurring incident occurs, the engine retrieves prior resolutions for similar symptoms.
+
+**Predecessor:** 🔧 Enhancement of **#13** (scoped shared artifact store). Extends #13's root-PID-scoped, single-tree, read-mostly artifacts to cross-session persistence with write paths, deduplication, and TTL.
+
+### Approach
+1. **SQLite episode store:** New `src/episodes.rs` module with a lightweight SQLite database at `$XDG_DATA_HOME/aichat/episodes.db`.
+2. **Write path:** On session completion (or explicit `save_episode` tool call), persist a structured summary: symptoms, telemetry queries used, root cause, resolution steps, timestamp.
+3. **Read path:** On session start, query the episode store for symptom-similar past incidents and inject as high-relevance context.
+4. **TTL & eviction:** Configurable maximum episode count and age to prevent unbounded disk growth on 64MB bastions.
+
+**Notes:** This is a **new subsystem, not a RAG extension.** Perry's hybrid RAG (`src/rag/`) is retrieval over static documents. Incident episodes require write paths, dedup, schema management, and TTL — fundamentally different from HNSW + BM25 over markdown files. Priority is Low; depends on #7 (WAL) for the writer infrastructure.
 
 ---
 
