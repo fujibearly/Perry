@@ -349,6 +349,9 @@ pub struct SafetyConfig {
     pub escalation_dir: Option<PathBuf>,
     /// #6d: seconds to await a verdict before further escalation / hard-kill.
     pub verdict_timeout_secs: u64,
+    /// High-level operational autonomy posture macro (#19).
+    /// `readonly` | `consult` | `reversible`.
+    pub autonomy: Option<crate::safety::AutonomyLevel>,
 }
 
 impl Default for SafetyConfig {
@@ -359,6 +362,7 @@ impl Default for SafetyConfig {
             default_ceiling: BlastRadius::Destructive,
             escalation_dir: None,
             verdict_timeout_secs: 300,
+            autonomy: None,
         }
     }
 }
@@ -3178,6 +3182,11 @@ impl Config {
         if let Some(Some(v)) = read_env_value::<u64>(&get_env_name("safety_verdict_timeout_secs")) {
             self.safety.verdict_timeout_secs = v;
         }
+        if let Ok(v) = env::var(get_env_name("autonomy")).or_else(|_| env::var(get_env_name("safety_autonomy"))) {
+            if let Some(level) = crate::safety::AutonomyLevel::from_str_loose(&v) {
+                self.safety.autonomy = Some(level);
+            }
+        }
     }
 
     fn load_functions(&mut self) -> Result<()> {
@@ -3629,6 +3638,18 @@ safety:
         assert_eq!(s.risk_model.as_deref(), Some("openai:gpt-4o-mini"));
         assert_eq!(s.default_ceiling, BlastRadius::Disruptive);
         assert_eq!(s.verdict_timeout_secs, 60);
+    }
+
+    #[test]
+    fn safety_config_autonomy_yaml_override() {
+        let config: Config = serde_yaml::from_str("safety:\n  autonomy: consult\n").unwrap();
+        assert_eq!(config.safety.autonomy, Some(crate::safety::AutonomyLevel::Consult));
+
+        let config_ro: Config = serde_yaml::from_str("safety:\n  autonomy: readonly\n").unwrap();
+        assert_eq!(config_ro.safety.autonomy, Some(crate::safety::AutonomyLevel::ReadOnly));
+
+        let config_rev: Config = serde_yaml::from_str("safety:\n  autonomy: reversible\n").unwrap();
+        assert_eq!(config_rev.safety.autonomy, Some(crate::safety::AutonomyLevel::Reversible));
     }
 
     #[test]

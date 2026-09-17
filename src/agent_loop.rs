@@ -544,6 +544,16 @@ fn current_authority_ceiling(config: &GlobalConfig) -> crate::safety::AuthorityC
             None => AuthorityCeiling::MINIMAL, // fail safe on garbage
         };
     }
+    // Explicit fine-grained ceiling override takes top precedence over autonomy macro
+    if let Ok(v) = std::env::var("AICHAT_SAFETY_DEFAULT_CEILING") {
+        if let Some(tier) = crate::function::BlastRadius::from_str(&v) {
+            return AuthorityCeiling::UpTo(tier);
+        }
+    }
+    // Operational autonomy posture defines baseline ceiling if configured
+    if let Some(level) = config.read().safety.autonomy {
+        return level.authority_ceiling();
+    }
     AuthorityCeiling::UpTo(config.read().safety.default_ceiling)
 }
 
@@ -1023,7 +1033,13 @@ fn authority_denied_result(
     // check if it declares support for reversibility (e.g. `reversible-via backup`).
     // If taking an atomic backup drops required authority within ceiling, perform
     // the preflight backup right now to remediate and pass the gate!
-    if !reversible && policy_outcome != Some(PolicyOutcome::Forbid) {
+    let permits_auto_reversibility = config
+        .read()
+        .safety
+        .autonomy
+        .map(|lvl| lvl.permits_autonomous_reversibility())
+        .unwrap_or(true);
+    if permits_auto_reversibility && !reversible && policy_outcome != Some(PolicyOutcome::Forbid) {
         let decl = find_tool_declaration(config, &call.name);
         let can_be_reversible = decl.as_ref().map(|d| {
             d.reversible_via.as_deref() == Some("backup") || d.reversible == Some(true)
@@ -2376,7 +2392,8 @@ async fn eval_single_tool(
     // Backlog #6b: blast-radius authority gate — a hard process sandbox boundary for sub-agents (FR-6d.24).
     // Sub-agents CANNOT elevate authority ceiling in-flight over mTLS.
     // Return the denial immediately so the child loop can unwind and report `permission_blocked`.
-    if let Some(denied) = authority_denied_result(config, call, progress, Some(&mut proven_reversible_applied), will_eval_risk) {
+    let authority_denied = authority_denied_result(config, call, progress, Some(&mut proven_reversible_applied), will_eval_risk);
+    if let Some(ref denied) = authority_denied {
         let err_type = denied
             .get("error")
             .and_then(|e| e.get("type"))
@@ -2384,35 +2401,7 @@ async fn eval_single_tool(
             .unwrap_or("authority_exceeded");
         let is_child = current_agent_depth() > 0 || crate::escalation::ParentConnInfo::from_env().is_some();
         if err_type == "policy_forbidden" || is_child {
-            return Ok(denied);
-        }
-
-        let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
-        let blast_radius = match static_tier {
-            crate::function::StaticTier::Tier(t) => t,
-            crate::function::StaticTier::Unclassified => crate::function::BlastRadius::Catastrophic,
-        };
-        if *IS_STDOUT_TERMINAL {
-            let ceiling = current_authority_ceiling(config);
-            let decision = prompt_human_verdict(&call.name, &call.arguments, blast_radius, "authority_exceeded", ceiling, progress)?;
-            match decision {
-                crate::safety::VerdictDecision::Continue => {}
-                crate::safety::VerdictDecision::Halt => {
-                    return Ok(json!({"error": {"type": "escalation_halted", "message": "Action halted by human operator"}}));
-                }
-                crate::safety::VerdictDecision::Revert => {
-                    let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
-                    let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "orchestrator".into());
-                    let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
-                    if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
-                        let outcome = journal.replay_last().await?;
-                        return Ok(json!({"error": {"type": "escalation_reverted", "details": outcome.details}}));
-                    }
-                    return Ok(json!({"error": {"type": "escalation_reverted", "message": "No journal found to replay"}}));
-                }
-            }
-        } else {
-            return Ok(denied);
+            return Ok(denied.clone());
         }
     }
 
@@ -2426,7 +2415,7 @@ async fn eval_single_tool(
         (false, Vec::new())
     };
 
-    if let Some(denied) = risk_evaluator_denied_result(
+    let risk_denied = risk_evaluator_denied_result(
         config,
         call,
         proven_reversible_applied,
@@ -2435,12 +2424,24 @@ async fn eval_single_tool(
         untrusted,
         &tainted_skills,
     )
-    .await {
+    .await;
+
+    if let Some(ref denied) = risk_denied {
         let is_child = current_agent_depth() > 0 || crate::escalation::ParentConnInfo::from_env().is_some();
         if is_child {
             // Sub-agents fail closed on risk denial; cannot elevate ceiling or bypass risk over mTLS
-            return Ok(denied);
+            return Ok(denied.clone());
         }
+    }
+
+    // Evaluator-First Unified Human Consultation Funnel (Backlog #19 / FR-19.5):
+    // If either Gate 2 (authority_exceeded) or Gate 3 (risk_blocked) requires authorization:
+    if authority_denied.is_some() || risk_denied.is_some() {
+        let is_child = current_agent_depth() > 0 || crate::escalation::ParentConnInfo::from_env().is_some();
+        if is_child {
+            return Ok(risk_denied.or(authority_denied).expect("one must be some"));
+        }
+
         let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
         let blast_radius = match static_tier {
             crate::function::StaticTier::Tier(t) => t,
@@ -2448,7 +2449,18 @@ async fn eval_single_tool(
         };
         if *IS_STDOUT_TERMINAL {
             let ceiling = current_authority_ceiling(config);
-            let decision = prompt_human_verdict(&call.name, &call.arguments, blast_radius, "risk_blocked", ceiling, progress)?;
+            let prompt_reason = if let Some(ref rd) = risk_denied {
+                let msg = rd
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("risk_blocked");
+                msg.to_string()
+            } else {
+                "authority_exceeded".to_string()
+            };
+
+            let decision = prompt_human_verdict(&call.name, &call.arguments, blast_radius, &prompt_reason, ceiling, progress)?;
             match decision {
                 crate::safety::VerdictDecision::Continue => {}
                 crate::safety::VerdictDecision::Halt => {
@@ -2466,7 +2478,7 @@ async fn eval_single_tool(
                 }
             }
         } else {
-            return Ok(denied);
+            return Ok(risk_denied.or(authority_denied).expect("one must be some"));
         }
     }
 
@@ -3198,6 +3210,23 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     // Ensure root agent has a stable, exclusive color (default Cyan) if not set
     if current_agent_depth() == 0 && std::env::var("AICHAT_AGENT_COLOR").is_err() {
         std::env::set_var("AICHAT_AGENT_COLOR", AGENT_PALETTE[0].0);
+    }
+
+    // Root process operational autonomy posture initialization (Backlog #19)
+    if current_agent_depth() == 0 {
+        if let Some(level) = params.config.read().safety.autonomy {
+            if let Some(mask) = level.capability_mask() {
+                std::env::set_var("AICHAT_CAPABILITY_MASK", mask);
+            }
+            if params.config.read().agent_loop.show_trace || params.config.read().multi_agent.show_trace {
+                eprintln!(
+                    "  [safety posture: {} — capability_mask={}, authority_ceiling={}]",
+                    level.as_str(),
+                    level.capability_mask().unwrap_or("unmasked"),
+                    level.authority_ceiling().tier().as_str()
+                );
+            }
+        }
     }
 
     let max_turns = params.config.read().agent_loop.max_turns;
@@ -8738,6 +8767,179 @@ agent_loop:
         let decl = find_tool_declaration(&config, "read_skill");
         assert!(decl.is_some());
         assert_eq!(decl.unwrap().name, "read_skill");
+    }
+
+    #[test]
+    fn test_autonomy_posture_precedence_and_ceilings() {
+        use crate::function::BlastRadius;
+        use crate::safety::{AuthorityCeiling, AutonomyLevel};
+
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev_parent = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let prev_default = std::env::var("AICHAT_SAFETY_DEFAULT_CEILING").ok();
+        std::env::remove_var("AICHAT_AUTHORITY_CEILING");
+        std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING");
+
+        // 1. Without autonomy set, falls back to default_ceiling (Destructive)
+        let config = GlobalConfig::default();
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Destructive)
+        );
+
+        // 2. Setting autonomy sets the macro baseline
+        config.write().safety.autonomy = Some(AutonomyLevel::ReadOnly);
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Safe)
+        );
+
+        config.write().safety.autonomy = Some(AutonomyLevel::Consult);
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Safe)
+        );
+
+        config.write().safety.autonomy = Some(AutonomyLevel::Reversible);
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Reversible)
+        );
+
+        // 3. Explicit fine-grained env override overrides autonomy macro baseline
+        std::env::set_var("AICHAT_SAFETY_DEFAULT_CEILING", "disruptive");
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Disruptive)
+        );
+        std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING");
+
+        // 4. Child process ceiling (AICHAT_AUTHORITY_CEILING) takes top precedence
+        std::env::set_var("AICHAT_AUTHORITY_CEILING", "safe");
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Safe)
+        );
+
+        // Cleanup
+        match prev_parent {
+            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
+            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        }
+        match prev_default {
+            Some(v) => std::env::set_var("AICHAT_SAFETY_DEFAULT_CEILING", v),
+            None => std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING"),
+        }
+    }
+
+    #[test]
+    fn test_autonomy_posture_consult_blocks_option_b_bypass() {
+        use crate::function::Functions;
+        use crate::safety::AutonomyLevel;
+
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev_ceiling = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let prev_default = std::env::var("AICHAT_SAFETY_DEFAULT_CEILING").ok();
+        std::env::remove_var("AICHAT_AUTHORITY_CEILING");
+        std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING");
+
+        let functions = Functions::init_from_declarations(vec![
+            serde_json::from_value(json!({
+                "name": "fs_write",
+                "description": "write a file",
+                "parameters": {"type": "object"},
+                "mode": "mutating",
+                "risk": "disruptive",
+                "reversible_via": "backup"
+            }))
+            .unwrap(),
+        ]);
+
+        let config: GlobalConfig = Arc::new(RwLock::new(Config {
+            functions,
+            ..Default::default()
+        }));
+
+        let call = ToolCall {
+            name: "fs_write".into(),
+            arguments: json!({"path": "/tmp/test.txt", "content": "hello"}),
+            id: None,
+        };
+
+        // Under consult posture, Option B cannot step down into autonomous execution
+        config.write().safety.autonomy = Some(AutonomyLevel::Consult);
+        let mut proven = false;
+        let denied = authority_denied_result(&config, &call, None, Some(&mut proven), false);
+        assert!(denied.is_some(), "fs_write must trip ceiling in consult posture");
+        let err = denied.unwrap();
+        assert_eq!(err["error"]["type"], "authority_exceeded");
+        assert!(!proven, "reversibility discount must not be applied autonomously in consult posture");
+
+        // Under reversible posture, Option B auto-steps down with backup
+        config.write().safety.autonomy = Some(AutonomyLevel::Reversible);
+        let mut proven_rev = false;
+        let permitted = authority_denied_result(&config, &call, None, Some(&mut proven_rev), false);
+        assert!(permitted.is_none(), "fs_write must auto-remediate via Option B in reversible posture");
+        assert!(proven_rev, "reversibility backup must be recorded in reversible posture");
+
+        // Cleanup
+        if let Some(v) = prev_ceiling {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_default {
+            std::env::set_var("AICHAT_SAFETY_DEFAULT_CEILING", v);
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_autonomy_readonly_blocks_mutating_at_gate_1() {
+        let _guard = MASK_ENV_LOCK.lock();
+        let prev_mask = std::env::var("AICHAT_CAPABILITY_MASK").ok();
+
+        // When root orchestrator starts with readonly autonomy posture, it sets AICHAT_CAPABILITY_MASK=readonly
+        std::env::set_var("AICHAT_CAPABILITY_MASK", "readonly");
+
+        let config = config_with_tiers();
+        // restart_svc is mutating
+        let call = ToolCall::new("restart_svc".to_string(), json!({}), None);
+
+        // eval_single_tool should reject at Gate 1 without human prompt or evaluator execution
+        let res = eval_single_tool(&config, &call, None, None, None).await.unwrap();
+        assert_eq!(res["error"]["type"], "capability_denied");
+        assert!(res["error"]["message"].as_str().unwrap().contains("read-only"));
+
+        match prev_mask {
+            Some(v) => std::env::set_var("AICHAT_CAPABILITY_MASK", v),
+            None => std::env::remove_var("AICHAT_CAPABILITY_MASK"),
+        }
+    }
+
+    #[test]
+    fn test_autonomy_subagent_delegation_isolation() {
+        use crate::function::{BlastRadius, DelegatedPermissions};
+        use crate::safety::AuthorityCeiling;
+
+        // 1. ReadOnly posture: parent is read-only.
+        // A child cannot be provisioned mutating mask under any circumstances.
+        let args_mutating = json!({"permissions": {"mask": "mutating"}});
+        let res_readonly = DelegatedPermissions::resolve_for_call(&args_mutating, true, AuthorityCeiling::UpTo(BlastRadius::Safe));
+        assert!(res_readonly.is_err(), "Parent in readonly posture cannot provision mutating mask to subagent");
+        assert!(res_readonly.unwrap_err().to_string().contains("readonly capability mask"));
+
+        // 2. Consult posture: parent ceiling is Safe.
+        // A child cannot be provisioned a ceiling higher than parent ceiling (Safe).
+        let args_disruptive = json!({"permissions": {"mask": "mutating", "ceiling": "disruptive"}});
+        let res_consult = DelegatedPermissions::resolve_for_call(&args_disruptive, false, AuthorityCeiling::UpTo(BlastRadius::Safe));
+        assert!(res_consult.is_err(), "Parent with Safe ceiling (consult posture) cannot provision disruptive ceiling to subagent");
+        assert!(res_consult.unwrap_err().to_string().contains("exceeds parent authority ceiling"));
+
+        // 3. Reversible posture: parent ceiling is Reversible.
+        // Child can be provisioned reversible, but cannot exceed parent ceiling to disruptive.
+        let res_rev_ok = DelegatedPermissions::resolve_for_call(&json!({"permissions": {"mask": "mutating", "ceiling": "reversible"}}), false, AuthorityCeiling::UpTo(BlastRadius::Reversible));
+        assert!(res_rev_ok.is_ok());
+        let res_rev_err = DelegatedPermissions::resolve_for_call(&args_disruptive, false, AuthorityCeiling::UpTo(BlastRadius::Reversible));
+        assert!(res_rev_err.is_err());
     }
 }
 

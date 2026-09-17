@@ -105,6 +105,80 @@ impl AuthorityCeiling {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Autonomy Level (Backlog #19)
+// ---------------------------------------------------------------------------
+
+/// Operational posture macro governing actuation safety (backlog #19).
+///
+/// Coordinates the orthogonal capability mask (Gate 1) and authority ceiling (Gate 2)
+/// into high-level, human-readable operational postures:
+/// - `ReadOnly`: Strict read-only observation/audit. Zero mutation permitted across the tree.
+/// - `Consult`: Supervised pair workflow. Read operations auto-execute; all mutations consult human.
+/// - `Reversible`: Bounded execution. Reversible mutations auto-execute with rollback; dangerous consult human.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutonomyLevel {
+    ReadOnly,
+    Consult,
+    Reversible,
+}
+
+impl AutonomyLevel {
+    /// Parse from user input loosely, supporting readable names and common aliases.
+    pub fn from_str_loose(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "readonly" | "read-only" | "observer" | "a0" => Some(AutonomyLevel::ReadOnly),
+            "consult" | "ask" | "copilot" | "a1" => Some(AutonomyLevel::Consult),
+            "reversible" | "revert" | "autopilot" | "a2" => Some(AutonomyLevel::Reversible),
+            _ => None,
+        }
+    }
+
+    /// Canonical string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AutonomyLevel::ReadOnly => "readonly",
+            AutonomyLevel::Consult => "consult",
+            AutonomyLevel::Reversible => "reversible",
+        }
+    }
+
+    /// Baseline capability mask string (for `AICHAT_CAPABILITY_MASK` / Gate 1).
+    pub fn capability_mask(&self) -> Option<&'static str> {
+        match self {
+            AutonomyLevel::ReadOnly => Some("readonly"),
+            AutonomyLevel::Consult | AutonomyLevel::Reversible => None,
+        }
+    }
+
+    /// Baseline authority ceiling (for `AuthorityCeiling` / Gate 2).
+    pub fn authority_ceiling(&self) -> AuthorityCeiling {
+        match self {
+            AutonomyLevel::ReadOnly | AutonomyLevel::Consult => AuthorityCeiling::UpTo(BlastRadius::Safe),
+            AutonomyLevel::Reversible => AuthorityCeiling::UpTo(BlastRadius::Reversible),
+        }
+    }
+
+    /// Whether this posture permits autonomous preflight reversibility step-downs (Option B).
+    ///
+    /// In `ReadOnly` and `Consult`, mutations must either fail closed or explicitly consult
+    /// the human operator—Option B cannot auto-execute them.
+    /// In `Reversible`, Option B atomic journal backups step down to `Reversible` and auto-execute.
+    pub fn permits_autonomous_reversibility(&self) -> bool {
+        match self {
+            AutonomyLevel::ReadOnly | AutonomyLevel::Consult => false,
+            AutonomyLevel::Reversible => true,
+        }
+    }
+}
+
+impl std::fmt::Display for AutonomyLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 /// One blast-radius tier less dangerous (saturating at `Safe`).
 ///
 /// Proven reversibility lowers the *authority required* by exactly one step —
@@ -2735,5 +2809,77 @@ other_tool() {
         let outcome = journal.replay_last().await.unwrap();
         assert!(outcome.success);
         assert_eq!(outcome.entry_id, "none");
+    }
+
+    #[test]
+    fn autonomy_level_parsing_and_aliases() {
+        // ReadOnly
+        assert_eq!(AutonomyLevel::from_str_loose("readonly"), Some(AutonomyLevel::ReadOnly));
+        assert_eq!(AutonomyLevel::from_str_loose("READ-ONLY"), Some(AutonomyLevel::ReadOnly));
+        assert_eq!(AutonomyLevel::from_str_loose("observer"), Some(AutonomyLevel::ReadOnly));
+        assert_eq!(AutonomyLevel::from_str_loose("a0"), Some(AutonomyLevel::ReadOnly));
+
+        // Consult
+        assert_eq!(AutonomyLevel::from_str_loose("consult"), Some(AutonomyLevel::Consult));
+        assert_eq!(AutonomyLevel::from_str_loose("CONSULT"), Some(AutonomyLevel::Consult));
+        assert_eq!(AutonomyLevel::from_str_loose("ask"), Some(AutonomyLevel::Consult));
+        assert_eq!(AutonomyLevel::from_str_loose("copilot"), Some(AutonomyLevel::Consult));
+        assert_eq!(AutonomyLevel::from_str_loose("a1"), Some(AutonomyLevel::Consult));
+
+        // Reversible
+        assert_eq!(AutonomyLevel::from_str_loose("reversible"), Some(AutonomyLevel::Reversible));
+        assert_eq!(AutonomyLevel::from_str_loose("REVERSIBLE"), Some(AutonomyLevel::Reversible));
+        assert_eq!(AutonomyLevel::from_str_loose("revert"), Some(AutonomyLevel::Reversible));
+        assert_eq!(AutonomyLevel::from_str_loose("autopilot"), Some(AutonomyLevel::Reversible));
+        assert_eq!(AutonomyLevel::from_str_loose("a2"), Some(AutonomyLevel::Reversible));
+
+        // Invalid
+        assert_eq!(AutonomyLevel::from_str_loose("invalid"), None);
+        assert_eq!(AutonomyLevel::from_str_loose(""), None);
+    }
+
+    #[test]
+    fn autonomy_level_posture_mappings() {
+        // ReadOnly
+        let ro = AutonomyLevel::ReadOnly;
+        assert_eq!(ro.as_str(), "readonly");
+        assert_eq!(ro.to_string(), "readonly");
+        assert_eq!(ro.capability_mask(), Some("readonly"));
+        assert_eq!(ro.authority_ceiling(), AuthorityCeiling::UpTo(BlastRadius::Safe));
+        assert!(!ro.permits_autonomous_reversibility());
+
+        // Consult
+        let c = AutonomyLevel::Consult;
+        assert_eq!(c.as_str(), "consult");
+        assert_eq!(c.to_string(), "consult");
+        assert_eq!(c.capability_mask(), None);
+        assert_eq!(c.authority_ceiling(), AuthorityCeiling::UpTo(BlastRadius::Safe));
+        assert!(!c.permits_autonomous_reversibility());
+
+        // Reversible
+        let rev = AutonomyLevel::Reversible;
+        assert_eq!(rev.as_str(), "reversible");
+        assert_eq!(rev.to_string(), "reversible");
+        assert_eq!(rev.capability_mask(), None);
+        assert_eq!(rev.authority_ceiling(), AuthorityCeiling::UpTo(BlastRadius::Reversible));
+        assert!(rev.permits_autonomous_reversibility());
+    }
+
+    #[test]
+    fn autonomy_level_serde_round_trip() {
+        let json = serde_json::to_string(&AutonomyLevel::ReadOnly).unwrap();
+        assert_eq!(json, "\"readonly\"");
+        let deserialized: AutonomyLevel = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, AutonomyLevel::ReadOnly);
+
+        let json_c = serde_json::to_string(&AutonomyLevel::Consult).unwrap();
+        assert_eq!(json_c, "\"consult\"");
+        let des_c: AutonomyLevel = serde_json::from_str(&json_c).unwrap();
+        assert_eq!(des_c, AutonomyLevel::Consult);
+
+        let json_r = serde_json::to_string(&AutonomyLevel::Reversible).unwrap();
+        assert_eq!(json_r, "\"reversible\"");
+        let des_r: AutonomyLevel = serde_json::from_str(&json_r).unwrap();
+        assert_eq!(des_r, AutonomyLevel::Reversible);
     }
 }

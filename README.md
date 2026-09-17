@@ -337,6 +337,25 @@ safety:
 
 Environment overrides: `AICHAT_SAFETY_POLICY_FILE`, `AICHAT_SAFETY_DEFAULT_CEILING`. Unclassified tools (including MCP tools, which carry no metadata) are conservatively human-reserved by default. Trace events follow a scannable grammar (`ALLOW <tool>: risk <tier> <= ceiling <tier>` and `BLOCK <tool>: risk <tier> > ceiling <tier>`), clearly annotating effective reversibility discounts or policy raises — the tool binary never runs on a block.
 
+#### Autonomy Ladder (`--autonomy <readonly|consult|reversible>`)
+
+The Autonomy Ladder provides ergonomic, domain-agnostic macro presets across the 2D safety matrix (Capability Mask vs. Authority Ceiling):
+
+- **`readonly` (Observer / A0):** Hard read-only capability mask (`AICHAT_CAPABILITY_MASK=readonly`) and `safe` ceiling. Mutating tools are immediately blocked at Gate 1 (`capability_denied`) with zero evaluator token consumption and zero human prompts.
+- **`consult` (Copilot / A1):** Unmasked capability with a `safe` authority ceiling and **clamped autonomous Option B reversibility**. Any mutating tool trips the ceiling and routes through the **Evaluator-First Unified Human Consultation Funnel**: `%assess-risk%` audits context and arguments first, presenting a single combined prompt to the operator.
+- **`reversible` (Safe Autonomous / A2):** Unmasked capability with a `reversible` ceiling and active Option B preflight remediation. Tools declaring `# @meta reversible-via backup` atomically record backups in the 0600 rollback journal and execute autonomously; only irreversible mutations require human consultation.
+
+```yaml
+safety:
+  autonomy: consult # readonly | consult | reversible
+  default_ceiling: safe
+```
+
+CLI flag: `--autonomy <readonly|consult|reversible>` (aliases: `a0`/`observer`, `a1`/`copilot`, `a2`/`autopilot`).  
+Environment variable: `AICHAT_AUTONOMY` or `AICHAT_SAFETY_AUTONOMY`.  
+*Sub-agents never inherit an autonomy environment variable; their capabilities are strictly bounded via canonical `DelegatedPermissions` (`AICHAT_CAPABILITY_MASK` and `AICHAT_AUTHORITY_CEILING`).*
+
+
 ### Structured PDF Loading
 
 Default document loader upgraded from `pdftotext` (plain text, no structure) to `pdf2md` ([firecrawl/pdf-inspector](https://github.com/firecrawl/pdf-inspector)) — structured Markdown with headings, tables, lists, code blocks, and formatting preserved.

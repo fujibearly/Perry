@@ -71,7 +71,7 @@ Maps each strategic strand to its tracked item. **Status lives in the [Status Ta
 | | | | |
 | ***Distilled from TrueForge & KubeIntellect study (Session 27)*** | | | |
 | Dedicated SRE Telemetry Actuators (`kubectl.sh`, `helm.sh`, `prometheus.sh`, `loki.sh`) | L1 | **#18** | 🆕 Entirely new. Schema-bounded `argc` tools replacing unbounded `execute_command.sh` for K8s/observability. |
-| Autonomy Ladder (`--autonomy=a0\|a1\|a2`) | L2 | **#19** | 🔧 Enhancement of **#6** (tool safety tiers) and **#6d** (escalation). Session-level posture presets. |
+| Autonomy Ladder (`--autonomy <readonly\|consult\|reversible>`) | L2 | **#19** | 🔧 Enhancement of **#6** (tool safety tiers) and **#6d** (escalation). Session-level posture presets. |
 | Zero-Token Pre-Flight Triage (`--preflight`) | L1/L2 | **#20** | 🆕 Entirely new. Deterministic bash check short-circuits before agent loop at $0.00 cost. |
 | In-Loop Clarification Tool (`ask_user`) | L2 | **#21** | 🔧 Enhancement of **#6d** (escalation). Extends the `/dev/tty`/mTLS channel from safety-only to clarification. |
 | Deferred Tool Loading (lazy schema injection) | L2 | **#22** | 🔧 Enhancement of **#8** (context compaction) and **#17** (progressive disclosure). Applies progressive disclosure to tool schemas. |
@@ -142,11 +142,11 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 | **5** | **Test Suite & Coverage Hardening** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | — |
 | **15**| **Plan-Driven Execution** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | Consumes #6c |
 | **17**| **Progressive Disclosure Skills** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | — |
+| **19**| **Autonomy Ladder** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🔧 Enhances #6 + #6d |
 | &nbsp; | | | | | | | |
 | | **▼ PROPOSED (TO DO)** | | | | | | |
 | **7** | **Session WAL Journaling** | 🟡 Prop. | 🔥 High | 💎 High | 🏋️ Large | | — |
 | **18**| **SRE Telemetry Actuators** | 🟡 Prop. | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🆕 New (plugs into #6) |
-| **19**| **Autonomy Ladder** | 🟡 Prop. | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🔧 Enhances #6 + #6d |
 | **8** | **Dynamic Context Compaction** | 🟡 Prop. | ➖ Med | 🔹 Med | 🚶 Med | | — |
 | **9** | **Ephemeral Git Worktrees** | 🟡 Prop. | ➖ Med | 🔹 Med | 🚶 Med | | — |
 | **10**| **Staged Config & Dry-Run** | 🟡 Prop. | ➖ Med | 💎 High | 🚶 S-M | 🎯 | — |
@@ -701,19 +701,18 @@ A **serious** planner would make the plan a first-class object that the loop exe
 
 **Notes:** Zero Rust engine changes. Pure Bash + `curl` + `jq` in the companion `llm-functions` repository. Each tool is ~50-80 lines. Highest-leverage, lowest-risk enhancement in this batch.
 
-## 19. Autonomy Ladder (`--autonomy=a0|a1|a2`)
+## 19. Autonomy Ladder (`--autonomy <readonly|consult|reversible>`) ✓
 
-**Driver:** KubeIntellect implements an A0–A3 governance ladder with RBAC enforcement. Perry already has the foundation (graduated `ToolSafetyTier` in #6, escalation transports in #6d), but no single CLI switch to express an operational posture.
+**Driver:** Perry already has a rich 2D safety foundation (graduated `BlastRadius` tiers, orthogonal proven reversibility, and capability masks in #6; persistent mTLS escalation in #6d). The Autonomy Ladder provides domain-agnostic, operator-facing macro presets to coordinate both safety axes without environment variable proliferation or conflation.
 
-**Predecessor:** 🔧 Enhancement of **#6** (tool safety modes) and **#6d** (escalation & HITL). Session-level macro presetting existing safety mechanisms.
+**Predecessor:** 🔧 Enhancement of **#6** (tool safety modes) and **#6d** (escalation & HITL). Session-level macro coordinating existing safety mechanisms.
 
-### Approach
-1. **`--autonomy=a0` (Observer):** Hard ceiling forcing all mutating tools to be rejected or dry-run simulated. `ToolSafetyTier` max = `ReadOnly`. The agent can investigate but never touch anything. Mathematical guarantee regardless of model behavior.
-2. **`--autonomy=a1` (Copilot — Default SRE):** Read-only tools auto-execute; any `reversible` or `dangerous` action pauses for explicit operator confirmation via the #6d escalation transport (`/dev/tty` prompt or Layer 3 supervisor FIFO/mTLS).
-3. **`--autonomy=a2` (Bounded Autopilot):** Read-only and `reversible` actions (with automatic `.bak` snapshots per #10) auto-execute; only `dangerous` (un-rollbackable) actions halt for confirmation.
-4. **Implementation:** ~50 lines in `src/cli.rs` (flag parsing + preset mapping) and `src/agent_loop.rs` (applying the preset to existing `ToolSafetyTier` + escalation config).
-
-**Dependencies:** requires #6 (done). Enhanced by #10 (staging/dry-run for `a2` reversible auto-execution).
+### As-Built Implementation (Session 28)
+1. **`--autonomy readonly` (Observer / A0):** Root macro expands capability mask to `readonly` and baseline ceiling to `safe`. Mutating tools are rejected immediately at Gate 1 with `capability_denied`—spending 0 evaluator tokens and triggering zero human prompts.
+2. **`--autonomy consult` (Copilot / A1):** Unmasked capability with a `safe` authority ceiling and **clamped autonomous Option B reversibility**. Any mutating tool trips Gate 2 and routes through the **Evaluator-First Unified Human Consultation Funnel**: `%assess-risk%` audits context and arguments first, presenting a single combined prompt to the operator.
+3. **`--autonomy reversible` (Safe Autonomous / A2):** Unmasked capability with a `reversible` ceiling and active Option B preflight remediation. Tools declaring `# @meta reversible-via backup` atomically record backups in the 0600 rollback journal and execute autonomously; only irreversible mutations require human consultation.
+4. **Anti-Soup Sandboxing:** `--autonomy` is strictly an orchestrator-level CLI/config macro. Child sub-agents never receive an autonomy environment variable; they inherit canonical, statically provisioned `DelegatedPermissions` (`AICHAT_CAPABILITY_MASK` and `AICHAT_AUTHORITY_CEILING`) and cannot escalate past their parent.
+5. **Verification:** All 558 unit/integration tests passing; clippy clean (`-D warnings`); live Demo 24 (all 3 postures) and migrated Demos 8, 10b, and 18 passing.
 
 ## 20. Zero-Token Pre-Flight Triage (`--preflight`)
 

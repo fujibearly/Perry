@@ -6,6 +6,14 @@ All notable changes to this fork are documented here. This project follows
 ## 0.31.0-fork.9
 
 ### Added
+- Autonomy Ladder (`--autonomy <readonly|consult|reversible>` / `safety.autonomy` / `AICHAT_AUTONOMY`):
+  - Operator-level macro presets coordinating the 2D safety matrix (Capability Mask vs. Authority Ceiling) without environment variable proliferation.
+  - `readonly` (Observer / A0): Sets `AICHAT_CAPABILITY_MASK=readonly` and `safe` ceiling; blocks mutating tools at Gate 1 with zero evaluator token overhead.
+  - `consult` (Copilot / A1): Sets unmasked capability with `safe` ceiling and clamps autonomous Option B reversibility bypasses; routes through the Evaluator-First Unified Human Consultation Funnel.
+  - `reversible` (Safe Autonomous / A2): Sets unmasked capability with `reversible` ceiling; enables autonomous Option B remediation via upfront atomic rollback journal backups.
+- Evaluator-First Unified Human Consultation Funnel in `eval_single_tool`: runs `%assess-risk%` before human consultation to present combined ceiling delta and risk rationale in a single prompt.
+- Autonomous Option B reversibility gating (`permits_autonomous_reversibility()`).
+- Migrated Demos 8, 10b, and 18 in `scripts/run-demos.nu` to use `--autonomy` flags, and added comprehensive dedicated Demo 24.
 - Live streaming progress for OpenAI Responses multi-agent turns.
 - Terminal-safe spinner output: respects terminal width, supports `--no-spinner`,
   and can print progress lines without corrupting the spinner.

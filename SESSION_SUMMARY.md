@@ -338,6 +338,15 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** All 542+ unit tests passing (`cargo test --bin aichat`); clippy clean with 0 warnings (`cargo clippy --bin aichat -- -D warnings`); release binary compiled (`cargo build --release --bin aichat`); Demos 4, 18, and 23 verified live in both standard and `--dialog` modes.
       * **State:** on branch `main`; local-only.
 
-
-
-
+  28. **Session 28: Backlog #19 Implemented & Verified — Autonomy Ladder (`--autonomy <readonly|consult|reversible>`)**
+    * **Period:** `2026-09-17`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-17-session28.md`](.kiro/docs/session-summary-2026-09-17-session28.md)
+    * **Focus Areas:**
+      * **2D Safety Matrix Coordination:** Implemented `--autonomy <readonly|consult|reversible>` macro presets coordinating the underlying Capability Mask and Authority Ceiling axes without flattening or destroying their deliberate architectural distinction.
+      * **Honest, Domain-Agnostic Nomenclature:** Standardized on `readonly` (Observer / A0), `consult` (Copilot / A1), and `reversible` (Safe Autonomous / A2), supporting legacy aliases (`a0`, `a1`, `a2`, `observer`, `copilot`, `autopilot`) while avoiding overpromising or ambiguous terms.
+      * **Anti-Soup Sandboxing:** Confined `--autonomy` strictly to the root orchestrator. Sub-agents never inherit an autonomy environment variable; their permissions are strictly bounded via canonical `DelegatedPermissions` (`AICHAT_CAPABILITY_MASK` and `AICHAT_AUTHORITY_CEILING`) and cannot escalate past their parent.
+      * **Evaluator-First Unified Human Consultation Funnel:** Eliminated the Gate 2 / Gate 3 double-prompt trap by executing `%assess-risk%` before operator consultation whenever Gate 2 trips `authority_exceeded`, presenting a single unified prompt containing the ceiling delta and evaluator rationale.
+      * **Option B Reversibility Gating:** Gated Option B preflight auto-remediation on `permits_autonomous_reversibility()`, preventing `consult` posture from auto-discounting mutations without operator consultation.
+      * **Demo Suite Enhancements:** Added comprehensive dedicated live Demo 24 exercising all three postures. Migrated Demo 8 (`fetch_and_summarize`) and Demo 10b (`read_pdf`) to `--autonomy readonly`, and migrated Demo 18 (`fs_write` preflight remediation) to `--autonomy reversible`, retiring the raw `AICHAT_SAFETY_DEFAULT_CEILING: "reversible"` environment variable.
+      * **Verification & Testing:** All 558 unit and integration tests passing (`cargo test`); clippy clean with 0 warnings (`cargo clippy -- -D warnings`); Demos 8, 10b, 18, and 24 verified 100% passing live.
+      * **State:** on branch `feat/autonomy-ladder`; local-only.

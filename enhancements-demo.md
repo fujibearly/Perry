@@ -410,10 +410,48 @@ The raw JSON sent to the evaluator LLM over the wire remains strictly byte-for-b
 
 ---
 
+## 17. Autonomy Ladder (`--autonomy <readonly|consult|reversible>`)
+
+The Autonomy Ladder establishes operational postures across the 2D safety matrix (Capability Mask vs. Authority Ceiling):
+
+### A. ReadOnly (`--autonomy readonly`)
+Blocks all mutating tools at Gate 1 without invoking the LLM evaluator or prompting the human:
+```bash
+aichat --show-cost --autonomy readonly -r %functions:fs_write% \
+  "Write 'TEST' to /tmp/blocked.txt using fs_write"
+```
+Output trace shows immediate Gate 1 denial:
+```text
+[BLOCK fs_write: read-only mask (mutating tool; unwound: true)]
+```
+
+### B. Reversible (`--autonomy reversible`)
+Enables autonomous execution for actions that declare reversibility (`# @meta reversible-via backup`), recording an atomic rollback journal entry upfront:
+```bash
+aichat --show-cost --autonomy reversible -r %functions:fs_write% \
+  "Write 'REVERSIBLE_TEST' to /tmp/remediated.txt using fs_write"
+```
+Output trace shows upfront Option B remediation and autonomous approval:
+```text
+[rollback journal: recorded fs_write (entry-...)]
+[preflight remediation: fs_write (via backup -> stepped down to reversible)]
+[ALLOW fs_write: risk reversible <= ceiling reversible]
+```
+
+### C. Consult (`--autonomy consult`)
+Enforces the **Evaluator-First Unified Human Consultation Funnel**. Option B autonomous bypass is clamped; `%assess-risk%` audits the mutation upfront and presents a single, fully-informed prompt:
+```bash
+aichat --show-cost --autonomy consult -r %functions:fs_write% \
+  "Write 'CONSULT_TEST' to /tmp/consult.txt using fs_write"
+```
+
+---
+
 ## Environment Variables Reference
 
 | Variable | Effect |
 |----------|--------|
+| `AICHAT_AUTONOMY` | Autonomy posture preset: `readonly`, `consult`, or `reversible` |
 | `AICHAT_FUNCTIONS_DIR` | Point at the llm-functions directory |
 | `AICHAT_BUILTIN_SKILLS_DIR` | Override directory for builtin skills |
 | `AICHAT_WORKSPACE_DIR` | Override workspace root for workspace skill discovery |

@@ -208,6 +208,15 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if cli.wslinks {
         std::env::set_var("AICHAT_WSLINKS", "true");
     }
+    if let Some(ref autonomy_str) = cli.autonomy {
+        if let Some(level) = crate::safety::AutonomyLevel::from_str_loose(autonomy_str) {
+            config.write().safety.autonomy = Some(level);
+        } else {
+            bail!(
+                "Invalid autonomy level '{autonomy_str}'. Valid postures: readonly, consult, reversible (or aliases a0, a1, a2)"
+            );
+        }
+    }
 
     if let Some(agent) = &cli.agent {
         let session = cli.session.as_ref().map(|v| match v {

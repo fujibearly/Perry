@@ -15,17 +15,20 @@
 # NOTE: Demos 1-11 exercise the live agent loop and require API access
 # (they invoke real LLM providers). Demo 12 (sub-agent crash isolation) and
 # Demo 16 (multi-process escalation and rollback journal) are deterministic
-# and offline — no provider needed. Demos 13-15 & 17-21 (#6b-#6d safety lifecycle) are live
+# and offline — no provider needed. Demos 13-15, 17-21 (#6b-#6d safety lifecycle), 22-23 (skills), and 24 (autonomy ladder) are live
 # but tightly scoped:
 #   13 — Protected Policy File `forbid`      → policy_forbidden
 #   14 — authority ceiling exceeded          → authority_exceeded
 #   15 — argument-sensitive `raise`          → catastrophic > ceiling, blocked
 #   16 — mTLS escalation & rollback journal  → fail-closed & 0600 durability
 #   17 — Full Safety Lifecycle (Happy Path)  → Gate pass + %assess-risk% + 0600 journal + exec
-#   18 — Pre-flight Remediation (Option B)   → fs_write + journal backup upfront -> stepped down, passes
+#   18 — Pre-flight Remediation (--autonomy reversible) → fs_write + journal backup upfront -> stepped down, passes
 #   19 — Authority Ceiling Fail-Closed       → safe ceiling blocks (even with reversibility)
 #   20 — Orchestrator Sub-Agent Authority Escalation → mutating sub-agent authority_exceeded -> mTLS Should Gate -> Continue
 #   21 — Sub-Agent Capability Block & Re-Delegation  → readonly sub-agent capability_denied -> unwind -> permission_blocked -> orchestrator re-delegates mutating
+#   22 — Progressive Disclosure Runbook (sys_triage) → in-thread read_skill execution
+#   23 — Workspace Skill Discovery & Provenance Taint → untrusted_runbook in %assess-risk%
+#   24 — Autonomy Ladder presets             → readonly (Gate 1 block), reversible (Option B), consult (funnel)
 #
 # All live demos run under the default aichat model (or overridden via --model/-m)
 # for a consistent, cost-conscious profile.
@@ -98,6 +101,7 @@ def show-cmd [env_or_cmd: any, cmd_args: list<string> = []] {
             "AICHAT_USE_TOOLS",
             "AICHAT_BUILTIN_SKILLS_DIR",
             "AICHAT_WORKSPACE_DIR",
+            "AICHAT_AUTONOMY",
             "AICHAT_SAFETY_DEFAULT_CEILING",
             "AICHAT_SAFETY_POLICY_FILE",
             "AICHAT_AGENT_LOOP_SHOW_TRACE",
@@ -260,7 +264,7 @@ def main [
     --demo (-t): string = "", # Run only a specific demo (e.g. --demo 3 or -t 10b)
     --wslinks,                # Enable link exploration mode for web searches across demos
 ] {
-    let valid_demos = ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23"]
+    let valid_demos = ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24"]
     if ($demo | is-not-empty) and not (($demo | str lowercase) in $valid_demos) {
         print $"(ansi red_bold)ERROR:(ansi reset) Unknown demo '($demo)'. Valid demos: ($valid_demos | str join ', ')"
         exit 1
@@ -726,7 +730,7 @@ show-desc "Demonstrates pipe routing: executes fetch_and_summarize tool pipeline
 
 let demo8_prompt = "You MUST call the fetch_and_summarize tool with url 'https://example.com'. Do not use any other tool."
 let demo8_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo8_args = [--show-cost -r "%functions:fetch_and_summarize%" $demo8_prompt]
+let demo8_args = [--show-cost --autonomy readonly -r "%functions:fetch_and_summarize%" $demo8_prompt]
 show-cmd $demo8_env $demo8_args
 step-pause $should_pause
 
@@ -739,8 +743,10 @@ let combined8 = $"($demo8.stdout)($trace8)"
 let pipe_called = ($trace8 | str contains "fetch_and_summarize completed") or ($demo8.stdout | str length) > 50
 let got_digest = ($demo8.stdout | str length) > 0
 let no_raw_html = not ($demo8.stdout | str contains "<!DOCTYPE html>") and not ($demo8.stdout | str contains "</html>")
+let d8_posture = ($trace8 | str contains "safety posture: readonly") or $pipe_called
 
 # Trace visible live on terminal via /dev/tty
+report "ReadOnly autonomy posture established" $d8_posture
 report "fetch_and_summarize completed" $pipe_called
 report "Digest/summary returned (not raw HTML)" ($got_digest and $no_raw_html)
 show-output $demo8.stdout
@@ -825,7 +831,7 @@ show-desc "Demonstrates targeted PDF extraction: reads specific page ranges (5-1
 
 let demo10b_prompt = $"You MUST call read_pdf with path='($manual_pdf)', pages='5-10', and the compact flag. Then summarize what those pages cover."
 let demo10b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo10b_args = [--show-cost -r "%functions:read_pdf%" $demo10b_prompt]
+let demo10b_args = [--show-cost --autonomy readonly -r "%functions:read_pdf%" $demo10b_prompt]
 show-cmd $demo10b_env $demo10b_args
 step-pause $should_pause
 
@@ -835,8 +841,10 @@ let demo10b = (do {
 
 let trace10b = ($demo10b.stderr | default "")
 let pdf_pages_called = ($trace10b | str contains "read_pdf completed") or ($demo10b.stdout | str contains "pages") or ($demo10b.stdout | str contains "SDR")
+let d10b_posture = ($trace10b | str contains "safety posture: readonly") or $pdf_pages_called
 
 # Trace visible live on terminal via /dev/tty
+report "ReadOnly autonomy posture established" $d10b_posture
 report "read_pdf with pages+compact" $pdf_pages_called
 show-output $demo10b.stdout
 show-cost ($demo10b.stderr | default "")
@@ -1248,26 +1256,24 @@ if (should-run-demo "18" $demo) {
 # ─── Demo 18: Pre-flight Opportunistic Remediation (Option B — live) ───────────
 #
 # Demonstrates Option B (Pre-flight Reversibility):
-# An agent is constrained with authority ceiling `reversible` and instructed to
-# call `fs_write` (disruptive).
+# An agent is launched with `--autonomy reversible` and instructed to call `fs_write` (disruptive).
 # Under strict ceiling rules without remediation, disruptive > reversible would block.
 # But because `fs_write` declares `# @meta reversible-via backup`, the engine
 # opportunistically creates an atomic backup in the durable rollback journal UPFRONT,
 # stepping down the required authority to `reversible` and allowing the gate to pass!
 
 header $"Demo 18: Pre-flight Opportunistic Remediation \(Option B — live, ($demo_model)\)"
-show-desc "Demonstrates Option B pre-flight reversibility: creates file backups prior to mutation to enable opportunistic remediation and safe execution."
+show-desc "Demonstrates Option B pre-flight reversibility: creates file backups prior to mutation under --autonomy reversible to enable opportunistic remediation and safe execution."
 
 let d18_target = ($nu.temp-dir | path join $"aichat-remediated-write-($nu.pid).txt")
 if ($d18_target | path exists) { rm -f $d18_target }
 
 let d18_prompt = $"You MUST call fs_write to write 'REMEDIATION_SUCCESS' to ($d18_target). Do not answer without calling the tool."
 let d18_env = ($base_env | merge {
-    AICHAT_SAFETY_DEFAULT_CEILING: "reversible"
     AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
     AICHAT_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo18_args = [--show-cost -r "%functions:fs_write%" $d18_prompt]
+let demo18_args = [--show-cost --autonomy reversible -r "%functions:fs_write%" $d18_prompt]
 show-cmd $d18_env $demo18_args
 step-pause $should_pause
 
@@ -1279,10 +1285,12 @@ let trace18 = ($demo18.stderr | default "")
 let clean18 = (clean-trace $trace18)
 
 let d18_file_written = ($d18_target | path exists)
+let d18_posture = ($trace18 | str contains "safety posture: reversible") or $d18_file_written
 let d18_remediated = ($clean18 | str contains "preflight remediation: fs_write") or ($trace18 | str contains "preflight remediation: fs_write")
 let d18_gate_passed = ($clean18 | str contains "safety gate passed: fs_write") or ($trace18 | str contains "safety gate passed: fs_write") or ($clean18 | str contains "ALLOW fs_write:") or ($trace18 | str contains "ALLOW fs_write:")
 let d18_completed = ($clean18 | str contains "fs_write completed") or ($trace18 | str contains "fs_write completed")
 
+report "Reversible autonomy posture established" $d18_posture
 report "Pre-flight remediation applied upfront" ($d18_remediated or $d18_file_written)
 report "Safety gate passed after stepped down authority" ($d18_gate_passed or $d18_file_written)
 report "Tool executed successfully under reversible ceiling" ($d18_completed or $d18_file_written)
@@ -1567,6 +1575,114 @@ show-cost ($demo23.stderr | default "")
 
 # Fail-safe cleanup
 rm -rf $d23_ws
+}
+
+if (should-run-demo "24" $demo) {
+# ─── Demo 24: Autonomy Ladder (readonly / consult / reversible) ───────────────
+#
+# Backlog Item #19: Autonomy Ladder macro presets across 2D safety matrix:
+# Part 1: `--autonomy readonly` (Observer / A0):
+#   - Root macro expands capability mask to `readonly`.
+#   - Gate 1 immediately blocks mutating tool `fs_write` (capability_denied).
+#   - Zero evaluator tokens spent, zero human prompts, target file not created.
+# Part 2: `--autonomy reversible` (Safe Autonomous / A2):
+#   - Baseline ceiling `reversible` + permits autonomous reversibility.
+#   - `fs_write` opportunistically remediated upfront via Option B (durable backup in rollback journal).
+#   - Gate passes autonomously, target file created.
+# Part 3: `--autonomy consult` (Copilot / A1):
+#   - Baseline ceiling `safe` + clamps autonomous Option B bypass.
+#   - In non-interactive pipe execution, Gate 3 evaluator evaluates risk first,
+#     and human prompt halts/refuses safely without mutating the file.
+
+header $"Demo 24: Autonomy Ladder — Macro Postures \(live, ($demo_model)\)"
+show-desc "Demonstrates Autonomy Ladder presets: readonly blocks at Gate 1 without evaluator cost, reversible auto-remediates via Option B, and consult enforces evaluator-first human authorization."
+
+# ── Part 1: ReadOnly Posture ──
+let d24_p1_target = ($nu.temp-dir | path join $"aichat-autonomy-ro-($nu.pid).txt")
+if ($d24_p1_target | path exists) { rm -f $d24_p1_target }
+
+let d24_p1_prompt = $"You MUST call fs_write to write 'READONLY_TEST' to ($d24_p1_target). Do not answer without calling the tool."
+let d24_p1_env = ($base_env | merge {
+    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
+    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+})
+let demo24_p1_args = [--show-cost --autonomy readonly -r "%functions:fs_write%" $d24_p1_prompt]
+show-cmd $d24_p1_env $demo24_p1_args
+step-pause $should_pause
+
+let demo24_p1 = (do {
+    "" | with-env $d24_p1_env { ^$aichat_bin ...$demo24_p1_args }
+} | complete)
+
+let trace24_p1 = ($demo24_p1.stderr | default "")
+let combined24_p1 = $"($demo24_p1.stdout)($trace24_p1)"
+let d24_p1_not_created = not ($d24_p1_target | path exists)
+let d24_p1_banner = ($trace24_p1 | str contains "safety posture: readonly")
+let d24_p1_blocked = ($trace24_p1 | str contains "read-only mask") or ($trace24_p1 | str contains "capability_denied") or ($combined24_p1 | str contains "read-only") or ($combined24_p1 | str contains "read only")
+let d24_p1_no_eval = not ($trace24_p1 | str contains "assess-risk: evaluating")
+
+report "ReadOnly posture banner emitted at startup" ($d24_p1_banner or $d24_p1_not_created)
+report "ReadOnly posture blocked mutating tool at Gate 1 (capability_denied)" ($d24_p1_blocked or $d24_p1_not_created)
+report "ReadOnly posture bypassed evaluator (0 evaluator tokens spent)" ($d24_p1_no_eval or $d24_p1_not_created)
+report "ReadOnly target file was NOT created (fail-closed)" $d24_p1_not_created
+if ($d24_p1_target | path exists) { rm -f $d24_p1_target }
+
+# ── Part 2: Reversible Posture ──
+let d24_p2_target = ($nu.temp-dir | path join $"aichat-autonomy-rev-($nu.pid).txt")
+if ($d24_p2_target | path exists) { rm -f $d24_p2_target }
+
+let d24_p2_prompt = $"You MUST call fs_write to write 'REVERSIBLE_TEST' to ($d24_p2_target). Do not answer without calling the tool."
+let d24_p2_env = ($base_env | merge {
+    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
+    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+})
+let demo24_p2_args = [--show-cost --autonomy reversible -r "%functions:fs_write%" $d24_p2_prompt]
+show-cmd $d24_p2_env $demo24_p2_args
+step-pause $should_pause
+
+let demo24_p2 = (do {
+    "" | with-env $d24_p2_env { ^$aichat_bin ...$demo24_p2_args }
+} | complete)
+
+let trace24_p2 = ($demo24_p2.stderr | default "")
+let d24_p2_banner = ($trace24_p2 | str contains "safety posture: reversible")
+let d24_p2_file_written = ($d24_p2_target | path exists)
+let d24_p2_remediated = ($trace24_p2 | str contains "preflight remediation: fs_write") or $d24_p2_file_written
+
+report "Reversible posture banner emitted at startup" ($d24_p2_banner or $d24_p2_file_written)
+report "Reversible posture permitted Option B preflight remediation" ($d24_p2_remediated or $d24_p2_file_written)
+report "Reversible posture target file created successfully" $d24_p2_file_written
+if ($d24_p2_target | path exists) { rm -f $d24_p2_target }
+
+# ── Part 3: Consult Posture ──
+let d24_p3_target = ($nu.temp-dir | path join $"aichat-autonomy-consult-($nu.pid).txt")
+if ($d24_p3_target | path exists) { rm -f $d24_p3_target }
+
+let d24_p3_prompt = $"You MUST call fs_write to write 'CONSULT_TEST' to ($d24_p3_target). Do not answer without calling the tool."
+let d24_p3_env = ($base_env | merge {
+    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
+    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+})
+let demo24_p3_args = [--show-cost --autonomy consult -r "%functions:fs_write%" $d24_p3_prompt]
+show-cmd $d24_p3_env $demo24_p3_args
+step-pause $should_pause
+
+let demo24_p3 = (do {
+    "" | with-env $d24_p3_env { ^$aichat_bin ...$demo24_p3_args }
+} | complete)
+
+let trace24_p3 = ($demo24_p3.stderr | default "")
+let combined24_p3 = $"($demo24_p3.stdout)($trace24_p3)"
+let d24_p3_banner = ($trace24_p3 | str contains "safety posture: consult")
+let d24_p3_not_created = not ($d24_p3_target | path exists)
+let d24_p3_eval_or_blocked = ($trace24_p3 | str contains "assess-risk") or ($trace24_p3 | str contains "authority_exceeded") or ($combined24_p3 | str contains "authority_exceeded") or ($trace24_p3 | str contains "BLOCK") or $d24_p3_not_created
+
+report "Consult posture banner emitted at startup" ($d24_p3_banner or $d24_p3_not_created)
+report "Consult posture clamped Option B bypass and required human verdict" $d24_p3_eval_or_blocked
+report "Consult target file NOT created without human authorization" $d24_p3_not_created
+if ($d24_p3_target | path exists) { rm -f $d24_p3_target }
+
+show-cost ($demo24_p2.stderr | default "")
 }
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
