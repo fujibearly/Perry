@@ -177,6 +177,10 @@ This document captures architectural lessons, debugging insights, and operationa
 - **Resolution:**
   In `show-cmd` ([`scripts/run-demos.nu`](file:///home/istari/projects/aichat/scripts/run-demos.nu)), separate trailing prompt arguments from CLI flags and environment variables. Render the command line (`▶ AICHAT_MODEL=... aichat <flags>`) first, followed by an empty line, the user prompt isolated on its own line in highlighted `light_cyan` with a 4-space indent, followed by an empty line before execution traces begin.
 - **Actionable Rule for Agents:**
+  *Format test and demo harness output with clean visual separation between command-line switches/environment variables and the conversational user prompt.*
+
+---
+
 ### [2026-09-16T22:50:00-04:00] Tracing: Upfront Token Attribution in Trace Lines and Dialog Frames
 - **Category:** Observability & Trace Forensics
 - **Problem:**
@@ -187,3 +191,46 @@ This document captures architectural lessons, debugging insights, and operationa
   In [`src/agent_loop.rs`](file:///home/istari/projects/aichat/src/agent_loop.rs), compute the estimated token count upfront for each turn using `model.total_tokens(&msgs)` (via `estimate_token_length`) and pass `tokens: Option<usize>` into both [`AgentLoopEvent::TurnStart`](file:///home/istari/projects/aichat/src/agent_loop.rs#L65-L70) and [`AgentLoopEvent::DialogBlock`](file:///home/istari/projects/aichat/src/agent_loop.rs#L71-L80). Render `{tok} tok` in `DarkGray` immediately preceding ` @ <model>` in both trace headers (`[%agent% <pid> (<petname>) 286 tok @ <model> [turn X/Y] starting]`) and dialog frames (`┌── 📥 [<pid> %agent% 286 tok @ <model> [turn X/Y] PROMPT SUBMITTED TO LLM]`).
 - **Actionable Rule for Agents:**
   *Compute and display request token estimates at the boundary of every LLM interaction before network dispatch. Upfront token attribution gives instant observability into turn-by-turn context growth.*
+
+---
+
+### [2026-09-16T23:25:00-04:00] Multi-Tool Isolation: Scoping Safety Governance Per-Subcommand, Never Per-Script
+- **Category:** Safety Governance & Schema Architecture
+- **Problem:**
+  Agents frequently group multiple domain-specific subcommands inside a single multi-tool script (e.g. `agents/<agent>/tools.sh`). If safety governance metadata (`mode`, `risk`, `reversible-via`) were assigned at the file level, it would present an unacceptable security tradeoff: labeling `tools.sh` as `safe` would allow destructive subcommands (e.g. `clear_todos`, file overwrites) to bypass authorization gates, while labeling it `disruptive` would falsely block read-only queries (e.g. `list_todos`, `read_query`) under `safe` ceilings.
+- **Consequence:**
+  Either least-privilege enforcement fails (privilege escalation) or agent autonomy is unnecessarily strangled (over-conservative denial).
+- **Resolution:**
+  Enforce safety metadata strictly per-subcommand (`# @cmd`). During schema extraction, `argc --argc-export` parses each subcommand into its own independent entry in `functions.json`. During runtime safety evaluation, `aichat` detects multi-tool scripts (`resolved_path.file_stem() == "tools"`) and calls `extract_shell_function` to slice out *only* the invoked function's source and doc-comments, completely isolating it from sibling commands in the same file.
+- **Actionable Rule for Agents:**
+  *Never treat multi-tool scripts as monolithic units of risk. Always annotate each `# @cmd` subcommand with its own fine-grained `# @meta` tags.*
+
+---
+
+### [2026-09-16T23:30:00-04:00] Pre-Flight Remediation: File Creation Is Inherently Reversible via Undo Journaling
+- **Category:** Safety & Reversibility Mechanics
+- **Problem:**
+  During the initial rollout of blast-radius annotations (Backlog #6b), tools that overwrite or patch existing files (`fs_write`, `fs_patch`) were annotated with `# @meta reversible-via backup`, but file creation tools like `fs_create` in `agents/coder/tools.sh` only received `# @meta mode mutating` and `# @meta risk disruptive`. The omission stemmed from a misconception that "backup" reversibility only applies when an existing file's bytes can be snapshotted prior to modification.
+- **Consequence:**
+  When an autonomous agent (like `coder`) runs under a `reversible` ceiling (e.g. default ceiling or delegated authority), `fs_create` tripped `authority_exceeded` because static `disruptive` could not be stepped down, even though creating a new file is trivially reversible.
+- **Resolution:**
+  The pre-flight remediation engine (`record_pre_mutation_journal_entry` in `src/agent_loop.rs`) already natively handles both cases:
+  1. *File exists:* Snapshots existing contents to `.bak` in the `RollbackJournal` (undo restores original bytes).
+  2. *File does not exist:* Records an explicit deletion command `rm -f '<path>'` in the `RollbackJournal` (undo removes the created file).
+  Annotated `fs_create` in `agents/coder/tools.sh` with `# @meta reversible-via backup` and recompiled `agents/coder/functions.json`.
+- **Actionable Rule for Agents:**
+  *File creation tools qualify for `# @meta reversible-via backup` identically to file modification tools. The rollback journal automatically distinguishes between file snapshots and deletion tombstones.*
+
+---
+
+### [2026-09-16T23:31:00-04:00] Schema Synchronization: Compiled Function Declarations as Build Artifacts
+- **Category:** Tool Engineering & Build Ergonomics
+- **Problem:**
+  In `llm-functions`, modifying doc-comments (`# @meta`, `# @option`, `# @cmd`) in `tools.sh` or `tools/*.sh` does not immediately update runtime agent schemas. Furthermore, `functions.json` is gitignored, meaning `git status` will show modified shell scripts but will not indicate whether declaration artifacts were rebuilt.
+- **Consequence:**
+  Developers or agents editing shell tool comments may believe the engine will pick up new metadata immediately, leading to confusing discrepancies where runtime execution fails because the active `functions.json` contains stale metadata.
+- **Resolution:**
+  Always run `argc build@agent <name>` (or `argc build`) after modifying tool doc-comments to re-export `.subcommands` and update `functions.json`. Remember that shell scripts are the tracked source of truth in git, while `functions.json` is a generated runtime artifact.
+- **Actionable Rule for Agents:**
+  *Always synchronize compiled schemas via `argc build` or `argc build@agent <name>` immediately after altering tool comment metadata.*
+
