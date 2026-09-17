@@ -214,12 +214,23 @@ impl Role {
         &self.name
     }
 
+    pub fn set_name(&mut self, name: &str) {
+        self.name = name.to_string();
+    }
+
     pub fn model_id(&self) -> Option<&str> {
         self.model_id.as_deref()
     }
 
     pub fn prompt(&self) -> &str {
         &self.prompt
+    }
+
+    pub fn append_prompt(&mut self, text: &str) {
+        if !self.prompt.is_empty() {
+            self.prompt.push_str("\n\n");
+        }
+        self.prompt.push_str(text);
     }
 
     pub fn is_empty_prompt(&self) -> bool {

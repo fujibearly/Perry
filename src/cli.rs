@@ -85,6 +85,9 @@ pub struct Cli {
     /// Include files, directories, or URLs
     #[clap(short = 'f', long, value_name = "FILE")]
     pub file: Vec<String>,
+    /// Specify tools to use (repeatable, comma-separated, or 'all')
+    #[clap(long, value_name = "TOOLS")]
+    pub use_tools: Vec<String>,
     /// Include multiple shell-expanded files; terminate the list with `--`
     #[clap(
         long = "files",

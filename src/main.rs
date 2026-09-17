@@ -256,6 +256,11 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if let Some(model_id) = &cli.model {
         config.write().set_model(model_id)?;
     }
+    if !cli.use_tools.is_empty() {
+        let joined_tools = cli.use_tools.join(",");
+        config.read().validate_tool_names(&joined_tools)?;
+        config.write().set_use_tools(Some(joined_tools));
+    }
     if cli.no_stream {
         config.write().stream = false;
     }

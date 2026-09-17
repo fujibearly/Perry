@@ -150,15 +150,7 @@ impl PlanTracker {
 
     /// Mark step as InProgress matching the invoked tool, or the next pending step.
     pub fn update_active_step(&mut self, tool_name: &str) -> Option<usize> {
-        // If the currently active step already matches this tool, keep it
-        if let Some(active_id) = self.active_step_id {
-            if let Some(step) = self.steps.iter().find(|s| s.id == active_id) {
-                if step.tool.as_deref() == Some(tool_name) {
-                    return Some(active_id);
-                }
-            }
-        }
-        // Next, find first pending step that matches this tool
+        // 1. Find first pending step that matches this tool
         if let Some(step) = self
             .steps
             .iter_mut()
@@ -169,7 +161,15 @@ impl PlanTracker {
             self.active_step_id = Some(id);
             return Some(id);
         }
-        // Otherwise, advance first pending step
+        // 2. If the currently active step already matches this tool, keep it
+        if let Some(active_id) = self.active_step_id {
+            if let Some(step) = self.steps.iter().find(|s| s.id == active_id) {
+                if step.tool.as_deref() == Some(tool_name) {
+                    return Some(active_id);
+                }
+            }
+        }
+        // 3. Otherwise, advance first pending step
         if let Some(step) = self.steps.iter_mut().find(|s| s.status == StepStatus::Pending) {
             step.status = StepStatus::InProgress;
             let id = step.id;
@@ -398,5 +398,54 @@ mod tests {
         assert!(summary.contains("[✓] 1. Backup accounts table (pg_dump)"));
         assert!(summary.contains("[✗] 2. Apply alter table migration (sql)"));
         assert!(summary.contains("[▶] 3. Verify index status (sql)"));
+    }
+
+    #[test]
+    fn test_parallel_multi_step_tool_advancement() {
+        let plan = StructuredPlan {
+            objective: "Run parallel slow tasks".into(),
+            steps: vec![
+                PlanStep {
+                    id: 1,
+                    intent: "Task 1".into(),
+                    tool: Some("slow_task".into()),
+                    args_preview: None,
+                    depends_on: vec![],
+                    status: StepStatus::Pending,
+                },
+                PlanStep {
+                    id: 2,
+                    intent: "Task 2".into(),
+                    tool: Some("slow_task".into()),
+                    args_preview: None,
+                    depends_on: vec![],
+                    status: StepStatus::Pending,
+                },
+                PlanStep {
+                    id: 3,
+                    intent: "Task 3".into(),
+                    tool: Some("slow_task".into()),
+                    args_preview: None,
+                    depends_on: vec![],
+                    status: StepStatus::Pending,
+                },
+            ],
+        };
+
+        let mut tracker = PlanTracker::new(plan);
+        // Concurrent tool call 1
+        assert_eq!(tracker.update_active_step("slow_task"), Some(1));
+        assert_eq!(tracker.steps[0].status, StepStatus::InProgress);
+
+        // Concurrent tool call 2 advances to step 2 instead of collapsing onto step 1
+        assert_eq!(tracker.update_active_step("slow_task"), Some(2));
+        assert_eq!(tracker.steps[1].status, StepStatus::InProgress);
+
+        // Concurrent tool call 3 advances to step 3
+        assert_eq!(tracker.update_active_step("slow_task"), Some(3));
+        assert_eq!(tracker.steps[2].status, StepStatus::InProgress);
+
+        // Subsequent call with no pending steps preserves active step 3
+        assert_eq!(tracker.update_active_step("slow_task"), Some(3));
     }
 }

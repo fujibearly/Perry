@@ -970,7 +970,7 @@ impl Config {
     }
 
     pub fn extract_role(&self) -> Role {
-        if let Some(session) = self.session.as_ref() {
+        let mut role = if let Some(session) = self.session.as_ref() {
             session.to_role()
         } else if let Some(agent) = self.agent.as_ref() {
             agent.to_role()
@@ -985,7 +985,18 @@ impl Config {
                 self.use_tools.clone(),
             );
             role
+        };
+        if self.agent.is_none() && self.function_calling {
+            let eligible = crate::skill::get_eligible_skills_for_config(self);
+            if !eligible.is_empty() {
+                let eligible_refs: Vec<&crate::skill::Skill> = eligible.iter().collect();
+                let registry = crate::skill::SkillRegistry::new();
+                if let Some(catalogue) = registry.format_prompt_catalogue(&eligible_refs) {
+                    role.append_prompt(&catalogue);
+                }
+            }
         }
+        role
     }
 
     pub fn info(&self) -> Result<String> {
@@ -1430,8 +1441,35 @@ impl Config {
             let path = Self::role_file(name);
             let content = read_to_string(&path)?;
             Role::new(name, &content)
+        } else if let Some((base, tools)) = name.split_once(':').or_else(|| name.split_once('#')) {
+            let base_trimmed = base.trim_start_matches('%').trim_end_matches('%');
+            if base_trimmed == "functions" {
+                let mut r = Role::builtin("%functions%")?;
+                let tools = tools.trim_end_matches('%').trim();
+                self.validate_tool_names(tools)?;
+                r.set_name(name);
+                r.set_use_tools(Some(tools.to_string()));
+                // Priority 2: Ambient AICHAT_USE_TOOLS env override if explicitly set
+                if let Ok(env_tools) = env::var(get_env_name("use_tools")) {
+                    if !env_tools.is_empty() {
+                        self.validate_tool_names(&env_tools)?;
+                        r.set_use_tools(Some(env_tools));
+                    }
+                }
+                r
+            } else {
+                Role::builtin(name)?
+            }
         } else {
-            Role::builtin(name)?
+            let mut r = Role::builtin(name)?;
+            if name == "%functions%" {
+                // Priority 2/5: AICHAT_USE_TOOLS or config.yaml use_tools overrides default "all"
+                if let Some(override_tools) = &self.use_tools {
+                    self.validate_tool_names(override_tools)?;
+                    r.set_use_tools(Some(override_tools.clone()));
+                }
+            }
+            r
         };
         let current_model = self.current_model().clone();
         match role.model_id() {
@@ -1462,6 +1500,13 @@ impl Config {
             let path = Self::role_file(name);
             let content = std::fs::read_to_string(&path).ok()?;
             Role::new(name, &content)
+        } else if let Some((base, _)) = name.split_once(':').or_else(|| name.split_once('#')) {
+            let base_trimmed = base.trim_start_matches('%').trim_end_matches('%');
+            if base_trimmed == "functions" {
+                Role::builtin("%functions%").ok()?
+            } else {
+                Role::builtin(name).ok()?
+            }
         } else {
             Role::builtin(name).ok()?
         };
@@ -2286,6 +2331,45 @@ impl Config {
         Ok(())
     }
 
+    pub fn validate_tool_names(&self, tools: &str) -> Result<()> {
+        if tools == "all" {
+            return Ok(());
+        }
+        let mut declaration_names: HashSet<String> = self
+            .functions
+            .declarations()
+            .iter()
+            .map(|v| v.name.to_string())
+            .collect();
+        if let Some(agent) = &self.agent {
+            declaration_names.extend(agent.functions().declarations().iter().map(|v| v.name.to_string()));
+        }
+        if declaration_names.is_empty() && self.mapping_tools.is_empty() {
+            return Ok(());
+        }
+        for item in tools.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            let mut is_valid = declaration_names.contains(item)
+                || self.mapping_tools.contains_key(item)
+                || item == "_plan"
+                || item == "read_skill";
+            #[cfg(feature = "mcp")]
+            {
+                let prefix = format!("{item}__");
+                is_valid = is_valid || declaration_names.iter().any(|n| n.starts_with(&prefix));
+            }
+            if !is_valid {
+                let mut available: Vec<String> = declaration_names.into_iter().collect();
+                available.sort();
+                bail!("Unknown tool `{item}`. Available tools: {}", available.join(", "));
+            }
+        }
+        Ok(())
+    }
+
     pub fn select_functions(&self, role: &Role) -> Option<Vec<FunctionDeclaration>> {
         let mut functions = vec![];
         if self.function_calling {
@@ -2359,18 +2443,19 @@ impl Config {
                 functions = agent_functions;
             }
         };
-        if functions.is_empty() {
-            None
-        } else {
-            // Inject _plan pseudo-tool when planning_tool is enabled
-            if self.agent_loop.planning_tool {
-                functions.push(crate::agent_loop::plan_tool_declaration());
-            }
+        if self.function_calling {
             // Inject read_skill tool when eligible skills exist
             let eligible_skills = crate::skill::get_eligible_skills_for_config(self);
             if !eligible_skills.is_empty() {
                 functions.push(crate::skill::read_skill_tool_declaration());
             }
+            if self.agent_loop.planning_tool && !functions.is_empty() {
+                functions.push(crate::agent_loop::plan_tool_declaration());
+            }
+        }
+        if functions.is_empty() {
+            None
+        } else {
             Some(functions)
         }
     }
@@ -3837,5 +3922,160 @@ multi_agent:
         };
         config.apply_prelude().unwrap();
         assert_eq!(selected_role(&config), Some(CODE_ROLE));
+    }
+
+    #[test]
+    fn test_retrieve_role_functions_scoped() {
+        let mut config = Config::default();
+        config.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "slow_task",
+                "description": "a slow task",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "name": "fs_cat",
+                "description": "cat a file",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+        ]);
+        let role = config.retrieve_role("%functions:slow_task%").unwrap();
+        assert_eq!(role.name(), "%functions:slow_task%");
+        assert_eq!(role.use_tools(), Some("slow_task".to_string()));
+    }
+
+    #[test]
+    fn test_retrieve_role_functions_multi_scoped() {
+        let mut config = Config::default();
+        config.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "slow_task",
+                "description": "a slow task",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "name": "fs_cat",
+                "description": "cat a file",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+        ]);
+        let role = config.retrieve_role("%functions:slow_task,fs_cat%").unwrap();
+        assert_eq!(role.name(), "%functions:slow_task,fs_cat%");
+        assert_eq!(role.use_tools(), Some("slow_task,fs_cat".to_string()));
+    }
+
+    #[test]
+    fn test_retrieve_role_functions_hash_fallback() {
+        let mut config = Config::default();
+        config.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "slow_task",
+                "description": "a slow task",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+        ]);
+        let role = config.retrieve_role("%functions#slow_task%").unwrap();
+        assert_eq!(role.name(), "%functions#slow_task%");
+        assert_eq!(role.use_tools(), Some("slow_task".to_string()));
+    }
+
+    #[test]
+    fn test_retrieve_role_functions_unknown_tool_fails() {
+        let mut config = Config::default();
+        config.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "slow_task",
+                "description": "a slow task",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+        ]);
+        let res = config.retrieve_role("%functions:nonexistent_tool%");
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("Unknown tool `nonexistent_tool`"));
+    }
+
+    #[test]
+    fn test_retrieve_role_functions_default_all() {
+        let config = Config::default();
+        let role = config.retrieve_role("%functions%").unwrap();
+        assert_eq!(role.name(), "%functions%");
+        assert_eq!(role.use_tools(), Some("all".to_string()));
+    }
+
+    #[test]
+    fn test_env_override_beats_unparameterized_role() {
+        let mut config = Config::default();
+        config.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "fs_cat",
+                "description": "cat",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+        ]);
+        config.use_tools = Some("fs_cat".to_string());
+        let role = config.retrieve_role("%functions%").unwrap();
+        assert_eq!(role.use_tools(), Some("fs_cat".to_string()));
+    }
+
+    #[test]
+    fn test_cli_override_beats_env_and_role() {
+        let mut config = Config::default();
+        config.functions = crate::function::Functions::init_from_declarations(vec![
+            serde_json::from_value(serde_json::json!({
+                "name": "slow_task",
+                "description": "a slow task",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+            serde_json::from_value(serde_json::json!({
+                "name": "fs_cat",
+                "description": "cat a file",
+                "parameters": {"type": "object"}
+            })).unwrap(),
+        ]);
+        config.use_role("%functions:slow_task%").unwrap();
+        assert_eq!(config.role.as_ref().unwrap().use_tools(), Some("slow_task".to_string()));
+
+        // Simulate CLI override
+        let cli_tools = "fs_cat";
+        config.validate_tool_names(cli_tools).unwrap();
+        config.set_use_tools(Some(cli_tools.to_string()));
+        assert_eq!(config.role.as_ref().unwrap().use_tools(), Some("fs_cat".to_string()));
+    }
+
+    #[test]
+    fn test_validate_tool_names_accepts_read_skill() {
+        let config = Config::default();
+        assert!(config.validate_tool_names("read_skill").is_ok());
+        assert!(config.validate_tool_names("_plan,read_skill").is_ok());
+    }
+
+    #[test]
+    fn test_extract_role_injects_skill_catalogue_for_role() {
+        let temp = crate::utils::temp_file("-test-skills-extract-role-", "");
+        let ws_dir = temp.join("repo");
+        let ws_skill_dir = ws_dir.join(".kiro").join("skills").join("my_skill");
+        std::fs::create_dir_all(&ws_skill_dir).unwrap();
+        std::fs::write(
+            ws_skill_dir.join("SKILL.md"),
+            "---\nname: my_skill\ndescription: Test skill description\n---\nRun instructions.",
+        )
+        .unwrap();
+
+        std::env::set_var("AICHAT_WORKSPACE_DIR", &ws_dir);
+        let mut config = Config::default();
+        config.function_calling = true;
+        let role = config.retrieve_role("%functions%").unwrap();
+        config.role = Some(role);
+
+        let extracted = config.extract_role();
+        assert!(extracted.prompt().contains("### Available Skills"));
+        assert!(extracted.prompt().contains("- my_skill: Test skill description"));
+
+        // Verify select_functions also injects read_skill
+        let funcs = config.select_functions(&extracted).expect("functions should be present");
+        assert!(funcs.iter().any(|f| f.name == "read_skill"));
+
+        std::env::remove_var("AICHAT_WORKSPACE_DIR");
+        let _ = std::fs::remove_dir_all(&temp);
     }
 }
