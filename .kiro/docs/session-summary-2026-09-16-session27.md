@@ -99,11 +99,51 @@ impl ImpactTier {
 | **Demo 18** | `nu scripts/run-demos.nu -t 18` | **PASSED (Option B Pre-flight Remediation)** |
 | **Demo 19** | `nu scripts/run-demos.nu -t 19` | **PASSED (Authority Ceiling Fail-Closed)** |
 | **Demo 20** | `nu scripts/run-demos.nu -t 20` | **PASSED (Hard Child Ceiling & Re-delegation)** |
+| **Demo 22** | `nu scripts/run-demos.nu -t 22` | **PASSED (Progressive Runbook - Builtin Trusted)** |
+| **Demo 23** | `nu scripts/run-demos.nu -t 23` | **PASSED (Workspace Skill Discovery & Provenance Taint)** |
+| **Full Suite Unit Tests** | `cargo test --bin aichat agent_loop::tests -- --test-threads=1` | **124 passed, 0 failed in 0.48s (542+ total)** |
+| **Full Suite Clippy** | `cargo clippy --bin aichat -- -D warnings` | **Clean (0 warnings)** |
+| **Release Compilation** | `cargo build --release --bin aichat` | **Clean (Finished release [optimized])** |
 
 ---
 
-## 4. Next Milestone Candidates
+## 4. Part B: Scoped Tools, Progressive Runbooks POC, Safety Gate Sequencing & Trace Observability
 
-1. **Audit #17 Code Semantics:** Inspect merged skill implementation to ensure provenance tracking, step-scoped taint lifecycle, and nano exclusion are strictly preserved.
-2. **Backlog #8 (Dynamic Context Compaction):** Implement rolling micro-summarization (turns 1..N-3) and evict one-off skill runbook bodies once their active plan step completes.
-3. **Backlog #7 (Session Resumption & WAL Journaling):** Implement `$XDG_RUNTIME_DIR/aichat-<session>.wal` append-only event stream and `--resume <session-id>` flag.
+Following the glossary and semantic types merge, Session 27 implemented and verified critical engine enhancements across token efficiency, progressive runbook execution, causal safety gating, and trace observability:
+
+### A. Scoped Tool Subsetting (`-r %functions:tool1,tool2%`)
+- **Problem:** Declaring all 31 tools indiscriminately injected ~6,000 tokens of schema boilerplate into every turn.
+- **Solution:** Added dynamic tool scoping syntax `-r %functions:<tool1>,<tool2>%` in `src/config/mod.rs` (`extract_role` and `select_functions`).
+- **Impact:** Reduced schema overhead across 14 demos in `scripts/run-demos.nu` down to ~200-400 tokens per turn (~95% token savings).
+
+### B. Progressive Disclosure Skills Proof-of-Concept (Demos 22 & 23)
+- **Builtin Skill Fixture:** Created `assets/builtin-skills/sys_triage/SKILL.md`.
+- **Classification:** Registered `read_skill` as `SafetyClass::Readonly`, `BlastRadius::Safe`, and `intrinsic_reversible: true`.
+- **Implicit Catalog Injection:** Added `role.append_prompt` in `src/config/role.rs` so non-agent roles automatically receive the `### Available Skills` catalog and `read_skill` tool whenever eligible skills are present.
+- **Demo 22 (Builtin, Trusted):** Verified end-to-end progressive disclosure via `read_skill`, running diagnostic inspection, writing report artifact, and outputting summary.
+- **Demo 23 (Workspace, Untrusted Taint):** Verified workspace skill discovery (`.kiro/skills`), automatic `WorkspaceTainted` marking, active taint lifecycle (`untrusted_runbook: true` on active plan step), and heightened scrutiny in `%assess-risk%`.
+
+### C. Causal Safety Gate Sequencing (`ALLOW` After Assessment)
+- **Problem:** Static `ALLOW` comparisons were emitted before dynamic `%assess-risk%` evaluation, producing contradictory traces when `%assess-risk%` raised the tier.
+- **Solution:** In `eval_single_tool`, static `ALLOW` events are deferred whenever `will_consult_risk_evaluator` is true. The authorization comparison `ALLOW <tool>: risk <tier> <= ceiling <tier>` is emitted strictly **after** the evaluator has verified the action.
+
+### D. Real-Time Model & Token Count Attribution
+- **Turn Start Trace Lines:** Added `model: Option<String>` and `tokens: Option<usize>` to `AgentLoopEvent::TurnStart`. Formats `{tok} tok` in `DarkGray` immediately before `@ <model>` in Yellow: `[<agent> <pid> (<petname>) 286 tok @ <model> [turn X/Y] starting]`.
+- **Dialog Frames:** Added `tokens: Option<usize>` to `AgentLoopEvent::DialogBlock` and `format_dialog_block_with_model`. Headers display `{tok} tok` in `DarkGray` before `@ <model>` on prompt submissions (`📥`) and LLM responses (`📤`).
+- **Upfront Computation:** Request token estimates are computed via `model.total_tokens(&msgs)` before network dispatch, providing real-time visibility into turn-by-turn context inflation.
+
+### E. Evaluator Script & Command Pretty-Formatting in `--dialog`
+- **Problem:** Evaluator dialog blocks displayed script implementations and arguments as dense JSON strings with escaped quotes (`\"`) and newlines (`\n`).
+- **Solution:** Implemented `pretty_format_evaluator_context` and `format_evaluator_dialog_prompt` in `src/agent_loop.rs`. Unescapes tool source code, helper scripts, and commands into clean Markdown code blocks (````bash ... ````), while strictly preserving raw byte JSON on the wire to the model.
+
+### F. Harness Ergonomics & Knowledge Base
+- **Prompt Isolation:** In `scripts/run-demos.nu`, user prompts are visually separated from CLI flags/environment variables, rendered on their own line in highlighted `light_cyan` with blank spacing before and after.
+- **Postmarked Knowledge Base:** Established [`lesssons-learned.md`](file:///home/istari/projects/aichat/lesssons-learned.md) with 14 postmarked architectural insights, failure mode diagnoses, and operational rules for future agents.
+
+---
+
+## 5. Next Milestone Candidates
+
+1. **Backlog #8 (Dynamic Context Compaction):** Implement rolling micro-summarization (turns 1..N-3) and evict one-off skill runbook bodies once their active plan step completes.
+2. **Backlog #7 (Session Resumption & WAL Journaling):** Implement `$XDG_RUNTIME_DIR/aichat-<session>.wal` append-only event stream and `--resume <session-id>` flag.
+3. **Backlog #11 (Mock-Client Test Seam):** Provide a deterministic test seam for `call_llm_raw` to eliminate all network dependencies in unit tests.

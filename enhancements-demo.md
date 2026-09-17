@@ -328,11 +328,97 @@ Key features:
 
 ---
 
+## 13. Scoped Tool Selection (`-r %functions:tool1,tool2%`)
+
+Instead of sending schemas for all 31 tools in every LLM turn (~6,000 tokens of boilerplate schema per request), scope the role down to only the tools needed for the task using `-r %functions:<tool1>,<tool2>%`.
+
+```bash
+# Run with only fs_cat and fs_write tools declared to the LLM:
+aichat -r %functions:fs_cat,fs_write% "Inspect /etc/hostname and record the output to /tmp/hostname.txt"
+```
+
+Benefits:
+- **Token Reduction**: Drops tool declaration overhead from ~6,000 tokens down to ~200-400 tokens per turn (~95% context reduction).
+- **Latency & Cost**: Faster model time-to-first-token and lower operational cost.
+- **Precision**: Limits the action space so the LLM does not hallucinate calls to unrelated tools.
+
+---
+
+## 14. Progressive Disclosure Runbooks & Skills (`read_skill`)
+
+Rather than polluting the system prompt with entire playbooks and procedure guides, skills use **progressive disclosure**:
+1. Eligible agents receive a compact catalog listing available skills (`### Available Skills`).
+2. The agent discovers procedures dynamically and invokes `read_skill(name)` to fetch the runbook instructions only when needed.
+3. **3-Tier Precedence**: Discovers skills with `workspace` (`.kiro/skills`, `.agents/skills`, `.skills`) > `global` (`~/.config/aichat/skills`) > `builtin` (`assets/builtin-skills`) precedence.
+4. **Provenance Taint Tracking**: Runbooks loaded from the workspace are marked `WorkspaceTainted`. Loading an untrusted workspace runbook activates `untrusted_runbook: true` on the active plan step, feeding heightened scrutiny into `%assess-risk%` before mutating operations execute.
+
+```bash
+# Exercise builtin trusted triage skill (Demo 22):
+nu scripts/run-demos.nu --demo 22
+
+# Exercise workspace skill discovery and provenance taint tracking (Demo 23):
+nu scripts/run-demos.nu --demo 23
+```
+
+---
+
+## 15. Real-Time Model & Token Count Attribution
+
+Every LLM request displays its estimated token footprint and invoked model badge directly in the live trace and dialog frames **before** network dispatch.
+
+```bash
+# Standard trace: displays tokens and yellow model tag at turn start
+AICHAT_AGENT_LOOP_SHOW_TRACE=true aichat -r %functions:fs_cat% "Read /etc/hostname"
+```
+
+Trace output:
+```text
+   +0.1s  [%functions:fs_cat% 169909 (PickyChaff) 103 tok @ gemini:gemini-2.5-flash [turn 1/5] starting]
+```
+
+In `--dialog` mode, token counts are rendered in `DarkGray` on both prompt submission frames (`📥`) and response frames (`📤`):
+```text
+┌── 📥 [169480 (LoopyUrchin) %functions:fs_cat,fs_write% 286 tok @ gemini:gemini-2.5-flash [turn 4/5] PROMPT SUBMITTED TO LLM]
+...
+┌── 📤 [169480 (LoopyUrchin) %functions:fs_cat,fs_write% 30 tok @ gemini:gemini-2.5-flash [turn 4/5] RESPONSE FROM LLM]
+```
+
+Benefits:
+- Instant visibility into turn-by-turn context inflation.
+- Visual attribution of exactly which model is handling root turns, subagents, and supervisory roles (`%assess-risk%`).
+
+---
+
+## 16. Evaluator Script & Command Formatting in `--dialog`
+
+When `%assess-risk%` audits a state-mutating command or script, `--dialog` mode separates system auditor guidelines from the target action, unescaping underlying tool scripts and command strings into clean, readable Markdown syntax:
+
+```text
+Target File / Script: tools/fs_write.sh
+Intent: execute tool 'fs_write'
+Arguments:
+  path: /tmp/patch.log
+
+Script Source:
+```bash
+#!/usr/bin/env bash
+...
+```
+```
+
+The raw JSON sent to the evaluator LLM over the wire remains strictly byte-for-byte compliant, while the human operator sees human-readable, unescaped Bash rather than dense `\n`/`\"` JSON encoding.
+
+---
+
 ## Environment Variables Reference
 
 | Variable | Effect |
 |----------|--------|
 | `AICHAT_FUNCTIONS_DIR` | Point at the llm-functions directory |
+| `AICHAT_BUILTIN_SKILLS_DIR` | Override directory for builtin skills |
+| `AICHAT_WORKSPACE_DIR` | Override workspace root for workspace skill discovery |
+| `AICHAT_SAFETY_DEFAULT_CEILING` | Default authority ceiling (`safe`, `reversible`, `disruptive`, `destructive`) |
+| `AICHAT_SAFETY_POLICY_FILE` | Path to Protected Policy File (`policy.yaml`) |
 | `AICHAT_AGENT_LOOP_MAX_TURNS` | Override turn budget (default: 20) |
 | `AICHAT_AGENT_LOOP_SHOW_TRACE` | Show live trace on terminal via `/dev/tty` (`true`/`false`) |
 | `AICHAT_AGENT_LOOP_SHOW_DIALOG` | Show live prompt & response dialog trace (`true`/`false`) |

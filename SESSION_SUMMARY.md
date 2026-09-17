@@ -310,3 +310,30 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** All 6 unit tests in `src/skill.rs` passing; all 128 tests in `agent_loop::tests` passing; all 64 tests in `safety::tests` passing; 529 total tests passing with zero failures. Clippy clean (`-D warnings`).
       * **State:** on branch `feat/structured-plan-and-skills` (`66199b4`); local-only.
 
+  27. **Session 27: Scoped Tools Token Optimization, Progressive Runbook POC Demos, Causal Gate Sequencing & Postmarked Insights**
+    * **Period:** `2026-09-16`
+    * **Handoff Document:** [`lesssons-learned.md`](lesssons-learned.md) & [`skills_poc_walkthrough.md`](skills_poc_walkthrough.md)
+    * **Focus Areas:**
+      * **Scoped Tools Token Optimization (~95% schema reduction):** Scoped functional roles (`-r "%functions:tool1,tool2%"`) across 14 demos in `scripts/run-demos.nu`, reducing per-turn tool schema overhead from ~6,000 to ~300 tokens.
+      * **Engine Safety Classification for `read_skill`:** Registered `read_skill` as `SafetyClass::Readonly`, `BlastRadius::Safe`, and `intrinsic_reversible: true` across `src/agent_loop.rs`, resolving latent fail-closed `authority_exceeded` blocks.
+      * **Implicit Catalog & `read_skill` Injection for Non-Agent Roles:** Added `role.append_prompt` (`src/config/role.rs`). In `src/config/mod.rs` (`extract_role` & `select_functions`), injected `### Available Skills` catalog and `read_skill` tool whenever eligible skills exist, enabling non-agent roles to run progressive runbooks.
+      * **Builtin Skill Fixture:** Created permanent version-controlled builtin skill at `assets/builtin-skills/sys_triage/SKILL.md`.
+      * **Live Proof-of-Concept Demos (Demo 22 & Demo 23):**
+        * **Demo 22 (Builtin, Trusted):** Progressive disclosure runbook (`sys_triage`) reading procedure via `read_skill`, capturing timestamp, inspecting hostname, writing report to file, and outputting verified summary to terminal stdout.
+        * **Demo 23 (Workspace, Untrusted):** Workspace skill discovery (`repo_patcher`), provenance taint tracking (`WorkspaceTainted`), heightened scrutiny in `%assess-risk%` (`untrusted_runbook: true` $\to$ evaluated as `disruptive`), creating patch manifest artifact inside workspace, and outputting to terminal stdout.
+      * **Causal Safety Gate Sequencing (`ALLOW` After Risk Assessment):** Deferred static `ALLOW` emission in `eval_single_tool` when dynamic risk assessment is required (`will_consult_risk_evaluator`). The authorization comparison `ALLOW <tool>: risk <tier> <= ceiling <tier>` is now emitted strictly **after** `%assess-risk%` completes and verifies the action.
+      * **Primary Trace Taint Visibility:** Added `untrusted_runbook: bool` to `AgentLoopEvent::RiskAssessmentStart` so taint is visible directly on live terminal traces (`/dev/tty`).
+      * **Workspace Target Containment & Path Harmony:** Confined Demo 23 patch log artifacts strictly inside `$d23_ws/patch.log` and harmonized prompts, runbooks, and outputs.
+      * **Forensic Trace Discrepancy Analysis & Multi-Demo Hardening:**
+        * **Demo 21 Sub-Agent Authority Provisioning:** Addressed failure where orchestrator re-delegated with mutating permissions but omitted authority ceiling, defaulting to `safe` and causing secondary ceiling blocks. Updated prompts and schemas to require both `permissions_mask 'mutating'` and `permissions_ceiling 'disruptive'`, and updated `AgentLoopEvent::CapabilityBlocked` to include the specific denial `reason` (`authority ceiling exceeded` vs `read-only mask`).
+        * **Demo 11 TTY Stream False Negative:** Fixed assertion in `scripts/run-demos.nu` by filtering out child IPC relay frames (`[child `) from `clean11` when verifying `/dev/tty` visual trace output.
+        * **Tracing & Harness Enhancements:**
+          * **Turn Start Model & Token Count Tags:** Added `model: Option<String>` and `tokens: Option<usize>` to `AgentLoopEvent::TurnStart` and `AgentLoopEvent::DialogBlock`. In `format_trace_event_styled` and `format_dialog_block_with_model`, request tokens are rendered in `DarkGray` immediately preceding `@ <model>` (e.g. `286 tok @ gemini:gemini-2.5-flash`), visible in both standard trace lines (`[<agent> <pid> (<petname>) 286 tok @ <model> [turn X/Y] starting]`) and dialog frames (`┌── 📥 [<pid> <agent> 286 tok @ <model> [turn X/Y] PROMPT SUBMITTED TO LLM]`).
+          * **Unescaped Evaluator Scripts & Commands:** Implemented `pretty_format_evaluator_context` and `format_evaluator_dialog_prompt` in `src/agent_loop.rs`. In `--dialog` mode, `%assess-risk%` separates system auditor instructions from the evaluated action and unescapes tool implementations (`source`), helper scripts (`helpers`), and evaluated commands/code (`arguments.command`) into readable Markdown code blocks (````bash ... ````), while strictly preserving the raw byte-for-byte JSON payload sent to the evaluator LLM over the wire.
+          * **Harness Prompt Isolation & Highlighting:** In `scripts/run-demos.nu`, updated `show-cmd` to visually isolate the trailing user prompt from the wall of environment overrides and CLI flags. Prompts are rendered on their own line in highlighted `light_cyan` with a 4-space indent and empty lines before and after.
+      * **Postmarked Knowledge Base:** Created `lesssons-learned.md` (and symlinked `lessons-learned.md`) with 14 postmarked architectural insights and operational guidance for future agents.
+      * **Verification & Testing:** All 542+ unit tests passing (`cargo test --bin aichat`); clippy clean with 0 warnings (`cargo clippy --bin aichat -- -D warnings`); release binary compiled (`cargo build --release --bin aichat`); Demos 4, 18, and 23 verified live in both standard and `--dialog` modes.
+      * **State:** on branch `main`; local-only.
+
+
+
