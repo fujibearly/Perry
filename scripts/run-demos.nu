@@ -10,7 +10,7 @@
 #     declare `# @meta risk <tier>` so the authority gate grades them. Without
 #     classification, tools are treated as unclassified → human-reserved and the
 #     top-level agent is blocked from running them. The dev clone
-#     (~/projects/llm-functions, branch feat/tool-safety-classification) is classified.
+#     (~/projects/innators, branch feat/tool-safety-classification) is classified.
 #
 # NOTE: Demos 1-11 exercise the live agent loop and require API access
 # (they invoke real LLM providers). Demo 12 (sub-agent crash isolation) and
@@ -67,7 +67,7 @@ let aichat_bin = (
         $project_dir | path join "target/debug/aichat"
     }
 )
-let functions_dir = ($env.HOME | path join "projects/llm-functions")
+let functions_dir = ($env.HOME | path join "projects/innators")
 let manual_pdf = ($project_dir | path join "manual.pdf")
 
 # Web search model used across grounded search tooling. Uses Gemini 2.5 Flash for

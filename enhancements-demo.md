@@ -12,7 +12,8 @@ export AICHAT_FUNCTIONS_DIR=~/projects/llm-functions
 export WEB_SEARCH_MODEL="gemini:gemini-2.5-pro"
 
 # Use the release binary (< /dev/null prevents stdin hang in non-interactive contexts)
-alias aichat='~/projects/aichat/target/release/aichat'
+alias aichat='~/projects/perry/target/release/aichat'
+alias perry='~/projects/perry/target/release/aichat'
 ```
 
 ### Fix bin/ symlinks (if not already done)

@@ -43,13 +43,14 @@ This system has both a production (installed) and development setup:
 - **Functions (live):** `~/clones/llm-functions` — already built (`functions.json`, `bin/`, `tools.txt`, `agents.txt` present). Symlinked from `~/.config/aichat/functions`.
 
 ### Development (this workspace)
-- **aichat source:** `~/projects/aichat` (fork, rc-branch = v0.31.0-fork.9)
-- **llm-functions source:** `~/projects/llm-functions` — clean clone for study/development, NOT linked to the live system.
+- **Perry source:** `~/projects/perry` (primary development, tracking `fujibearly/Perry.git:main`)
+- **Innators source:** `~/projects/innators` (companion actuation tools, tracking `fujibearly/innators.git:main`)
 
 ### Important notes
+- The original `~/projects/aichat` and `~/projects/llm-functions` are preserved as local backups.
 - Do NOT modify `~/clones/llm-functions` without explicit permission — it's the live functions directory used by the installed aichat.
-- The `~/projects/llm-functions` clone is safe to experiment with.
-- To test dev-built aichat with dev llm-functions: `export AICHAT_FUNCTIONS_DIR=~/projects/llm-functions`
+- The `~/projects/innators` clone is safe to experiment with.
+- To test dev-built perry with dev innators: `export AICHAT_FUNCTIONS_DIR=~/projects/innators`
 - The installed aichat at `/usr/bin/aichat` may hang on `--info` if run non-interactively (it prompts for config creation).
 
 ## Conventions
