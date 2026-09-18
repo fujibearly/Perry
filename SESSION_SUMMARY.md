@@ -350,3 +350,17 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Demo Suite Enhancements:** Added comprehensive dedicated live Demo 24 exercising all three postures. Migrated Demo 8 (`fetch_and_summarize`) and Demo 10b (`read_pdf`) to `--autonomy readonly`, and migrated Demo 18 (`fs_write` preflight remediation) to `--autonomy reversible`, retiring the raw `AICHAT_SAFETY_DEFAULT_CEILING: "reversible"` environment variable.
       * **Verification & Testing:** All 558 unit and integration tests passing (`cargo test`); clippy clean with 0 warnings (`cargo clippy -- -D warnings`); Demos 8, 10b, 18, and 24 verified 100% passing live.
       * **State:** on branch `feat/autonomy-ladder`; local-only.
+
+  29. **Session 29: Architectural Migration & Repository Anchoring — Perry (Engine) & Innators (Actuation Suite)**
+    * **Period:** `2026-09-18`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-18-session29.md`](.kiro/docs/session-summary-2026-09-18-session29.md)
+    * **Focus Areas:**
+      * **Engine Rebranding & Migration:** The core agentic Rust engine (formerly `aichat`) was formally established as **Project Perry (Agent P)**, unlinked from upstream `sigoden/aichat` and `ei-grad/aichat`, and anchored to a clean private origin at `https://github.com/fujibearly/Perry.git`.
+      * **Actuator Suite Migration:** The atomic deterministic tool suite and subagent persona layer (formerly `llm-functions`) was formally established as **Innators**, unlinked from `sigoden/llm-functions`, and anchored to a clean private origin at `https://github.com/fujibearly/innators.git`.
+      * **Full History Inheritance:** Both private repositories inherited 100% of their historical commits (229 ahead commits on Perry, 25 ahead commits on Innators), all 17 engine branches, all 6 actuator branches, and all 72 milestone tags.
+      * **Cloud-Clone-First Protocol:** Complete 1:1 cloud replicas were pushed and verified on GitHub before a single local file was modified.
+      * **Pristine Subfolder Workspaces:** Clean clones were established in `/home/istari/projects/perry` and `/home/istari/projects/innators` as the primary active development homes, leaving legacy directories (`/home/istari/projects/aichat` and `/home/istari/projects/llm-functions`) untouched as local backups.
+      * **Agentic Pairing Infrastructure (`AGENTS.md`):** Added zero-turn onboarding manifests (`AGENTS.md`) to both repositories, establishing guidelines for Antigravity (AGY) and future AI coding assistants regarding project roles, safety metadata, and Nushell script conventions.
+      * **Verification & Testing:** `cargo check` passed in dev profile with 0 errors; Nushell demo harness (`scripts/run-demos.nu`) sourced with 0 errors; all four repositories audited and verified clean.
+      * **State:** on branch `main` in `/projects/perry` and `/projects/innators`; tracked to private GitHub origins.
+
