@@ -70,7 +70,7 @@ Maps each strategic strand to its tracked item. **Status lives in the [Status Ta
 | **TrueForge / enterprise K8s gateway** (RBAC, cloud audit) | L4 | 💭 *(external / concept)* | Also `Portkey` — LLM gateway/observability. Out of engine scope entirely. |
 | | | | |
 | ***Distilled from TrueForge & KubeIntellect study (Session 27)*** | | | |
-| Dedicated SRE Telemetry Actuators (`host_service.sh`, `host_resource.sh`, `host_net.sh`, `host_logs.sh`) | L1 | **#18** | 🟢 Done. 4-Pillar USE host actuators in `innators` with 10-year invariance. |
+| Dedicated SRE Telemetry & Multi-Agent Triage (`host_env`, `host_service`, `host_resource`, `host_net`, `host_logs`, `sre` agent) | L1/L2 | **#18** | 🟢 Done. 5-Pillar SRE suite, `host_env`, `sre` agent, and parallel orchestration. |
 | Autonomy Ladder (`--autonomy <readonly\|consult\|reversible>`) | L2 | **#19** | 🔧 Enhancement of **#6** (tool safety tiers) and **#6d** (escalation). Session-level posture presets. |
 | Zero-Token Pre-Flight Triage (`--preflight`) | L1/L2 | **#20** | 🆕 Entirely new. Deterministic bash check short-circuits before agent loop at $0.00 cost. |
 | In-Loop Clarification Tool (`ask_user`) | L2 | **#21** | 🔧 Enhancement of **#6d** (escalation). Extends the `/dev/tty`/mTLS channel from safety-only to clarification. |
@@ -143,7 +143,7 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 | **15**| **Plan-Driven Execution** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | Consumes #6c |
 | **17**| **Progressive Disclosure Skills** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | — |
 | **19**| **Autonomy Ladder** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🔧 Enhances #6 + #6d |
-| **18**| **Host SRE Telemetry Actuators** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🆕 Shipped in `innators` (4-Pillar USE suite) |
+| **18**| **Host SRE Telemetry & Multi-Agent Triage** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🆕 Shipped in `innators` + `perry` (5-Pillar suite, `host_env`, `sre` agent, parallel orchestration) |
 | &nbsp; | | | | | | | |
 | | **▼ PROPOSED (TO DO)** | | | | | | |
 | **7** | **Session WAL Journaling** | 🟡 Prop. | 🔥 High | 💎 High | 🏋️ Large | | — |
@@ -687,30 +687,40 @@ A **serious** planner would make the plan a first-class object that the loop exe
 
 > These items were distilled from studying [`truefoundry/trueforge`](https://github.com/truefoundry/trueforge) and [`MSKazemi/kubeintellect`](https://github.com/MSKazemi/kubeintellect). Full analysis: [`sre-and-supervisory-landscape.md`](sre-and-supervisory-landscape.md). Detailed ranking & justification: [perry-enhancements-from-trueforge-kubeintellect.md](file:///home/istari/.gemini/antigravity-cli/brain/6469c488-bfa7-45d4-b062-3ced2df64dd6/perry-enhancements-from-trueforge-kubeintellect.md).
 
-## 18. Dedicated SRE Telemetry Actuators (`host_service.sh`, `host_resource.sh`, `host_net.sh`, `host_logs.sh`) ✓
+## 18. Dedicated SRE Telemetry Actuators & Multi-Agent Triage (`host_env`, `host_service`, `host_resource`, `host_net`, `host_logs`, `sre` Agent) ✓
 
-**Driver:** `innators` previously relied on generic `execute_command.sh` for infrastructure operations, emitting unbounded, hallucination-prone shell strings. KubeIntellect's 4-pillar triage model (Pod/Metrics/Logs/Events) demonstrated the value of structured, schema-bounded infrastructure tools. We translated this model from K8s to **Linux Hosts, Bare-Metal, VMs, and Containers**, engineering it to withstand the test of flavor (Debian, RHEL, Alpine, Arch) and the test of time (2014–2026+).
+**Driver:** `innators` previously relied on generic `execute_command.sh` for infrastructure operations, emitting unbounded, hallucination-prone shell strings. KubeIntellect's 4-pillar triage model (Pod/Metrics/Logs/Events) demonstrated the value of structured, schema-bounded infrastructure tools. We translated this model from K8s to **Linux Hosts, Bare-Metal, VMs, and Containers**, engineering it to withstand the test of flavor (Debian, RHEL, Alpine, Arch) and the test of time (2014–2026+), anchored by a dedicated baseline identity actuator and executed via multi-agent parallel orchestration.
 
-**Predecessor:** 🆕 Entirely new. Implemented in companion repository [`innators`](file:///home/istari/projects/innators). Plugs into Perry's **#6** (tool safety modes) and executes autonomously under `--autonomy readonly` (A0) as `# @meta risk safe`.
+**Predecessor:** 🆕 Entirely new. Implemented across companion repository [`innators`](file:///home/istari/projects/innators) and [`perry`](file:///home/istari/projects/perry). Plugs into Perry's **#6** (tool safety modes) and executes autonomously under `--autonomy readonly` (A0) as `# @meta risk safe`.
 
 ### As-Built Implementation (Session 30)
-1. **`host_service.sh` (Pillar 1 — Services & Processes):**
+1. **`host_env.sh` (Pillar 0 — Baseline Identity & Environment):**
+   * Actions: `summary`, `hardware`, `os`, `virtualization`.
+   * Establishes the canonical hardware and OS anchor: hostname, architecture, CPU topology (cores, model, MHz), physical RAM, cgroups memory limits, primary root block device/mount, and hypervisor/container boundary.
+   * 10–15+ year portability: Pure integer `/proc/uptime` (works on minimal Alpine/busybox where `uptime -p` crashes), 4-tier CPU model fallback (`model name` $\to$ `Model` $\to$ `Hardware` $\to$ `lscpu`), and multi-tier OS release parsing.
+2. **`host_service.sh` (Pillar 1 — Services & Processes):**
    * Actions: `failed`, `status`, `top_procs`, `cgroup_limits`.
-   * Cross-init compatibility: Auto-detects systemd vs. SysVinit/Upstart fallback (`service --status-all`). Handles both modern bullet dots (`●`) and legacy column layouts.
+   * Cross-init compatibility: Auto-detects systemd vs. SysVinit/Upstart fallback (`service --status-all`). Handles modern bullet dots (`●`) and legacy column layouts.
    * Container/Pod awareness: Detects cgroups v1 (`memory.limit_in_bytes`) and cgroups v2 (`memory.max`, `cpu.stat`) limits.
-2. **`host_resource.sh` (Pillar 2 — USE Metrics):**
+3. **`host_resource.sh` (Pillar 2 — USE Metrics):**
    * Actions: `summary`, `cpu`, `memory`, `storage`.
    * Sourced from 10-year kernel invariants: `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/pressure/memory` (PSI), POSIX `df -mP` and `df -iP`, `/proc/mounts` (read-only mount detection), and `/proc/diskstats`.
-3. **`host_net.sh` (Pillar 3 — Network & Transport Telemetry):**
+4. **`host_net.sh` (Pillar 3 — Network & Transport Telemetry):**
    * Actions: `interfaces`, `sockets`, `listen_queues`, `conntrack`.
    * Bypasses post-2016 `ip -j` failures by reading `/proc/net/dev` directly. Audits saturated TCP listen queue backlogs (`ss -lnt` `Recv-Q > Send-Q`) and conntrack table saturation.
-4. **`host_logs.sh` (Pillar 4 — Logs & Fault Events):**
-   * Actions: `recent_errors`, `kernel_faults`, `security_denials`, `crashes`.
-   * Standardizes on `journalctl -p err -n 25 -o json` with legacy syslog fallback (`/var/log/messages`, `/var/log/syslog`).
+5. **`host_logs.sh` (Pillar 4 — Logs & Fault Events):**
+   * Actions: `recent_errors`, `timeline`, `kernel_faults`, `security_denials`, `crashes`.
+   * Standardizes on `journalctl -p err -n 25 -o json` with legacy syslog fallback (`/var/log/messages`, `/var/log/syslog`). Materializes `/tmp/perry-host_logs-query-<pid>.sh` and dump artifacts.
    * Security module auditing: Automatically probes SELinux denials (`ausearch` / `audit.log`) on RHEL and AppArmor denials (`dmesg`) on Ubuntu/Debian.
-   * Crash diagnostics: Robust signal-relative parsing for `coredumpctl list`.
-5. **Output Symmetry via `jq`:**
-   * While inputs use 10-year battle-tested POSIX/kernel syntax, all actuators pipe through `jq` to emit clean, typed, uniform JSON records to `$LLM_OUTPUT`, saving up to 40% in context tokens.
+   * Transparent Decoupled Distillation: Perry intercepts heavy JSON outputs and invokes `%distill-telemetry%` via the evaluator model endpoint.
+6. **`sre` Specialist Subagent (`innators/agents/sre/`):**
+   * Dedicated persona equipped with all 5 host telemetry actuators. Registered in `agents.txt` and callable by `orchestrator`.
+7. **Multi-Agent Parallel Orchestration (Demo 25) & SRE Incident Demos (Demos 26, 27):**
+   * **Demo 25:** Orchestrator plans with `_plan` and delegates the 5 pillars in parallel to 5 concurrent `sre` subagents, finishing in 4 turns (zero turn exhaustion).
+   * **Demo 26:** SRE agent correlates failed `thermald.service` with logs and resource pressure anchored to `host_env`.
+   * **Demo 27:** SRE agent executes 24h historical telemetry and transparent decoupled distillation.
+8. **Output Symmetry via `jq` & Semantic Distillation:**
+   * All actuators pipe through `jq` to emit clean, typed JSON records. Telemetry tap performs dynamic semantic key-value extraction without rigid schema enums.
 
 ---
 

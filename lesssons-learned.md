@@ -247,4 +247,43 @@ This document captures architectural lessons, debugging insights, and operationa
 - **Actionable Rule for Agents:**
   *When validating the entire test suite in CI or local verification, use `cargo test -- --test-threads=1` to guarantee deterministic execution of environment-guarded safety tests.*
 
+---
+
+### [2026-09-21T16:30:00-04:00] Dedicated Baseline Identity vs. Per-Actuator Probing
+- **Category:** Telemetry & Host Invariance
+- **Problem:**
+  Embedding host baseline discovery (hostname, OS, kernel, CPU, RAM) into every individual actuator duplicated parsing logic across tools, bloated payload sizes, and caused metric interpretation in a vacuum (e.g. reporting 26% CPU or 4GB RAM without knowing total capacity).
+- **Consequence:**
+  Inconsistent baseline representations, wasted LLM context on repeated static facts, and fragility across diverse architectures (x86_64, aarch64, cgroups v1/v2).
+- **Resolution:**
+  Extracted host discovery into a dedicated `host_env` actuator adhering to 10–15+ year portability invariants (pure integer `/proc/uptime`, 4-tier CPU resolution, multi-tier OS release parsing, cgroup memory limits).
+- **Actionable Rule for Agents:**
+  *Never duplicate static host baseline discovery across operational telemetry actuators. Isolate identity into a dedicated canonical actuator (`host_env`) and anchor dynamic telemetry to that baseline.*
+
+---
+
+### [2026-09-21T16:55:00-04:00] Multi-Pillar Turn Budgeting: Parallel Subagent Delegation Eliminates Turn Exhaustion
+- **Category:** Multi-Agent Orchestration & Turn Budgeting
+- **Problem:**
+  When an orchestrator or top-level agent executes a comprehensive 5-pillar health audit sequentially, consuming turns for skill reading, planning, and each individual tool call exhausts tight turn limits (e.g. 5–6 turns) before the final terminal summary can be emitted.
+- **Consequence:**
+  The agent runs out of turns (`budget exhausted at N turns`), failing test assertions and dropping the final diagnostic report.
+- **Resolution:**
+  Prescribe parallel execution in runbooks and delegate independent pillars to specialist subagents (e.g. `sre`) in parallel. Perry's `join_all` runs all subagent subprocesses concurrently in a single turn. The orchestrator needs only 4 turns total: turn 1 `read_skill`, turn 2 `_plan`, turn 3 parallel dispatch of 5 `sre` subagents, turn 4 synthesis.
+- **Actionable Rule for Agents:**
+  *In multi-pillar audits, never execute independent checks sequentially in the root loop. Formulate an upfront plan and delegate independent pillars to specialist subagents concurrently in a single turn.*
+
+---
+
+### [2026-09-21T17:05:00-04:00] Dynamic Semantic Key-Value Extraction vs. Rigid Schema Enums
+- **Category:** Telemetry Distillation & Evidence Extraction
+- **Problem:**
+  Attempting to map arbitrary infrastructure telemetry (log traces, socket anomalies, kernel errors) into rigid, hardcoded JSON schemas or enum fields causes lossy truncation of unpredictable diagnostic attributes.
+- **Consequence:**
+  Critical troubleshooting values (PIDs, failure steps, interface drops, error messages) are dropped or forced into generic fallback strings.
+- **Resolution:**
+  The decoupled distillation tap (`%distill-telemetry%`) instructs the evaluator LLM to extract key-values semantically and dynamically without assuming a fixed schema, preserving verbatim technical evidence and materializing log queries and dumps as clickable `file://` hyperlinks.
+- **Actionable Rule for Agents:**
+  *Do not force open-ended system diagnostic evidence into rigid schema enums. Employ dynamic semantic key-value extraction to discover diagnostic keys organically from live system outputs.*
+
 

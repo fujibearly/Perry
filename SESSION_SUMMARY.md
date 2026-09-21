@@ -366,3 +366,18 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** `cargo check` passed in dev profile with 0 errors; Nushell demo harness (`scripts/run-demos.nu`) updated with idiomatic procedural binary resolution; all 13 CLI tests and security integration tests passing.
       * **State:** on branch `main` in `/projects/perry` and `/projects/innators`; tracked to private GitHub origins.
 
+  30. **Session 30: Dedicated Host Baseline Actuator (`host_env`), Authentic `sys_triage` Skill Runbook, `sre` Specialist Agent, and Multi-Agent Parallel Telemetry Orchestration**
+    * **Period:** `2026-09-21`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-21-session30.md`](.kiro/docs/session-summary-2026-09-21-session30.md)
+    * **Focus Areas:**
+      * **Dedicated Host Baseline Actuator (`host_env`):** Created `tools/host_env.sh` in `innators` as single canonical authority for static baseline metadata, decoupling host discovery from operational tools. Engineered for 10–15+ year portability (pure integer `/proc/uptime`, 4-tier CPU model resolution, multi-tier OS release parsing, cgroups v1/v2 container boundaries).
+      * **Authentic 5-Pillar `sys_triage` Skill Runbook:** Created canonical SRE runbook (`assets/builtin-skills/sys_triage/SKILL.md`) covering `host_env`, `host_service`, `host_resource`, `host_net`, and `host_logs`. Re-architected execution model from sequential to concurrent parallel execution, adding explicit multi-agent delegation guidance.
+      * **Dedicated `sre` Specialist Agent:** Created `innators/agents/sre/` equipped with all 5 host telemetry actuators. Registered `sre` in `innators/agents.txt` and wired delegation into `orchestrator`'s functions and instructions.
+      * **Multi-Agent Parallel Orchestration (Demo 25):** Rewrote Demo 25 as an autonomous multi-agent orchestration sweep. The root orchestrator loads `sys_triage` via `read_skill`, formulates an upfront plan with `_plan`, and dispatches **5 concurrent `sre` subagents in parallel** (`calls=5`) in a single turn. Completed in 4 turns total (out of 8), completely eliminating turn exhaustion.
+      * **Correlated Incident RCA (Demo 26):** Migrated Demo 26 to `--agent sre` under `--autonomy readonly (A0)`, anchoring degraded unit detection (`thermald.service`) to host baseline (`host_env`), error logs (`host_logs`), and resource pressure (`host_resource`).
+      * **24-Hour Lookback & Decoupled Distillation (Demo 27):** Migrated Demo 27 to `--agent sre`, performing a 24h historical telemetry sweep with dual-arm anomaly spotting (25 restart failures in `omarchy-battery-monitor.service`) transparently intercepted by the decoupled distillation tap (`%distill-telemetry%`).
+      * **`host_stamp` Skill Separation (Demo 22):** Renamed Demo 22 fixture from `sys_triage` to `host_stamp` (`HOST_STAMP_VERIFIED:`), cleanly isolating test fixtures from production SRE runbooks.
+      * **Dynamic Semantic Key-Values & Artifact Hyperlinks:** Configured open-ended semantic key-value extraction without hardcoded schemas; materialized diagnostic log queries and dumps as clickable `file://` markdown hyperlinks.
+      * **Verification & Testing:** All 564 unit and integration tests passing (`cargo test -- --test-threads=1`); Demos 22, 25, 26, and 27 verified 100% passing live.
+      * **State:** on branch `main` in `/projects/perry` and `/projects/innators`.
+
