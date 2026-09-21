@@ -70,7 +70,7 @@ Maps each strategic strand to its tracked item. **Status lives in the [Status Ta
 | **TrueForge / enterprise K8s gateway** (RBAC, cloud audit) | L4 | 💭 *(external / concept)* | Also `Portkey` — LLM gateway/observability. Out of engine scope entirely. |
 | | | | |
 | ***Distilled from TrueForge & KubeIntellect study (Session 27)*** | | | |
-| Dedicated SRE Telemetry Actuators (`kubectl.sh`, `helm.sh`, `prometheus.sh`, `loki.sh`) | L1 | **#18** | 🆕 Entirely new. Schema-bounded `argc` tools replacing unbounded `execute_command.sh` for K8s/observability. |
+| Dedicated SRE Telemetry Actuators (`host_service.sh`, `host_resource.sh`, `host_net.sh`, `host_logs.sh`) | L1 | **#18** | 🟢 Done. 4-Pillar USE host actuators in `innators` with 10-year invariance. |
 | Autonomy Ladder (`--autonomy <readonly\|consult\|reversible>`) | L2 | **#19** | 🔧 Enhancement of **#6** (tool safety tiers) and **#6d** (escalation). Session-level posture presets. |
 | Zero-Token Pre-Flight Triage (`--preflight`) | L1/L2 | **#20** | 🆕 Entirely new. Deterministic bash check short-circuits before agent loop at $0.00 cost. |
 | In-Loop Clarification Tool (`ask_user`) | L2 | **#21** | 🔧 Enhancement of **#6d** (escalation). Extends the `/dev/tty`/mTLS channel from safety-only to clarification. |
@@ -143,10 +143,10 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 | **15**| **Plan-Driven Execution** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | Consumes #6c |
 | **17**| **Progressive Disclosure Skills** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | — |
 | **19**| **Autonomy Ladder** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🔧 Enhances #6 + #6d |
+| **18**| **Host SRE Telemetry Actuators** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🆕 Shipped in `innators` (4-Pillar USE suite) |
 | &nbsp; | | | | | | | |
 | | **▼ PROPOSED (TO DO)** | | | | | | |
 | **7** | **Session WAL Journaling** | 🟡 Prop. | 🔥 High | 💎 High | 🏋️ Large | | — |
-| **18**| **SRE Telemetry Actuators** | 🟡 Prop. | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🆕 New (plugs into #6) |
 | **8** | **Dynamic Context Compaction** | 🟡 Prop. | ➖ Med | 🔹 Med | 🚶 Med | | — |
 | **9** | **Ephemeral Git Worktrees** | 🟡 Prop. | ➖ Med | 🔹 Med | 🚶 Med | | — |
 | **10**| **Staged Config & Dry-Run** | 🟡 Prop. | ➖ Med | 💎 High | 🚶 S-M | 🎯 | — |
@@ -687,19 +687,32 @@ A **serious** planner would make the plan a first-class object that the loop exe
 
 > These items were distilled from studying [`truefoundry/trueforge`](https://github.com/truefoundry/trueforge) and [`MSKazemi/kubeintellect`](https://github.com/MSKazemi/kubeintellect). Full analysis: [`sre-and-supervisory-landscape.md`](sre-and-supervisory-landscape.md). Detailed ranking & justification: [perry-enhancements-from-trueforge-kubeintellect.md](file:///home/istari/.gemini/antigravity-cli/brain/6469c488-bfa7-45d4-b062-3ced2df64dd6/perry-enhancements-from-trueforge-kubeintellect.md).
 
-## 18. Dedicated SRE Telemetry Actuators (`kubectl.sh`, `helm.sh`, `prometheus.sh`, `loki.sh`)
+## 18. Dedicated SRE Telemetry Actuators (`host_service.sh`, `host_resource.sh`, `host_net.sh`, `host_logs.sh`) ✓
 
-**Driver:** `llm-functions` currently relies on generic `execute_command.sh` for infrastructure operations, meaning the LLM emits unbounded, hallucination-prone bash strings. KubeIntellect's 4-pillar triage model (Pod/Metrics/Logs/Events subagents) demonstrates the value of structured, schema-bounded infrastructure tools.
+**Driver:** `innators` previously relied on generic `execute_command.sh` for infrastructure operations, emitting unbounded, hallucination-prone shell strings. KubeIntellect's 4-pillar triage model (Pod/Metrics/Logs/Events) demonstrated the value of structured, schema-bounded infrastructure tools. We translated this model from K8s to **Linux Hosts, Bare-Metal, VMs, and Containers**, engineering it to withstand the test of flavor (Debian, RHEL, Alpine, Arch) and the test of time (2014–2026+).
 
-**Predecessor:** 🆕 Entirely new — no existing backlog item covers dedicated SRE actuators. Risk annotations plug into existing **#6** (tool safety tiers).
+**Predecessor:** 🆕 Entirely new. Implemented in companion repository [`innators`](file:///home/istari/projects/innators). Plugs into Perry's **#6** (tool safety modes) and executes autonomously under `--autonomy readonly` (A0) as `# @meta risk safe`.
 
-### Approach
-1. **`kubectl.sh`** — bounded subcommands (`get`, `describe`, `logs`, `events`, `apply`, `delete`) with `--namespace`, `--output`, `--selector` flag validation. `# @meta risk read-only` for queries; `# @meta risk dangerous` for mutations.
-2. **`helm.sh`** — release lifecycle (`status`, `history`, `diff`, `upgrade`, `rollback`). `# @meta risk read-only` for inspection; `# @meta risk dangerous` for mutations.
-3. **`prometheus.sh`** — PromQL query evaluation via `/api/v1/query` and `query_range`, with automatic table/metric formatting and `--step` / `--start` / `--end` flag validation. `# @meta risk read-only`.
-4. **`loki.sh`** — LogQL query execution via `/loki/api/v1/query_range` with windowed output, `--limit`, `--start`, `--end`. `# @meta risk read-only`.
+### As-Built Implementation (Session 30)
+1. **`host_service.sh` (Pillar 1 — Services & Processes):**
+   * Actions: `failed`, `status`, `top_procs`, `cgroup_limits`.
+   * Cross-init compatibility: Auto-detects systemd vs. SysVinit/Upstart fallback (`service --status-all`). Handles both modern bullet dots (`●`) and legacy column layouts.
+   * Container/Pod awareness: Detects cgroups v1 (`memory.limit_in_bytes`) and cgroups v2 (`memory.max`, `cpu.stat`) limits.
+2. **`host_resource.sh` (Pillar 2 — USE Metrics):**
+   * Actions: `summary`, `cpu`, `memory`, `storage`.
+   * Sourced from 10-year kernel invariants: `/proc/stat`, `/proc/meminfo`, `/proc/loadavg`, `/proc/pressure/memory` (PSI), POSIX `df -mP` and `df -iP`, `/proc/mounts` (read-only mount detection), and `/proc/diskstats`.
+3. **`host_net.sh` (Pillar 3 — Network & Transport Telemetry):**
+   * Actions: `interfaces`, `sockets`, `listen_queues`, `conntrack`.
+   * Bypasses post-2016 `ip -j` failures by reading `/proc/net/dev` directly. Audits saturated TCP listen queue backlogs (`ss -lnt` `Recv-Q > Send-Q`) and conntrack table saturation.
+4. **`host_logs.sh` (Pillar 4 — Logs & Fault Events):**
+   * Actions: `recent_errors`, `kernel_faults`, `security_denials`, `crashes`.
+   * Standardizes on `journalctl -p err -n 25 -o json` with legacy syslog fallback (`/var/log/messages`, `/var/log/syslog`).
+   * Security module auditing: Automatically probes SELinux denials (`ausearch` / `audit.log`) on RHEL and AppArmor denials (`dmesg`) on Ubuntu/Debian.
+   * Crash diagnostics: Robust signal-relative parsing for `coredumpctl list`.
+5. **Output Symmetry via `jq`:**
+   * While inputs use 10-year battle-tested POSIX/kernel syntax, all actuators pipe through `jq` to emit clean, typed, uniform JSON records to `$LLM_OUTPUT`, saving up to 40% in context tokens.
 
-**Notes:** Zero Rust engine changes. Pure Bash + `curl` + `jq` in the companion `llm-functions` repository. Each tool is ~50-80 lines. Highest-leverage, lowest-risk enhancement in this batch.
+---
 
 ## 19. Autonomy Ladder (`--autonomy <readonly|consult|reversible>`) ✓
 
