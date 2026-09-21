@@ -1758,7 +1758,7 @@ if (should-run-demo "25" $demo) {
 header $"Demo 25: 4-Pillar Autonomous Host Telemetry Sweep \(live, ($demo_model)\)"
 show-desc "Performs an autonomous 4-pillar host health audit (Services, Resources, Network, Logs) under --autonomy readonly (A0), verifying zero evaluator overhead and structured JSON telemetry."
 
-let d25_prompt = "Perform a rapid 4-pillar host health audit. You MUST call host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. Summarize each pillar (Resources, Services, Network, Logs) in a concise bullet."
+let d25_prompt = "Perform a rapid 4-pillar host health audit. You MUST call host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. For each pillar, do not speak in generic high-level terms: cite concrete evidence and extract semantic key-value pairs relevant for troubleshooting (e.g. timestamps, PIDs, service/process names, file paths, network interfaces, drop counts, error messages). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
 let d25_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1809,7 +1809,7 @@ if (should-run-demo "26" $demo) {
 header $"Demo 26: Correlated Incident RCA & Safety Boundary \(live, ($demo_model)\)"
 show-desc "Executes a multi-turn SRE investigation correlating degraded units with error logs and CPU/memory pressure, validating diagnostic correlation and safety containment."
 
-let d26_prompt = "An SRE incident alert fired: check for any failed units using host_service action='failed'. If a unit failed, inspect its status and error logs with host_logs action='recent_errors'. Check memory/CPU pressure with host_resource action='summary'. Report findings and synthesize a diagnostic health assessment."
+let d26_prompt = "An SRE incident alert fired: check for any failed units using host_service action='failed'. If a unit failed, inspect its status and error logs with host_logs action='recent_errors'. Check memory/CPU pressure with host_resource action='summary'. Synthesize a diagnostic root cause analysis citing concrete evidence and extracted semantic key-value pairs (timestamps, PIDs, unit/process names, error descriptions, file paths). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
 let d26_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1853,7 +1853,7 @@ if (should-run-demo "27" $demo) {
 header $"Demo 27: Arbitrary Timeframe Telemetry & Decoupled Distillation \(live, ($demo_model)\)"
 show-desc "Performs an asynchronous timeframe telemetry analysis with dual-arm anomaly spotting (critical singletons vs volume surges) and transparent decoupled LLM distillation under --autonomy readonly (A0)."
 
-let d27_prompt = "Analyze the host telemetry over the past 24 hours using host_logs with action='recent_errors' and since='24h'. Spot any critical singleton anomalies and volume surges, and summarize the ground-truth technical findings."
+let d27_prompt = "Analyze the host telemetry over the past 24 hours using host_logs with action='recent_errors' and since='24h'. Spot any critical singleton anomalies and volume surges, and synthesize the ground-truth technical findings citing concrete evidence and extracted semantic key-value pairs. If any artifacts were created (such as log queries or log dumps), surface them as clickable markdown hyperlinks with file:// URLs."
 let d27_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
