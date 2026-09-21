@@ -1805,22 +1805,21 @@ if (should-run-demo "26" $demo) {
 # ─── Demo 26: Correlated Incident RCA & Safety Boundary ───────────────────
 #
 # Multi-turn SRE incident correlation and safety containment:
-# 1. Investigate: Detects failing units/processes via `host_service`, extracts root-cause
-#    log traces via `host_logs`, and inspects memory/CPU saturation via `host_resource`.
+# 1. Investigate: SRE agent detects failing units via `host_service`, anchors to `host_env`,
+#    extracts root-cause log traces via `host_logs`, and inspects CPU/memory via `host_resource`.
 # 2. Correlate: Synthesizes a structured Root Cause Analysis (RCA).
-# 3. Safety Boundary: Confirms that attempting a mutating remediation (e.g. systemctl restart)
-#    is contained by Perry's safety taxonomy under `--autonomy readonly`.
+# 3. Safety Boundary: Validates diagnostic correlation under --autonomy readonly (A0).
 
 header $"Demo 26: Correlated Incident RCA & Safety Boundary \(live, ($demo_model)\)"
-show-desc "Executes a multi-turn SRE investigation correlating degraded units with error logs and CPU/memory pressure, validating diagnostic correlation and safety containment."
+show-desc "Executes a multi-turn SRE investigation under --agent sre correlating degraded units with error logs and CPU/memory pressure, validating diagnostic correlation and safety containment."
 
-let d26_prompt = "An SRE incident alert fired: follow the 'sys_triage' workflow to diagnose degraded units using host_service action='failed'. If a unit failed, inspect its status and error logs with host_logs action='recent_errors'. Check memory/CPU pressure with host_resource action='summary'. Synthesize a diagnostic root cause analysis citing concrete evidence and extracted semantic key-value pairs (timestamps, PIDs, unit/process names, error descriptions, file paths). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
+let d26_prompt = "An SRE incident alert fired: follow the 'sys_triage' workflow to diagnose degraded units using host_service action='failed'. Anchor your investigation to the host baseline via host_env action='summary'. If a unit failed, inspect its status and error logs with host_logs action='recent_errors'. Check memory/CPU pressure with host_resource action='summary'. Synthesize a diagnostic root cause analysis citing concrete evidence and extracted semantic key-value pairs (timestamps, PIDs, unit/process names, error descriptions, file paths). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
 let d26_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
-    PERRY_AGENT_LOOP_MAX_TURNS: "5"
+    PERRY_AGENT_LOOP_MAX_TURNS: "6"
 })
-let demo26_args = [--show-cost --autonomy readonly -r "%functions:host_resource,host_service,host_logs%" $d26_prompt]
+let demo26_args = [--show-cost --autonomy readonly --agent sre $d26_prompt]
 show-cmd $d26_env $demo26_args
 step-pause $should_pause
 
@@ -1829,16 +1828,22 @@ let demo26 = (do {
 } | complete)
 
 let trace26 = ($demo26.stderr | default "")
+let clean26 = (clean-trace $trace26)
+let combined26 = $"($demo26.stdout)($trace26)"
 
-let d26_invoked_service = ($trace26 | str contains "calling: host_service")
-let d26_invoked_logs_or_res = ($trace26 | str contains "calling: host_logs") or ($trace26 | str contains "calling: host_resource")
-let d26_rca_produced = ($demo26.stdout | is-not-empty)
-let d26_assessment_synthesized = ($demo26.stdout | str length) > 50
+let d26_banner = ($trace26 | str contains "safety posture: readonly") or ($clean26 | str contains "safety posture: readonly")
+let d26_invoked_service = ($trace26 | str contains "calling: host_service") or ($clean26 | str contains "calling: host_service")
+let d26_invoked_logs_or_res = ($trace26 | str contains "calling: host_logs") or ($clean26 | str contains "calling: host_logs") or ($trace26 | str contains "calling: host_resource")
+let d26_no_eval = not ($trace26 | str contains "assess-risk: evaluating")
+let d26_no_block = not ($trace26 | str contains "BLOCKED")
+let d26_rca_produced = ($demo26.stdout | is-not-empty) and (($demo26.stdout | str length) > 50)
 
+report "ReadOnly posture banner emitted at startup" $d26_banner
 report "Service health triage initiated (host_service)" $d26_invoked_service
 report "Correlated with diagnostic logs and resource telemetry" $d26_invoked_logs_or_res
-report "Incident diagnostic analysis synthesized" $d26_rca_produced
-report "Synthesized structured telemetry assessment" $d26_assessment_synthesized
+report "Zero risk evaluator overhead ($0 safety tokens spent)" $d26_no_eval
+report "Autonomous execution succeeded without blocks" $d26_no_block
+report "Incident diagnostic analysis synthesized (RCA)" $d26_rca_produced
 
 show-output $demo26.stdout
 show-cost ($demo26.stderr | default "")
@@ -1849,22 +1854,22 @@ if (should-run-demo "27" $demo) {
 #
 # Backlog Item #18b: Arbitrary Lookbacks, Dual-Arm Anomaly Spotting & Decoupled Distillation
 # Tests:
-# 1. Arbitrary Lookback Query: Passing `since='24h'` to host_logs to inspect historical telemetry.
+# 1. Arbitrary Lookback Query: SRE agent passes `since='24h'` to host_logs to inspect historical telemetry.
 # 2. Dual-Arm Anomaly Spotting: Actuator clusters volume surges and surfaces critical singletons.
 # 3. Transparent Decoupled Distillation Tap: Perry intercepts the bounded payload and invokes
-#    %distill-telemetry% via the evaluator model endpoint, leaving the orchestrator context clean.
+#    %distill-telemetry% via the evaluator model endpoint, leaving the SRE agent context clean.
 # 4. Synthesizes a structured incident report citing singleton anomalies or surge patterns.
 
 header $"Demo 27: Arbitrary Timeframe Telemetry & Decoupled Distillation \(live, ($demo_model)\)"
-show-desc "Performs an asynchronous timeframe telemetry analysis with dual-arm anomaly spotting (critical singletons vs volume surges) and transparent decoupled LLM distillation under --autonomy readonly (A0)."
+show-desc "Performs an asynchronous timeframe telemetry analysis under --agent sre with dual-arm anomaly spotting (critical singletons vs volume surges) and transparent decoupled LLM distillation under --autonomy readonly (A0)."
 
-let d27_prompt = "Perform an asynchronous timeframe telemetry analysis following the 'sys_triage' log investigation procedure over the past 24 hours using host_logs with action='recent_errors' and since='24h'. Spot any critical singleton anomalies and volume surges, and synthesize the ground-truth technical findings citing concrete evidence and extracted semantic key-value pairs. If any artifacts were created (such as log queries or log dumps), surface them as clickable markdown hyperlinks with file:// URLs."
+let d27_prompt = "Perform an asynchronous timeframe telemetry analysis following the 'sys_triage' log investigation procedure over the past 24 hours using host_logs with action='recent_errors' and since='24h'. Anchor findings to host baseline via host_env action='summary'. Spot any critical singleton anomalies and volume surges, and synthesize the ground-truth technical findings citing concrete evidence and extracted semantic key-value pairs. If any artifacts were created (such as log queries or log dumps), surface them as clickable markdown hyperlinks with file:// URLs."
 let d27_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
-    PERRY_AGENT_LOOP_MAX_TURNS: "5"
+    PERRY_AGENT_LOOP_MAX_TURNS: "6"
 })
-let demo27_args = [--show-cost --autonomy readonly -r "%functions:host_logs%" $d27_prompt]
+let demo27_args = [--show-cost --autonomy readonly --agent sre $d27_prompt]
 show-cmd $d27_env $demo27_args
 step-pause $should_pause
 
@@ -1873,18 +1878,21 @@ let demo27 = (do {
 } | complete)
 
 let trace27 = ($demo27.stderr | default "")
+let clean27 = (clean-trace $trace27)
 
-let d27_called_logs = ($trace27 | str contains "calling: host_logs")
-let d27_distill_tapped = ($trace27 | str contains "distill-telemetry:")
+let d27_banner = ($trace27 | str contains "safety posture: readonly") or ($clean27 | str contains "safety posture: readonly")
+let d27_called_logs = ($trace27 | str contains "calling: host_logs") or ($clean27 | str contains "calling: host_logs")
+let d27_distill_tapped = ($trace27 | str contains "distill-telemetry:") or ($clean27 | str contains "distill-telemetry:")
 let d27_no_eval = not ($trace27 | str contains "assess-risk: evaluating")
 let d27_no_block = not ($trace27 | str contains "BLOCKED")
-let d27_has_summary = ($demo27.stdout | is-not-empty)
+let d27_has_summary = ($demo27.stdout | is-not-empty) and (($demo27.stdout | str length) > 50)
 
+report "ReadOnly posture banner emitted at startup" $d27_banner
 report "Pillar 4 (host_logs) invoked with historical timeframe" $d27_called_logs
 report "Decoupled distillation tap executed (%distill-telemetry%)" $d27_distill_tapped
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d27_no_eval
 report "Autonomous execution succeeded without blocks" $d27_no_block
-report "Agent synthesized ground-truth anomaly report" $d27_has_summary
+report "SRE agent synthesized ground-truth anomaly report" $d27_has_summary
 
 show-output $demo27.stdout
 show-cost ($demo27.stderr | default "")
