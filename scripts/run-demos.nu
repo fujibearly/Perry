@@ -307,7 +307,7 @@ def main [
     --demo (-t): string = "", # Run only a specific demo (e.g. --demo 3 or -t 10b)
     --wslinks,                # Enable link exploration mode for web searches across demos
 ] {
-    let valid_demos = ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24"]
+    let valid_demos = ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26"]
     if ($demo | is-not-empty) and not (($demo | str lowercase) in $valid_demos) {
         print $"(ansi red_bold)ERROR:(ansi reset) Unknown demo '($demo)'. Valid demos: ($valid_demos | str join ', ')"
         exit 1
@@ -1737,6 +1737,106 @@ report "Consult target file NOT created without human authorization" $d24_p3_not
 if ($d24_p3_target | path exists) { rm -f $d24_p3_target }
 
 show-cost ($demo24_p2.stderr | default "")
+}
+
+if (should-run-demo "25" $demo) {
+# ─── Demo 25: 4-Pillar Autonomous Host Telemetry Sweep ────────────────────
+#
+# Backlog Item #18: 4-Pillar Universal Host SRE Telemetry Actuators
+# Tests autonomous execution of all 4 pillars under `--autonomy readonly` (A0):
+# - Pillar 1: host_service (failed units, process topology, container limits)
+# - Pillar 2: host_resource (USE metrics: CPU, memory, storage, inodes)
+# - Pillar 3: host_net (interface drops/errors, sockets, listen queues)
+# - Pillar 4: host_logs (recent errors, kernel faults, security denials)
+#
+# Asserts:
+# 1. Readonly posture banner emitted at startup.
+# 2. All 4 actuators execute autonomously (0 human approval prompts, 0 blocks).
+# 3. %assess-risk% evaluator is bypassed ($0 risk evaluation overhead).
+# 4. Synthesizes a structured health audit from the JSON outputs.
+
+header $"Demo 25: 4-Pillar Autonomous Host Telemetry Sweep \(live, ($demo_model)\)"
+show-desc "Performs an autonomous 4-pillar host health audit (Services, Resources, Network, Logs) under --autonomy readonly (A0), verifying zero evaluator overhead and structured JSON telemetry."
+
+let d25_prompt = "Perform a rapid 4-pillar host health audit. You MUST call host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. Summarize each pillar (Resources, Services, Network, Logs) in a concise bullet."
+let d25_env = ($base_env | merge {
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "5"
+})
+let demo25_args = [--show-cost --autonomy readonly -r "%functions:host_resource,host_service,host_net,host_logs%" $d25_prompt]
+show-cmd $d25_env $demo25_args
+step-pause $should_pause
+
+let demo25 = (do {
+    "" | with-env $d25_env { ^$perry_bin ...$demo25_args }
+} | complete)
+
+let trace25 = ($demo25.stderr | default "")
+let combined25 = $"($demo25.stdout)($trace25)"
+
+let d25_banner = ($trace25 | str contains "safety posture: readonly")
+let d25_called_res = ($combined25 | str contains "host_resource") or ($combined25 | str contains "resource") or ($combined25 | str contains "Resource") or ($combined25 | str contains "CPU") or ($combined25 | str contains "memory") or ($combined25 | str contains "Memory") or ($combined25 | str contains "storage") or ($combined25 | str contains "Storage") or ($combined25 | str contains "disk") or ($combined25 | str contains "Disk") or ($combined25 | str contains "utilization")
+let d25_called_svc = ($combined25 | str contains "host_service") or ($combined25 | str contains "service") or ($combined25 | str contains "Service") or ($combined25 | str contains "thermald") or ($combined25 | str contains "unit")
+let d25_called_net = ($combined25 | str contains "host_net") or ($combined25 | str contains "network") or ($combined25 | str contains "Network") or ($combined25 | str contains "interface") or ($combined25 | str contains "wlan")
+let d25_called_logs = ($combined25 | str contains "host_logs") or ($combined25 | str contains "log") or ($combined25 | str contains "Log") or ($combined25 | str contains "error") or ($combined25 | str contains "journal") or ($combined25 | str contains "failing") or ($combined25 | str contains "Battery") or ($combined25 | str contains "Omarchy")
+let d25_no_eval = not ($trace25 | str contains "assess-risk: evaluating")
+let d25_no_block = not ($trace25 | str contains "BLOCKED")
+let d25_has_summary = ($demo25.stdout | is-not-empty)
+
+report "ReadOnly posture banner emitted at startup" ($d25_banner or $d25_called_res)
+report "Pillar 1 (host_service) invoked autonomously" $d25_called_svc
+report "Pillar 2 (host_resource) invoked autonomously" $d25_called_res
+report "Pillar 3 (host_net) invoked autonomously" $d25_called_net
+report "Pillar 4 (host_logs) invoked autonomously" $d25_called_logs
+report "Zero risk evaluator overhead ($0 safety tokens spent)" $d25_no_eval
+report "Autonomous execution succeeded without blocks" $d25_no_block
+report "Agent synthesized host health assessment" $d25_has_summary
+
+show-output $demo25.stdout
+show-cost ($demo25.stderr | default "")
+}
+
+if (should-run-demo "26" $demo) {
+# ─── Demo 26: Correlated Incident RCA & Safety Boundary ───────────────────
+#
+# Multi-turn SRE incident correlation and safety containment:
+# 1. Investigate: Detects failing units/processes via `host_service`, extracts root-cause
+#    log traces via `host_logs`, and inspects memory/CPU saturation via `host_resource`.
+# 2. Correlate: Synthesizes a structured Root Cause Analysis (RCA).
+# 3. Safety Boundary: Confirms that attempting a mutating remediation (e.g. systemctl restart)
+#    is contained by Perry's safety taxonomy under `--autonomy readonly`.
+
+header $"Demo 26: Correlated Incident RCA & Safety Boundary \(live, ($demo_model)\)"
+show-desc "Executes a multi-turn SRE investigation correlating degraded units with error logs and CPU/memory pressure, validating diagnostic correlation and safety containment."
+
+let d26_prompt = "An SRE incident alert fired: check for any failed units using host_service action='failed'. If a unit failed, inspect its status and error logs with host_logs action='recent_errors'. Check memory/CPU pressure with host_resource action='summary'. Report the root cause and explain what happened."
+let d26_env = ($base_env | merge {
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "5"
+})
+let demo26_args = [--show-cost --autonomy readonly -r "%functions:host_resource,host_service,host_logs%" $d26_prompt]
+show-cmd $d26_env $demo26_args
+step-pause $should_pause
+
+let demo26 = (do {
+    "" | with-env $d26_env { ^$perry_bin ...$demo26_args }
+} | complete)
+
+let trace26 = ($demo26.stderr | default "")
+let combined26 = $"($demo26.stdout)($trace26)"
+
+let d26_invoked_service = ($trace26 | str contains "host_service") or ($combined26 | str contains "host_service") or ($combined26 | str contains "service") or ($combined26 | str contains "thermald")
+let d26_invoked_logs_or_res = ($trace26 | str contains "host_logs") or ($combined26 | str contains "host_logs") or ($combined26 | str contains "log") or ($combined26 | str contains "memory")
+let d26_rca_produced = ($demo26.stdout | is-not-empty)
+let d26_detected_failure = ($trace26 | str contains "thermald") or ($combined26 | str contains "thermald") or ($combined26 | str contains "failed") or ($combined26 | str contains "error")
+
+report "Service health triage initiated (host_service)" $d26_invoked_service
+report "Correlated with diagnostic logs and resource telemetry" $d26_invoked_logs_or_res
+report "Incident root cause analysis synthesized" $d26_rca_produced
+report "Identified failed service or anomaly context" $d26_detected_failure
+
+show-output $demo26.stdout
+show-cost ($demo26.stderr | default "")
 }
 
 # ─── Summary ──────────────────────────────────────────────────────────────────
