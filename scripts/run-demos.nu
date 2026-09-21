@@ -1758,13 +1758,13 @@ if (should-run-demo "25" $demo) {
 header $"Demo 25: 4-Pillar Autonomous Host Telemetry Sweep \(live, ($demo_model)\)"
 show-desc "Performs an autonomous 4-pillar host health audit (Services, Resources, Network, Logs) under --autonomy readonly (A0), verifying zero evaluator overhead and structured JSON telemetry."
 
-let d25_prompt = "Perform a rapid 4-pillar host health audit. You MUST call host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. For each pillar, do not speak in generic high-level terms: cite concrete evidence and extract semantic key-value pairs relevant for troubleshooting (e.g. timestamps, PIDs, service/process names, file paths, network interfaces, drop counts, error messages). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
+let d25_prompt = "Perform a rapid host health audit anchored to the host identity and hardware baseline. You MUST call host_env with action='summary' to identify the host, OS, and hardware baseline, host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. For each pillar, do not speak in generic high-level terms: cite concrete evidence and extract semantic key-value pairs anchored to the host identity, OS, and hardware baseline (e.g. identify the host, OS, and CPU model/cores for CPU utilization, exact memory used out of total capacity in MB/GB for memory utilization, filesystem mount and device for storage, interface IP/MAC and drop counts, and exact service/binary/PID for services and logs). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
 let d25_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
-    PERRY_AGENT_LOOP_MAX_TURNS: "5"
+    PERRY_AGENT_LOOP_MAX_TURNS: "6"
 })
-let demo25_args = [--show-cost --autonomy readonly -r "%functions:host_resource,host_service,host_net,host_logs%" $d25_prompt]
+let demo25_args = [--show-cost --autonomy readonly -r "%functions:host_env,host_resource,host_service,host_net,host_logs%" $d25_prompt]
 show-cmd $d25_env $demo25_args
 step-pause $should_pause
 
@@ -1775,6 +1775,7 @@ let demo25 = (do {
 let trace25 = ($demo25.stderr | default "")
 
 let d25_banner = ($trace25 | str contains "safety posture: readonly")
+let d25_called_env = ($trace25 | str contains "calling: host_env")
 let d25_called_svc = ($trace25 | str contains "calling: host_service")
 let d25_called_res = ($trace25 | str contains "calling: host_resource")
 let d25_called_net = ($trace25 | str contains "calling: host_net")
@@ -1784,6 +1785,7 @@ let d25_no_block = not ($trace25 | str contains "BLOCKED")
 let d25_has_summary = ($demo25.stdout | is-not-empty)
 
 report "ReadOnly posture banner emitted at startup" $d25_banner
+report "Host & environment baseline (host_env) invoked autonomously" $d25_called_env
 report "Pillar 1 (host_service) invoked autonomously" $d25_called_svc
 report "Pillar 2 (host_resource) invoked autonomously" $d25_called_res
 report "Pillar 3 (host_net) invoked autonomously" $d25_called_net
