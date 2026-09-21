@@ -1,6 +1,6 @@
 ---
 name: sys_triage
-description: Comprehensive 4-pillar host triage and incident diagnosis runbook
+description: Comprehensive 5-pillar host triage and incident diagnosis runbook
 compatibility:
   os: [linux]
   tools: [host_env, host_resource, host_service, host_net, host_logs]
