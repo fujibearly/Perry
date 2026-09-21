@@ -1817,7 +1817,7 @@ let d26_prompt = "An SRE incident alert fired: follow the 'sys_triage' workflow 
 let d26_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
-    PERRY_AGENT_LOOP_MAX_TURNS: "6"
+    PERRY_AGENT_LOOP_MAX_TURNS: "8"
 })
 let demo26_args = [--show-cost --autonomy readonly --agent sre $d26_prompt]
 show-cmd $d26_env $demo26_args
@@ -1867,7 +1867,7 @@ let d27_prompt = "Perform an asynchronous timeframe telemetry analysis following
 let d27_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
-    PERRY_AGENT_LOOP_MAX_TURNS: "6"
+    PERRY_AGENT_LOOP_MAX_TURNS: "8"
 })
 let demo27_args = [--show-cost --autonomy readonly --agent sre $d27_prompt]
 show-cmd $d27_env $demo27_args
