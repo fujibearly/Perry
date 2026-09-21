@@ -37,12 +37,16 @@ pub struct DialogEvent {
 pub enum DialogOutputDestination {
     Terminal,
     Stderr,
+    Both,
 }
 
 pub fn dialog_output_destination() -> DialogOutputDestination {
     if let Ok(val) = crate::utils::get_env_var("DIALOG_OUTPUT") {
         if val.eq_ignore_ascii_case("stderr") {
             return DialogOutputDestination::Stderr;
+        }
+        if val.eq_ignore_ascii_case("both") || val.eq_ignore_ascii_case("tee") || val.eq_ignore_ascii_case("all") {
+            return DialogOutputDestination::Both;
         }
     }
     DialogOutputDestination::Terminal
@@ -181,6 +185,8 @@ mod tests {
         unsafe {
             std::env::set_var("AICHAT_DIALOG_OUTPUT", "stderr");
             assert_eq!(dialog_output_destination(), DialogOutputDestination::Stderr);
+            std::env::set_var("AICHAT_DIALOG_OUTPUT", "both");
+            assert_eq!(dialog_output_destination(), DialogOutputDestination::Both);
             std::env::set_var("AICHAT_DIALOG_OUTPUT", "tty");
             assert_eq!(dialog_output_destination(), DialogOutputDestination::Terminal);
             match prev {

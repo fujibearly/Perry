@@ -1761,7 +1761,7 @@ show-desc "Performs an autonomous 4-pillar host health audit (Services, Resource
 let d25_prompt = "Perform a rapid 4-pillar host health audit. You MUST call host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. Summarize each pillar (Resources, Services, Network, Logs) in a concise bullet."
 let d25_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
-    PERRY_DIALOG_OUTPUT: "stderr"
+    PERRY_DIALOG_OUTPUT: "both"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
 let demo25_args = [--show-cost --autonomy readonly -r "%functions:host_resource,host_service,host_net,host_logs%" $d25_prompt]
@@ -1812,7 +1812,7 @@ show-desc "Executes a multi-turn SRE investigation correlating degraded units wi
 let d26_prompt = "An SRE incident alert fired: check for any failed units using host_service action='failed'. If a unit failed, inspect its status and error logs with host_logs action='recent_errors'. Check memory/CPU pressure with host_resource action='summary'. Report findings and synthesize a diagnostic health assessment."
 let d26_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
-    PERRY_DIALOG_OUTPUT: "stderr"
+    PERRY_DIALOG_OUTPUT: "both"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
 let demo26_args = [--show-cost --autonomy readonly -r "%functions:host_resource,host_service,host_logs%" $d26_prompt]
@@ -1856,7 +1856,7 @@ show-desc "Performs an asynchronous timeframe telemetry analysis with dual-arm a
 let d27_prompt = "Analyze the host telemetry over the past 24 hours using host_logs with action='recent_errors' and since='24h'. Spot any critical singleton anomalies and volume surges, and summarize the ground-truth technical findings."
 let d27_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
-    PERRY_DIALOG_OUTPUT: "stderr"
+    PERRY_DIALOG_OUTPUT: "both"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
 let demo27_args = [--show-cost --autonomy readonly -r "%functions:host_logs%" $d27_prompt]

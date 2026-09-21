@@ -5121,6 +5121,15 @@ pub fn write_atomic_terminal_output(output: &str) {
                 let _ = stderr.flush();
             }
         }
+        DialogOutputDestination::Both => {
+            if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                let _ = tty.write_all(&buf);
+                let _ = tty.flush();
+            }
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(&buf);
+            let _ = stderr.flush();
+        }
     }
 }
 
@@ -5155,6 +5164,15 @@ pub fn emit_dialog_block_raw(block: &str) {
             } else {
                 write_atomic_terminal_output(block);
             }
+        }
+        DialogOutputDestination::Both => {
+            if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+                let _ = tty.write_all(&buf);
+                let _ = tty.flush();
+            }
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(&buf);
+            let _ = stderr.flush();
         }
     }
 }
@@ -5944,7 +5962,9 @@ pub fn render_event(
                 *direction,
                 content,
             );
-            if dialog_output_destination() == DialogOutputDestination::Stderr {
+            if dialog_output_destination() == DialogOutputDestination::Stderr
+                || dialog_output_destination() == DialogOutputDestination::Both
+            {
                 emit_dialog_block_raw(&block);
             } else if *IS_STDOUT_TERMINAL {
                 spinner.print_line(block)?;
