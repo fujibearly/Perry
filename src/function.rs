@@ -289,6 +289,10 @@ pub struct FunctionDeclaration {
     /// Governance metadata — never serialized to the LLM.
     #[serde(skip_serializing, default)]
     pub nano: Option<bool>,
+    /// Decoupled distillation type (backlog #18b), e.g. `"telemetry"`.
+    /// Governance/execution metadata — never serialized to the LLM.
+    #[serde(skip_serializing, default)]
+    pub distill: Option<String>,
 }
 
 impl FunctionDeclaration {
@@ -1437,6 +1441,7 @@ mod tests {
             reversible: None,
             reversible_via: None,
             nano: None,
+            distill: None,
         };
         decl.enrich_agent_permissions_schema();
         let props = decl.parameters.properties.unwrap();

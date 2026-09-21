@@ -194,6 +194,18 @@ pub enum AgentLoopEvent {
         reason: String,
         unwound: bool,
     },
+    TelemetryDistillationStart {
+        tool: String,
+        model: String,
+    },
+    TelemetryDistillationComplete {
+        tool: String,
+        duration: Duration,
+    },
+    TelemetryDistillationFallback {
+        tool: String,
+        reason: String,
+    },
 }
 
 /// Thread-safe progress tracker for the agent loop.
@@ -1829,6 +1841,201 @@ async fn run_risk_evaluator(
     res
 }
 
+/// Backlog #18b: Invoke the `%distill-telemetry%` role to synthesize a structured,
+/// canonical SRE fact from raw tool telemetry (such as host_logs).
+/// Decoupled from the primary orchestrator, reusing the safety/risk evaluator model endpoint.
+/// Falls back to raw payload gracefully on any model/network/parsing error.
+async fn run_telemetry_distiller(
+    config: &GlobalConfig,
+    tool_name: &str,
+    raw_payload: serde_json::Value,
+    progress: Option<&AgentLoopProgress>,
+) -> serde_json::Value {
+    use crate::client::{Model, ModelType};
+    use crate::config::{Input, RoleLike, ASSESS_RISK_ROLE, DISTILL_TELEMETRY_ROLE};
+
+    let distill_model_opt = config
+        .read()
+        .safety
+        .risk_model
+        .clone()
+        .or_else(|| config.read().role_model_id(DISTILL_TELEMETRY_ROLE))
+        .or_else(|| config.read().role_model_id(ASSESS_RISK_ROLE))
+        .or_else(|| {
+            let id = config.read().model_id.clone();
+            if id.is_empty() {
+                None
+            } else {
+                Some(id)
+            }
+        });
+
+    let distill_model = match distill_model_opt {
+        Some(m) if !m.is_empty() => m,
+        _ => {
+            if let Some(p) = progress {
+                p.emit(AgentLoopEvent::TelemetryDistillationFallback {
+                    tool: tool_name.to_string(),
+                    reason: "no model configured for distillation".to_string(),
+                });
+            }
+            return raw_payload;
+        }
+    };
+
+    let mut role = match config.read().retrieve_role(DISTILL_TELEMETRY_ROLE) {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(p) = progress {
+                p.emit(AgentLoopEvent::TelemetryDistillationFallback {
+                    tool: tool_name.to_string(),
+                    reason: format!("could not retrieve role '{DISTILL_TELEMETRY_ROLE}': {e}"),
+                });
+            }
+            return raw_payload;
+        }
+    };
+
+    if role.model_id() != Some(&distill_model) {
+        if let Ok(model) = Model::retrieve_model(&config.read(), &distill_model, ModelType::Chat) {
+            role.set_model(model);
+        }
+    }
+
+    let payload_str = match serde_json::to_string_pretty(&raw_payload) {
+        Ok(s) => s,
+        Err(_) => raw_payload.to_string(),
+    };
+
+    if let Some(p) = progress {
+        p.emit(AgentLoopEvent::TelemetryDistillationStart {
+            tool: tool_name.to_string(),
+            model: distill_model.clone(),
+        });
+    }
+
+    let start_time = std::time::Instant::now();
+    let input = Input::from_str(config, &payload_str, Some(role.to_role()));
+    let model_name = role.model().id().to_string();
+
+    let eval_tokens = match input.build_messages() {
+        Ok(mut msgs) => {
+            crate::client::patch_messages(&mut msgs, role.model());
+            Some(role.model().total_tokens(&msgs))
+        }
+        Err(_) => None,
+    };
+
+    let show_dialog = config.read().agent_loop.show_dialog;
+    let no_truncate = config.read().agent_loop.dialog_no_truncate;
+    let pid = std::process::id();
+
+    if show_dialog {
+        let prompt_display = truncate_payload_dialog(&payload_str, 20, 20, no_truncate);
+        if let Some(p) = progress {
+            p.emit(AgentLoopEvent::DialogBlock {
+                agent: DISTILL_TELEMETRY_ROLE.to_string(),
+                model: Some(model_name.clone()),
+                tokens: eval_tokens,
+                pid,
+                turn: 1,
+                max_turns: 1,
+                direction: DialogDirection::Request,
+                content: prompt_display,
+            });
+        } else {
+            emit_dialog_block_with_model(
+                DISTILL_TELEMETRY_ROLE,
+                &model_name,
+                eval_tokens,
+                pid,
+                1,
+                1,
+                DialogDirection::Request,
+                &prompt_display,
+            );
+        }
+    }
+
+    let res = input.fetch_chat_text().await;
+    match res {
+        Ok(text) => {
+            if show_dialog {
+                let response_content = truncate_payload_dialog(&text, 20, 20, no_truncate);
+                if let Some(p) = progress {
+                    p.emit(AgentLoopEvent::DialogBlock {
+                        agent: DISTILL_TELEMETRY_ROLE.to_string(),
+                        model: Some(model_name.clone()),
+                        tokens: None,
+                        pid,
+                        turn: 1,
+                        max_turns: 1,
+                        direction: DialogDirection::Response,
+                        content: response_content.clone(),
+                    });
+                } else {
+                    emit_dialog_block_with_model(
+                        DISTILL_TELEMETRY_ROLE,
+                        &model_name,
+                        None,
+                        pid,
+                        1,
+                        1,
+                        DialogDirection::Response,
+                        &response_content,
+                    );
+                }
+            }
+
+            let clean_text = text.trim();
+            let json_str = if clean_text.starts_with("```") {
+                let stripped = clean_text
+                    .strip_prefix("```json")
+                    .or_else(|| clean_text.strip_prefix("```"))
+                    .unwrap_or(clean_text);
+                let stripped = stripped.strip_suffix("```").unwrap_or(stripped);
+                stripped.trim()
+            } else {
+                clean_text
+            };
+
+            match serde_json::from_str::<serde_json::Value>(json_str) {
+                Ok(mut parsed) => {
+                    let elapsed = start_time.elapsed();
+                    if let Some(p) = progress {
+                        p.emit(AgentLoopEvent::TelemetryDistillationComplete {
+                            tool: tool_name.to_string(),
+                            duration: elapsed,
+                        });
+                    }
+                    if let serde_json::Value::Object(ref mut map) = parsed {
+                        map.insert("distilled".to_string(), serde_json::json!(true));
+                    }
+                    parsed
+                }
+                Err(e) => {
+                    if let Some(p) = progress {
+                        p.emit(AgentLoopEvent::TelemetryDistillationFallback {
+                            tool: tool_name.to_string(),
+                            reason: format!("JSON parse error: {e}"),
+                        });
+                    }
+                    raw_payload
+                }
+            }
+        }
+        Err(err) => {
+            if let Some(p) = progress {
+                p.emit(AgentLoopEvent::TelemetryDistillationFallback {
+                    tool: tool_name.to_string(),
+                    reason: format!("LLM completion error: {err}"),
+                });
+            }
+            raw_payload
+        }
+    }
+}
+
 /// Prompt the human operator when an action requiring Human authority reaches the root orchestrator (FR-6d.8).
 fn prompt_human_verdict(
     tool_name: &str,
@@ -2575,11 +2782,21 @@ async fn eval_single_tool(
     }
 
     // Route 3: Shell-exec tools (wrapped in spawn_blocking)
-    let config = config.clone();
-    let call = call.clone();
-    tokio::task::spawn_blocking(move || call.eval_shell(&config))
+    let config_clone = config.clone();
+    let call_clone = call.clone();
+    let result = tokio::task::spawn_blocking(move || call_clone.eval_shell(&config_clone))
         .await
-        .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))?
+        .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))??;
+
+    let decl = find_tool_declaration(config, &call.name);
+    if let Some(decl) = decl {
+        if decl.distill.as_deref() == Some("telemetry") {
+            if !result.is_object() || result.get("error").is_none() {
+                return Ok(run_telemetry_distiller(config, &call.name, result, progress).await);
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Spawn a sub-agent as a separate aichat process.
@@ -3206,6 +3423,7 @@ pub fn plan_tool_declaration() -> FunctionDeclaration {
         reversible: Some(true),
         reversible_via: None,
         nano: None,
+        distill: None,
     }
 }
 
@@ -3944,6 +4162,9 @@ static AGENT_LABEL_COLORS: std::sync::LazyLock<parking_lot::Mutex<std::collectio
 pub fn agent_color(name: &str) -> nu_ansi_term::Color {
     if name == "%assess-risk%" || name == "assess-risk" {
         return nu_ansi_term::Color::Red;
+    }
+    if name == "%distill-telemetry%" || name == "distill-telemetry" {
+        return nu_ansi_term::Color::Cyan;
     }
     if name.starts_with("%functions") {
         return nu_ansi_term::Color::LightCyan;
@@ -5312,6 +5533,26 @@ pub fn format_trace_event_styled(
                 Some(format!("{agent_tag} BLOCK {name}: {desc}"))
             }
         }
+        AgentLoopEvent::TelemetryDistillationStart { tool, model } => {
+            Some(format!("{agent_tag} distill-telemetry: distilling {tool} with {model}"))
+        }
+        AgentLoopEvent::TelemetryDistillationComplete { tool, duration } => {
+            let dur_str = format!("{:.2?}", duration);
+            if is_styled {
+                let tag = nu_ansi_term::Color::Cyan.paint("distill-telemetry");
+                Some(format!("{agent_tag} {tag}: distilled {tool} ({dur_str})"))
+            } else {
+                Some(format!("{agent_tag} distill-telemetry: distilled {tool} ({dur_str})"))
+            }
+        }
+        AgentLoopEvent::TelemetryDistillationFallback { tool, reason } => {
+            if is_styled {
+                let tag = nu_ansi_term::Color::Yellow.paint("distill-telemetry");
+                Some(format!("{agent_tag} {tag}: fallback for {tool} ({reason})"))
+            } else {
+                Some(format!("{agent_tag} distill-telemetry: fallback for {tool} ({reason})"))
+            }
+        }
         AgentLoopEvent::DialogBlock { .. } => None,
     }
 }
@@ -6147,6 +6388,28 @@ agent_loop:
         };
         let line = format_trace_event(&event, pid).unwrap();
         assert_eq!(line, format!("{pid_str} 1234 tok @ gemini:gemini-2.5-flash [turn 1/5] starting"));
+
+        // Telemetry Distillation events
+        let event = AgentLoopEvent::TelemetryDistillationStart {
+            tool: "host_logs".to_string(),
+            model: "gemini:gemini-2.5-flash".to_string(),
+        };
+        let line = format_trace_event(&event, pid).unwrap();
+        assert_eq!(line, format!("{pid_str} distill-telemetry: distilling host_logs with gemini:gemini-2.5-flash"));
+
+        let event = AgentLoopEvent::TelemetryDistillationComplete {
+            tool: "host_logs".to_string(),
+            duration: Duration::from_millis(450),
+        };
+        let line = format_trace_event(&event, pid).unwrap();
+        assert!(line.contains("distill-telemetry: distilled host_logs"));
+
+        let event = AgentLoopEvent::TelemetryDistillationFallback {
+            tool: "host_logs".to_string(),
+            reason: "timeout".to_string(),
+        };
+        let line = format_trace_event(&event, pid).unwrap();
+        assert_eq!(line, format!("{pid_str} distill-telemetry: fallback for host_logs (timeout)"));
     }
 
     #[test]
@@ -8956,6 +9219,32 @@ agent_loop:
         assert!(res_rev_ok.is_ok());
         let res_rev_err = DelegatedPermissions::resolve_for_call(&args_disruptive, false, AuthorityCeiling::UpTo(BlastRadius::Reversible));
         assert!(res_rev_err.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_telemetry_distillation_fallback_when_no_model() {
+        let config = crate::config::Config::default();
+        let global_config = std::sync::Arc::new(parking_lot::RwLock::new(config));
+        let raw = serde_json::json!({
+            "status": "ok",
+            "volume_surges": [{"count": 42, "unit": "test.service"}],
+            "critical_singletons": []
+        });
+
+        let distilled = run_telemetry_distiller(&global_config, "host_logs", raw.clone(), None).await;
+        assert_eq!(distilled, raw);
+    }
+
+    #[test]
+    fn test_function_declaration_deserializes_distill_metadata() {
+        let decl_json = serde_json::json!({
+            "name": "host_logs",
+            "description": "Log inspector",
+            "parameters": {"type": "object"},
+            "distill": "telemetry"
+        });
+        let decl: crate::function::FunctionDeclaration = serde_json::from_value(decl_json).unwrap();
+        assert_eq!(decl.distill.as_deref(), Some("telemetry"));
     }
 }
 

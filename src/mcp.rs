@@ -491,6 +491,7 @@ fn cached_tool_to_entry(server_name: &str, tool: &CachedTool) -> McpToolEntry {
             reversible: None,
             reversible_via: None,
             nano: None,
+            distill: None,
         },
     }
 }

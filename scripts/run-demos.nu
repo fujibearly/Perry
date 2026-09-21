@@ -307,7 +307,7 @@ def main [
     --demo (-t): string = "", # Run only a specific demo (e.g. --demo 3 or -t 10b)
     --wslinks,                # Enable link exploration mode for web searches across demos
 ] {
-    let valid_demos = ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26"]
+    let valid_demos = ["1", "2", "3", "4", "5", "5b", "6", "7", "8", "9", "10", "10b", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27"]
     if ($demo | is-not-empty) and not (($demo | str lowercase) in $valid_demos) {
         print $"(ansi red_bold)ERROR:(ansi reset) Unknown demo '($demo)'. Valid demos: ($valid_demos | str join ', ')"
         exit 1
@@ -1837,6 +1837,52 @@ report "Synthesized structured telemetry assessment" $d26_assessment_synthesized
 
 show-output $demo26.stdout
 show-cost ($demo26.stderr | default "")
+}
+
+if (should-run-demo "27" $demo) {
+# ─── Demo 27: Arbitrary Timeframe Telemetry & Decoupled Distillation ────────
+#
+# Backlog Item #18b: Arbitrary Lookbacks, Dual-Arm Anomaly Spotting & Decoupled Distillation
+# Tests:
+# 1. Arbitrary Lookback Query: Passing `since='24h'` to host_logs to inspect historical telemetry.
+# 2. Dual-Arm Anomaly Spotting: Actuator clusters volume surges and surfaces critical singletons.
+# 3. Transparent Decoupled Distillation Tap: Perry intercepts the bounded payload and invokes
+#    %distill-telemetry% via the evaluator model endpoint, leaving the orchestrator context clean.
+# 4. Synthesizes a structured incident report citing singleton anomalies or surge patterns.
+
+header $"Demo 27: Arbitrary Timeframe Telemetry & Decoupled Distillation \(live, ($demo_model)\)"
+show-desc "Performs an asynchronous timeframe telemetry analysis with dual-arm anomaly spotting (critical singletons vs volume surges) and transparent decoupled LLM distillation under --autonomy readonly (A0)."
+
+let d27_prompt = "Analyze the host telemetry over the past 24 hours using host_logs with action='recent_errors' and since='24h'. Spot any critical singleton anomalies and volume surges, and summarize the ground-truth technical findings."
+let d27_env = ($base_env | merge {
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_DIALOG_OUTPUT: "stderr"
+    PERRY_AGENT_LOOP_MAX_TURNS: "5"
+})
+let demo27_args = [--show-cost --autonomy readonly -r "%functions:host_logs%" $d27_prompt]
+show-cmd $d27_env $demo27_args
+step-pause $should_pause
+
+let demo27 = (do {
+    "" | with-env $d27_env { ^$perry_bin ...$demo27_args }
+} | complete)
+
+let trace27 = ($demo27.stderr | default "")
+
+let d27_called_logs = ($trace27 | str contains "calling: host_logs")
+let d27_distill_tapped = ($trace27 | str contains "distill-telemetry:")
+let d27_no_eval = not ($trace27 | str contains "assess-risk: evaluating")
+let d27_no_block = not ($trace27 | str contains "BLOCKED")
+let d27_has_summary = ($demo27.stdout | is-not-empty)
+
+report "Pillar 4 (host_logs) invoked with historical timeframe" $d27_called_logs
+report "Decoupled distillation tap executed (%distill-telemetry%)" $d27_distill_tapped
+report "Zero risk evaluator overhead ($0 safety tokens spent)" $d27_no_eval
+report "Autonomous execution succeeded without blocks" $d27_no_block
+report "Agent synthesized ground-truth anomaly report" $d27_has_summary
+
+show-output $demo27.stdout
+show-cost ($demo27.stderr | default "")
 }
 
 # ─── Summary ──────────────────────────────────────────────────────────────────

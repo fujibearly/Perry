@@ -402,6 +402,7 @@ pub fn read_skill_tool_declaration() -> FunctionDeclaration {
         reversible: Some(true),
         reversible_via: None,
         nano: None,
+        distill: None,
     }
 }
 

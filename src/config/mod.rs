@@ -6,7 +6,8 @@ mod session;
 pub use self::agent::{complete_agent_variables, list_agents, Agent, AgentVariables, SkillSetting};
 pub use self::input::Input;
 pub use self::role::{
-    Role, RoleLike, ASSESS_RISK_ROLE, CODE_ROLE, CREATE_TITLE_ROLE, EXPLAIN_SHELL_ROLE, SHELL_ROLE,
+    Role, RoleLike, ASSESS_RISK_ROLE, CODE_ROLE, CREATE_TITLE_ROLE, DISTILL_TELEMETRY_ROLE,
+    EXPLAIN_SHELL_ROLE, SHELL_ROLE,
 };
 use self::session::Session;
 
