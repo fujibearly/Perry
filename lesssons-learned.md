@@ -234,3 +234,17 @@ This document captures architectural lessons, debugging insights, and operationa
 - **Actionable Rule for Agents:**
   *Always synchronize compiled schemas via `argc build` or `argc build@agent <name>` immediately after altering tool comment metadata.*
 
+---
+
+### [2026-09-21T14:25:00-04:00] Test Concurrency: Environment Variable Mutexes Require Serial Execution
+- **Category:** Testing & Concurrency
+- **Problem:**
+  The test suite contains over 560 unit and integration tests. Several tests validate authority ceilings, capability masks, and escalation depths by mutating process-wide environment variables (`AICHAT_AUTHORITY_CEILING`, `AICHAT_AGENT_DEPTH`, etc.) guarded by `MASK_ENV_LOCK`. Running the entire test suite in parallel via standard `cargo test` allows concurrent threads reading environment variables outside the lock to race or block in futex waits.
+- **Consequence:**
+  Running unconstrained parallel `cargo test` across all modules intermittently blocks or stalls tests indefinitely on mutex locks.
+- **Resolution:**
+  When executing the full suite of unit and integration tests covering environment-sensitive safety gates, execute tests serially using `cargo test -- --test-threads=1`.
+- **Actionable Rule for Agents:**
+  *When validating the entire test suite in CI or local verification, use `cargo test -- --test-threads=1` to guarantee deterministic execution of environment-guarded safety tests.*
+
+
