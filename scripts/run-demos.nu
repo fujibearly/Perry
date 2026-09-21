@@ -26,7 +26,7 @@
 #   19 — Authority Ceiling Fail-Closed       → safe ceiling blocks (even with reversibility)
 #   20 — Orchestrator Sub-Agent Authority Escalation → mutating sub-agent authority_exceeded -> mTLS Should Gate -> Continue
 #   21 — Sub-Agent Capability Block & Re-Delegation  → readonly sub-agent capability_denied -> unwind -> permission_blocked -> orchestrator re-delegates mutating
-#   22 — Progressive Disclosure Runbook (sys_triage) → in-thread read_skill execution
+#   22 — Progressive Disclosure Runbook (host_stamp) → in-thread read_skill execution
 #   23 — Workspace Skill Discovery & Provenance Taint → untrusted_runbook in %assess-risk%
 #   24 — Autonomy Ladder presets             → readonly (Gate 1 block), reversible (Option B), consult (funnel)
 #
@@ -1500,19 +1500,19 @@ if ($d21_target | path exists) { rm -f $d21_target }
 }
 
 if (should-run-demo "22" $demo) {
-# ─── Demo 22: Progressive Disclosure Runbook (sys_triage — Builtin, Trusted) ───
+# ─── Demo 22: Progressive Disclosure Runbook (host_stamp — Builtin, Trusted) ───
 
-header $"Demo 22: Progressive Disclosure Runbook \(sys_triage — Builtin, Trusted\) \(live, ($demo_model)\)"
+header $"Demo 22: Progressive Disclosure Runbook \(host_stamp — Builtin, Trusted\) \(live, ($demo_model)\)"
 show-desc "Demonstrates SKILL.md progressive disclosure: prompt contains minimal catalog (~25 tokens), model calls read_skill in-thread to load procedural instructions on demand, and executes tools."
 
-let d22_target = ($nu.temp-dir | path join $"perry-triage-($nu.pid).txt")
+let d22_target = ($nu.temp-dir | path join $"perry-host-stamp-($nu.pid).txt")
 if ($d22_target | path exists) { rm -f $d22_target }
 
-let d22_prompt = $"You MUST follow the 'sys_triage' skill procedure. Start by calling read_skill with name='sys_triage'. Write your final summary report to ($d22_target) and output it to the terminal. Do not answer without following the runbook."
+let d22_prompt = $"You MUST follow the 'host_stamp' skill procedure. Start by calling read_skill with name='host_stamp'. Write your final summary report to ($d22_target) and output it to the terminal. Do not answer without following the runbook."
 let d22_env = ($base_env | merge {
     PERRY_SAFETY_DEFAULT_CEILING: "destructive"
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
-    PERRY_AGENT_LOOP_MAX_TURNS: "5"
+    PERRY_AGENT_LOOP_MAX_TURNS: "6"
 })
 let demo22_args = [--show-cost -r "%functions:get_current_time,fs_cat,fs_write%" $d22_prompt]
 show-cmd $d22_env $demo22_args
@@ -1538,14 +1538,14 @@ let d22_write_called = ($trace22 | str contains "fs_write") or ($clean22 | str c
 let d22_file_written = ($d22_target | path exists)
 let d22_file_content_ok = if $d22_file_written {
     let content = (open $d22_target | default "")
-    ($content | str contains "TRIAGE_VERIFIED:")
+    ($content | str contains "HOST_STAMP_VERIFIED:") or ($content | str contains "TRIAGE_VERIFIED:")
 } else { false }
-let d22_terminal_content_ok = ($demo22.stdout | str contains "TRIAGE_VERIFIED:") or ($combined22 | str contains "TRIAGE_VERIFIED:")
+let d22_terminal_content_ok = ($demo22.stdout | str contains "HOST_STAMP_VERIFIED:") or ($demo22.stdout | str contains "TRIAGE_VERIFIED:") or ($combined22 | str contains "HOST_STAMP_VERIFIED:") or ($combined22 | str contains "TRIAGE_VERIFIED:")
 
 report "read_skill tool called and executed in-thread" ($d22_read_called or $d22_file_written)
 report "Runbook sequence executed (time + cat + write)" (($d22_time_called and $d22_cat_called and $d22_write_called) or $d22_file_written)
-report "Triage summary report written to file with verified format" ($d22_file_written and $d22_file_content_ok)
-report "Triage summary report output to terminal" $d22_terminal_content_ok
+report "Host stamp summary report written to file with verified format" ($d22_file_written and $d22_file_content_ok)
+report "Host stamp summary report output to terminal" $d22_terminal_content_ok
 show-output $demo22.stdout
 show-cost ($demo22.stderr | default "")
 
@@ -1758,7 +1758,7 @@ if (should-run-demo "25" $demo) {
 header $"Demo 25: 4-Pillar Autonomous Host Telemetry Sweep \(live, ($demo_model)\)"
 show-desc "Performs an autonomous 4-pillar host health audit (Services, Resources, Network, Logs) under --autonomy readonly (A0), verifying zero evaluator overhead and structured JSON telemetry."
 
-let d25_prompt = "Perform a rapid host health audit anchored to the host identity and hardware baseline. You MUST call host_env with action='summary' to identify the host, OS, and hardware baseline, host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. For each pillar, do not speak in generic high-level terms: cite concrete evidence and extract semantic key-value pairs anchored to the host identity, OS, and hardware baseline (e.g. identify the host, OS, and CPU model/cores for CPU utilization, exact memory used out of total capacity in MB/GB for memory utilization, filesystem mount and device for storage, interface IP/MAC and drop counts, and exact service/binary/PID for services and logs). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
+let d25_prompt = "Perform a rapid host health audit following the 'sys_triage' procedure. You MUST call host_env with action='summary' to identify the host, OS, and hardware baseline, host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. For each pillar, do not speak in generic high-level terms: cite concrete evidence and extract semantic key-value pairs anchored to the host identity, OS, and hardware baseline (e.g. identify the host, OS, and CPU model/cores for CPU utilization, exact memory used out of total capacity in MB/GB for memory utilization, filesystem mount and device for storage, interface IP/MAC and drop counts, and exact service/binary/PID for services and logs). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
 let d25_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1811,7 +1811,7 @@ if (should-run-demo "26" $demo) {
 header $"Demo 26: Correlated Incident RCA & Safety Boundary \(live, ($demo_model)\)"
 show-desc "Executes a multi-turn SRE investigation correlating degraded units with error logs and CPU/memory pressure, validating diagnostic correlation and safety containment."
 
-let d26_prompt = "An SRE incident alert fired: check for any failed units using host_service action='failed'. If a unit failed, inspect its status and error logs with host_logs action='recent_errors'. Check memory/CPU pressure with host_resource action='summary'. Synthesize a diagnostic root cause analysis citing concrete evidence and extracted semantic key-value pairs (timestamps, PIDs, unit/process names, error descriptions, file paths). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
+let d26_prompt = "An SRE incident alert fired: follow the 'sys_triage' workflow to diagnose degraded units using host_service action='failed'. If a unit failed, inspect its status and error logs with host_logs action='recent_errors'. Check memory/CPU pressure with host_resource action='summary'. Synthesize a diagnostic root cause analysis citing concrete evidence and extracted semantic key-value pairs (timestamps, PIDs, unit/process names, error descriptions, file paths). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
 let d26_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1855,7 +1855,7 @@ if (should-run-demo "27" $demo) {
 header $"Demo 27: Arbitrary Timeframe Telemetry & Decoupled Distillation \(live, ($demo_model)\)"
 show-desc "Performs an asynchronous timeframe telemetry analysis with dual-arm anomaly spotting (critical singletons vs volume surges) and transparent decoupled LLM distillation under --autonomy readonly (A0)."
 
-let d27_prompt = "Analyze the host telemetry over the past 24 hours using host_logs with action='recent_errors' and since='24h'. Spot any critical singleton anomalies and volume surges, and synthesize the ground-truth technical findings citing concrete evidence and extracted semantic key-value pairs. If any artifacts were created (such as log queries or log dumps), surface them as clickable markdown hyperlinks with file:// URLs."
+let d27_prompt = "Perform an asynchronous timeframe telemetry analysis following the 'sys_triage' log investigation procedure over the past 24 hours using host_logs with action='recent_errors' and since='24h'. Spot any critical singleton anomalies and volume surges, and synthesize the ground-truth technical findings citing concrete evidence and extracted semantic key-value pairs. If any artifacts were created (such as log queries or log dumps), surface them as clickable markdown hyperlinks with file:// URLs."
 let d27_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"

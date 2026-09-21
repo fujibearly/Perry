@@ -1,31 +1,55 @@
 ---
 name: sys_triage
-description: Triage system identity and record timestamp
+description: Comprehensive 4-pillar host triage and incident diagnosis runbook
 compatibility:
   os: [linux]
-  tools: [get_current_time, fs_cat, fs_write]
-allowed_tools: [get_current_time, fs_cat, fs_write]
+  tools: [host_env, host_resource, host_service, host_net, host_logs]
+allowed_tools: [host_env, host_resource, host_service, host_net, host_logs]
 ---
 
-# System Triage Procedure
+# Comprehensive Host SRE Triage Procedure
 
-This runbook provides a structured workflow for capturing system identity and timestamps in a deterministic fashion.
+This runbook defines the canonical SRE procedure for triaging a host system across environment identity, service state, resource saturation, network integrity, and diagnostic log anomalies.
 
-## Steps
+## Triage Workflow
 
-1. **Capture Timestamp**: Call `get_current_time` and record the result. This establishes the audit moment.
-2. **Read System Hostname**: Call `fs_cat` on `/etc/hostname` to retrieve the system's registered identity.
-3. **Write Summary Report to File**: Call `fs_write` to persist the one-line summary `TRIAGE_VERIFIED: <hostname> at <timestamp>` to the designated output file.
-4. **Output to Terminal**: Print the exact one-line summary `TRIAGE_VERIFIED: <hostname> at <timestamp>` directly to the terminal as your response.
+Execute the following investigation pillars in sequence:
 
-## Success Criteria
+### 1. Environment & Hardware Baseline Anchor (`host_env`)
+- Call `host_env` with `action='summary'`.
+- Establish the canonical hostname, OS distribution, kernel version, CPU architecture/model/cores, total physical RAM, and virtualization/container boundary.
+- All subsequent metric interpretations must be anchored to this baseline.
 
-All operations complete without error. Both the designated output file and the terminal output contain the line:
+### 2. Service Lifecycle & Process Topology (`host_service`)
+- Call `host_service` with `action='failed'` to detect degraded units.
+- If degraded units exist:
+  - Note the unit name, load state, description, and unit file path (`unit_file`).
+  - Optionally call `host_service` with `action='status'` and `unit='<target>'` to inspect its failure code, PID, and recent journal output.
+- If high CPU or memory pressure is observed, call `host_service` with `action='top_procs'` to identify offending processes.
 
-TRIAGE_VERIFIED: <hostname> at <timestamp>
+### 3. Resource Saturation & Bottlenecks (`host_resource`)
+- Call `host_resource` with `action='summary'`.
+- Audit CPU utilization (busy %, I/O wait %, steal %) against the known core count from `host_env`.
+- Audit memory utilization (used MB vs total capacity, available MB, swap percentage and volume).
+- Audit root storage fullness (mount point, underlying block device, and percent used).
 
-## Notes
+### 4. Network Health & Packet Integrity (`host_net`)
+- Call `host_net` with `action='interfaces'`.
+- Check all physical and virtual interfaces for packet drops (`tx_dropped`, `rx_dropped`) and errors.
+- Identify degraded interfaces, noting IP and MAC addresses.
+- If socket starvation or backlog saturation is suspected, call `host_net` with `action='listen_queues'`.
 
-- This skill is intrinsically reversible (all operations on `/tmp/` or similar transient paths).
-- Do NOT modify system files like `/etc/hostname` or `/etc/fstab`.
-- Each run produces a unique output filename to avoid conflicts.
+### 5. Log Signatures & Anomaly Spotting (`host_logs`)
+- Call `host_logs` with `action='recent_errors'` (or with `since='24h'` for wider historical lookbacks).
+- Inspect dual-arm anomaly clusters:
+  - Flag critical singleton anomalies (OOM kills, kernel panics, segfaults, hardware resets).
+  - Flag volume surges (repeated service restart loops, connection retry storms).
+- Retain verbatim key evidence and materialize the log query and dump artifacts.
+
+## Incident Synthesis & Reporting Requirements
+
+Synthesize an executive and diagnostic health report adhering to these rules:
+1. **Anchor to Host Baseline**: State the host, OS, CPU model/cores, and memory baseline. Never report floating percentages in a vacuum (e.g. state "26.1% CPU utilization across 4 logical cores of Intel Core i7-7Y75 on host mordor" and "4,345 MB used out of 15,883 MB total system RAM").
+2. **Concrete Technical Evidence**: Cite verbatim evidence lines, affected PIDs, process names, unit files, and interface names.
+3. **Semantic Key-Value Extraction**: Dynamically extract all diagnostic attributes relevant to the findings without assuming a fixed schema.
+4. **Artifact Hyperlinks**: Surface any generated log queries or log dump artifacts as clickable markdown links with `file://` URLs (e.g. `[Log Dump](file:///tmp/perry-host_logs-dump-....log)`).
