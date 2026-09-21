@@ -54,9 +54,11 @@ use std::{
 #[tokio::main]
 async fn main() -> Result<()> {
     load_env_file()?;
-    if std::env::var("AICHAT_START_TIME_MS").is_err() {
+    if get_env_var("START_TIME_MS").is_err() {
         if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-            std::env::set_var("AICHAT_START_TIME_MS", duration.as_millis().to_string());
+            let ms = duration.as_millis().to_string();
+            std::env::set_var("PERRY_START_TIME_MS", &ms);
+            std::env::set_var("AICHAT_START_TIME_MS", &ms);
         }
     }
     let cli = Cli::parse();
@@ -455,20 +457,20 @@ async fn run_directive(
         .map(|a| a.name().to_string())
         .or_else(|| config.read().role.as_ref().map(|r| r.name().to_string()))
         .or_else(|| {
-            std::env::var("AICHAT_AGENT_NAME")
+            get_env_var("AGENT_NAME")
                 .ok()
                 .filter(|s| !s.is_empty())
         })
         .or_else(|| {
-            std::env::var("AICHAT_INVOKING_AGENT")
+            get_env_var("INVOKING_AGENT")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|inv| format!("nano-{inv}"))
         })
-        .unwrap_or_else(|| "aichat".to_string());
+        .unwrap_or_else(|| "perry".to_string());
 
     // Sub-agents (depth > 0) should not overwrite the pane title — only the root owns it.
-    let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
+    let current_depth: usize = get_env_var("AGENT_DEPTH")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -476,7 +478,8 @@ async fn run_directive(
     if current_depth > 0 {
         agent_loop_config.osc_title = false;
         agent_loop_config.notify = false;
-    } else if std::env::var("AICHAT_AGENT_COLOR").is_err() {
+    } else if get_env_var("AGENT_COLOR").is_err() {
+        std::env::set_var("PERRY_AGENT_COLOR", crate::agent_loop::AGENT_PALETTE[0].0);
         std::env::set_var("AICHAT_AGENT_COLOR", crate::agent_loop::AGENT_PALETTE[0].0);
     }
 
@@ -906,7 +909,7 @@ fn setup_logger(is_serve: bool) -> Result<()> {
         return Ok(());
     }
     let crate_name = env!("CARGO_CRATE_NAME");
-    let log_filter = match std::env::var(get_env_name("log_filter")) {
+    let log_filter = match get_env_var("log_filter") {
         Ok(v) => v,
         Err(_) => match is_serve {
             true => format!("{crate_name}::serve"),

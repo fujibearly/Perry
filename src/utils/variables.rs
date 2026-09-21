@@ -26,10 +26,7 @@ pub fn interpolate_variables(text: &mut String) {
                     .map(|v| v.display().to_string())
                     .unwrap_or_default(),
                 "__researcher_search_instructions__" => {
-                    if std::env::var("AICHAT_WSLINKS")
-                        .map(|v| v == "true" || v == "1")
-                        .unwrap_or(false)
-                    {
+                    if crate::utils::get_env_bool("WSLINKS").unwrap_or(false) {
                         "1. Search for information on the given topic (use web_search with links=true to discover source URLs)\n2. Fetch 2-4 relevant pages for detail using fetch_and_summarize (no more)\n3. Return a concise, structured summary of your findings".to_string()
                     } else {
                         "1. Search for information on the given topic using web_search (with links=false). The tool returns a grounded, comprehensive summary with source citations directly.\n2. Return a concise, structured summary of your findings based on the grounded search results. Do NOT fetch individual web pages.".to_string()

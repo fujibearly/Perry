@@ -374,11 +374,19 @@ impl ParentListener {
 
     /// The env vars to pass to a spawned child so it can dial back and authenticate.
     pub fn child_env(&self) -> Result<Vec<(String, String)>> {
+        let addr = self.local_addr()?.to_string();
+        let fp = self.identity.fingerprint.clone();
+        let secret = self.tree_secret.clone();
+        let tree_id = self.tree_id.clone();
         Ok(vec![
-            ("AICHAT_AGENT_PARENT_ADDR".to_string(), self.local_addr()?.to_string()),
-            ("AICHAT_AGENT_PARENT_FP".to_string(), self.identity.fingerprint.clone()),
-            ("AICHAT_TREE_SECRET".to_string(), self.tree_secret.clone()),
-            ("AICHAT_TREE_ID".to_string(), self.tree_id.clone()),
+            ("PERRY_AGENT_PARENT_ADDR".to_string(), addr.clone()),
+            ("AICHAT_AGENT_PARENT_ADDR".to_string(), addr),
+            ("PERRY_AGENT_PARENT_FP".to_string(), fp.clone()),
+            ("AICHAT_AGENT_PARENT_FP".to_string(), fp),
+            ("PERRY_TREE_SECRET".to_string(), secret.clone()),
+            ("AICHAT_TREE_SECRET".to_string(), secret),
+            ("PERRY_TREE_ID".to_string(), tree_id.clone()),
+            ("AICHAT_TREE_ID".to_string(), tree_id),
         ])
     }
 
@@ -448,15 +456,15 @@ pub struct ParentConnInfo {
 
 impl ParentConnInfo {
     pub fn from_env() -> Option<ParentConnInfo> {
-        let addr = std::env::var("AICHAT_AGENT_PARENT_ADDR").ok()?;
-        let fingerprint = std::env::var("AICHAT_AGENT_PARENT_FP")
-            .or_else(|_| std::env::var("AICHAT_AGENT_PARENT_FINGERPRINT"))
+        let addr = crate::utils::get_env_var("AGENT_PARENT_ADDR").ok()?;
+        let fingerprint = crate::utils::get_env_var("AGENT_PARENT_FP")
+            .or_else(|_| crate::utils::get_env_var("AGENT_PARENT_FINGERPRINT"))
             .ok()?;
-        let tree_secret = std::env::var("AICHAT_TREE_SECRET")
-            .or_else(|_| std::env::var("AICHAT_AGENT_TREE_SECRET"))
+        let tree_secret = crate::utils::get_env_var("TREE_SECRET")
+            .or_else(|_| crate::utils::get_env_var("AGENT_TREE_SECRET"))
             .ok()?;
-        let tree_id = std::env::var("AICHAT_TREE_ID")
-            .or_else(|_| std::env::var("AICHAT_AGENT_TREE_ID"))
+        let tree_id = crate::utils::get_env_var("TREE_ID")
+            .or_else(|_| crate::utils::get_env_var("AGENT_TREE_ID"))
             .unwrap_or_default();
         Some(ParentConnInfo {
             addr,

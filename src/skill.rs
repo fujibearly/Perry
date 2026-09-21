@@ -180,13 +180,13 @@ impl SkillRegistry {
     }
 
     pub fn discover_default(config: &GlobalConfig) -> Self {
-        let workspace_dir = std::env::var("AICHAT_WORKSPACE_DIR")
+        let workspace_dir = crate::utils::get_env_var("WORKSPACE_DIR")
             .ok()
             .map(PathBuf::from)
             .or_else(|| std::env::current_dir().ok());
 
         let global_dir = Config::skills_dir();
-        let builtin_dir = std::env::var("AICHAT_BUILTIN_SKILLS_DIR")
+        let builtin_dir = crate::utils::get_env_var("BUILTIN_SKILLS_DIR")
             .ok()
             .map(PathBuf::from)
             .or_else(|| {
@@ -273,13 +273,13 @@ impl SkillRegistry {
 
 /// Helper function to retrieve eligible skills for an agent configuration.
 pub fn get_eligible_skills_for_config(config: &Config) -> Vec<Skill> {
-    let workspace_dir = std::env::var("AICHAT_WORKSPACE_DIR")
+    let workspace_dir = crate::utils::get_env_var("WORKSPACE_DIR")
         .ok()
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok());
 
     let global_dir = Config::skills_dir();
-    let builtin_dir = std::env::var("AICHAT_BUILTIN_SKILLS_DIR")
+    let builtin_dir = crate::utils::get_env_var("BUILTIN_SKILLS_DIR")
         .ok()
         .map(PathBuf::from);
 

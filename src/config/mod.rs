@@ -675,9 +675,9 @@ impl Config {
     pub async fn init(working_mode: WorkingMode, info_flag: bool) -> Result<Self> {
         let config_path = Self::config_file();
         let mut config = if !config_path.exists() {
-            match env::var(get_env_name("provider"))
+            match get_env_var("provider")
                 .ok()
-                .or_else(|| env::var(get_env_name("platform")).ok())
+                .or_else(|| get_env_var("platform").ok())
             {
                 Some(v) => Self::load_dynamic(&v)?,
                 None => {
@@ -716,13 +716,33 @@ impl Config {
     }
 
     pub fn config_dir() -> PathBuf {
-        if let Ok(v) = env::var(get_env_name("config_dir")) {
+        if let Ok(v) = get_env_var("config_dir") {
             PathBuf::from(v)
         } else if let Ok(v) = env::var("XDG_CONFIG_HOME") {
-            PathBuf::from(v).join(env!("CARGO_CRATE_NAME"))
+            let p = PathBuf::from(&v).join(env!("CARGO_CRATE_NAME"));
+            if p.exists() {
+                p
+            } else {
+                let legacy = PathBuf::from(&v).join("aichat");
+                if legacy.exists() {
+                    legacy
+                } else {
+                    p
+                }
+            }
         } else {
             let dir = dirs::config_dir().expect("No user's config directory");
-            dir.join(env!("CARGO_CRATE_NAME"))
+            let p = dir.join(env!("CARGO_CRATE_NAME"));
+            if p.exists() {
+                p
+            } else {
+                let legacy = dir.join("aichat");
+                if legacy.exists() {
+                    legacy
+                } else {
+                    p
+                }
+            }
         }
     }
 
@@ -731,14 +751,14 @@ impl Config {
     }
 
     pub fn config_file() -> PathBuf {
-        match env::var(get_env_name("config_file")) {
+        match get_env_var("config_file") {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(CONFIG_FILE_NAME),
         }
     }
 
     pub fn roles_dir() -> PathBuf {
-        match env::var(get_env_name("roles_dir")) {
+        match get_env_var("roles_dir") {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(ROLES_DIR_NAME),
         }
@@ -749,7 +769,7 @@ impl Config {
     }
 
     pub fn macros_dir() -> PathBuf {
-        match env::var(get_env_name("macros_dir")) {
+        match get_env_var("macros_dir") {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(MACROS_DIR_NAME),
         }
@@ -760,7 +780,7 @@ impl Config {
     }
 
     pub fn env_file() -> PathBuf {
-        match env::var(get_env_name("env_file")) {
+        match get_env_var("env_file") {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(ENV_FILE_NAME),
         }
@@ -768,7 +788,7 @@ impl Config {
 
     pub fn messages_file(&self) -> PathBuf {
         match &self.agent {
-            None => match env::var(get_env_name("messages_file")) {
+            None => match get_env_var("messages_file") {
                 Ok(value) => PathBuf::from(value),
                 Err(_) => Self::local_path(MESSAGES_FILE_NAME),
             },
@@ -778,7 +798,7 @@ impl Config {
 
     pub fn sessions_dir(&self) -> PathBuf {
         match &self.agent {
-            None => match env::var(get_env_name("sessions_dir")) {
+            None => match get_env_var("sessions_dir") {
                 Ok(value) => PathBuf::from(value),
                 Err(_) => Self::local_path(SESSIONS_DIR_NAME),
             },
@@ -787,21 +807,21 @@ impl Config {
     }
 
     pub fn rags_dir() -> PathBuf {
-        match env::var(get_env_name("rags_dir")) {
+        match get_env_var("rags_dir") {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(RAGS_DIR_NAME),
         }
     }
 
     pub fn functions_dir() -> PathBuf {
-        match env::var(get_env_name("functions_dir")) {
+        match get_env_var("functions_dir") {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(FUNCTIONS_DIR_NAME),
         }
     }
 
     pub fn skills_dir() -> PathBuf {
-        match env::var(get_env_name("skills_dir")) {
+        match get_env_var("skills_dir") {
             Ok(value) => PathBuf::from(value),
             Err(_) => Self::local_path(SKILLS_DIR_NAME),
         }
@@ -908,7 +928,7 @@ impl Config {
     }
 
     pub fn log_config(is_serve: bool) -> Result<(LevelFilter, Option<PathBuf>)> {
-        let log_level = env::var(get_env_name("log_level"))
+        let log_level = get_env_var("log_level")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(match cfg!(debug_assertions) {
@@ -924,7 +944,7 @@ impl Config {
         if log_level == LevelFilter::Off {
             return Ok((log_level, None));
         }
-        let log_path = match env::var(get_env_name("log_path")) {
+        let log_path = match get_env_var("log_path") {
             Ok(v) => Some(PathBuf::from(v)),
             Err(_) => match is_serve {
                 true => None,
@@ -1453,8 +1473,8 @@ impl Config {
                 self.validate_tool_names(tools)?;
                 r.set_name(name);
                 r.set_use_tools(Some(tools.to_string()));
-                // Priority 2: Ambient AICHAT_USE_TOOLS env override if explicitly set
-                if let Ok(env_tools) = env::var(get_env_name("use_tools")) {
+                // Priority 2: Ambient PERRY_USE_TOOLS / AICHAT_USE_TOOLS env override if explicitly set
+                if let Ok(env_tools) = get_env_var("use_tools") {
                     if !env_tools.is_empty() {
                         self.validate_tool_names(&env_tools)?;
                         r.set_use_tools(Some(env_tools));
@@ -3005,7 +3025,7 @@ impl Config {
     }
 
     fn load_envs(&mut self) {
-        if let Ok(v) = env::var(get_env_name("model")) {
+        if let Ok(v) = get_env_var("model") {
             self.model_id = v;
         }
         if let Some(v) = read_env_value::<f64>(&get_env_name("temperature")) {
@@ -3024,7 +3044,7 @@ impl Config {
         if let Some(Some(v)) = read_env_bool(&get_env_name("save")) {
             self.save = v;
         }
-        if let Ok(v) = env::var(get_env_name("keybindings")) {
+        if let Ok(v) = get_env_var("keybindings") {
             if v == "vi" {
                 self.keybindings = v;
             }
@@ -3042,7 +3062,7 @@ impl Config {
         if let Some(Some(v)) = read_env_bool(&get_env_name("function_calling")) {
             self.function_calling = v;
         }
-        if let Ok(v) = env::var(get_env_name("mapping_tools")) {
+        if let Ok(v) = get_env_var("mapping_tools") {
             if let Ok(v) = serde_json::from_str(&v) {
                 self.mapping_tools = v;
             }
@@ -3093,7 +3113,7 @@ impl Config {
             self.rag_template = v;
         }
 
-        if let Ok(v) = env::var(get_env_name("document_loaders")) {
+        if let Ok(v) = get_env_var("document_loaders") {
             if let Ok(v) = serde_json::from_str(&v) {
                 self.document_loaders = v;
             }
@@ -3504,7 +3524,7 @@ fn read_env_value<T>(key: &str) -> Option<Option<T>>
 where
     T: std::str::FromStr,
 {
-    let value = env::var(key).ok()?;
+    let value = get_env_var(key).ok()?;
     let value = parse_value(&value).ok()?;
     Some(value)
 }
@@ -3526,7 +3546,7 @@ where
 }
 
 fn read_env_bool(key: &str) -> Option<Option<bool>> {
-    let value = env::var(key).ok()?;
+    let value = get_env_var(key).ok()?;
     Some(parse_bool(&value))
 }
 

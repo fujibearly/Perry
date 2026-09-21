@@ -445,7 +445,7 @@ pub async fn eval_tool_calls_parallel(
 /// The mask is set on every spawned sub-agent via `AICHAT_CAPABILITY_MASK=readonly`.
 /// The top-level process has no such env var and is therefore unmasked.
 fn under_readonly_mask() -> bool {
-    std::env::var("AICHAT_CAPABILITY_MASK")
+    crate::utils::get_env_var("CAPABILITY_MASK")
         .map(|v| v.eq_ignore_ascii_case("readonly"))
         .unwrap_or(false)
 }
@@ -538,14 +538,14 @@ fn capability_denied_result(
 /// An unparseable env value fails safe to the minimal ceiling (`Safe`).
 fn current_authority_ceiling(config: &GlobalConfig) -> crate::safety::AuthorityCeiling {
     use crate::safety::AuthorityCeiling;
-    if let Ok(v) = std::env::var("AICHAT_AUTHORITY_CEILING") {
+    if let Ok(v) = crate::utils::get_env_var("AUTHORITY_CEILING") {
         return match crate::function::BlastRadius::from_str(&v) {
             Some(tier) => AuthorityCeiling::UpTo(tier),
             None => AuthorityCeiling::MINIMAL, // fail safe on garbage
         };
     }
     // Explicit fine-grained ceiling override takes top precedence over autonomy macro
-    if let Ok(v) = std::env::var("AICHAT_SAFETY_DEFAULT_CEILING") {
+    if let Ok(v) = crate::utils::get_env_var("SAFETY_DEFAULT_CEILING") {
         if let Some(tier) = crate::function::BlastRadius::from_str(&v) {
             return AuthorityCeiling::UpTo(tier);
         }
@@ -1937,11 +1937,11 @@ pub async fn get_or_init_child_client() -> Option<Arc<crate::escalation::ChildEs
     let client = CHILD_CLIENT
         .get_or_init(|| async {
             if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-                let depth = std::env::var("AICHAT_AGENT_DEPTH")
+                let depth = crate::utils::get_env_var("AGENT_DEPTH")
                     .ok()
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(0);
-                let agent_id = std::env::var("AICHAT_AGENT_NAME")
+                let agent_id = crate::utils::get_env_var("AGENT_NAME")
                     .unwrap_or_else(|_| format!("agent-d{depth}"));
                 match crate::escalation::ChildEscalationClient::connect(&parent_info, &agent_id, depth).await {
                     Ok(c) => Some(c),
@@ -1966,9 +1966,9 @@ async fn get_or_init_parent_listener(
 ) -> Result<Option<Arc<crate::escalation::ParentListener>>> {
     let listener = TREE_LISTENER
         .get_or_try_init(|| async {
-            let tree_id = std::env::var("AICHAT_TREE_ID")
+            let tree_id = crate::utils::get_env_var("TREE_ID")
                 .unwrap_or_else(|_| format!("tree-{}", uuid::Uuid::new_v4()));
-            let tree_secret = std::env::var("AICHAT_TREE_SECRET").unwrap_or_else(|_| {
+            let tree_secret = crate::utils::get_env_var("TREE_SECRET").unwrap_or_else(|_| {
                 crate::utils::sha256_bytes(format!("{}-{}", std::process::id(), uuid::Uuid::new_v4()).as_bytes())
             });
             let identity = Arc::new(crate::escalation::generate_tree_identity()?);
@@ -2245,7 +2245,7 @@ async fn handle_escalation_request(
 
     // 5. Over-ceiling: Re-escalate upward if parent exists (depth > 0)
     if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-        let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
+        let current_depth: usize = crate::utils::get_env_var("AGENT_DEPTH")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
@@ -2311,8 +2311,8 @@ fn record_pre_mutation_journal_entry(
 ) -> Option<String> {
     let (static_tier, _) = tool_tier_and_reversibility(config, &call.name);
     if static_tier != crate::function::StaticTier::Tier(crate::function::BlastRadius::Safe) {
-        let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
-        let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "agent".into());
+        let tree_id = crate::utils::get_env_var("TREE_ID").unwrap_or_else(|_| "tree-local".into());
+        let agent_id = crate::utils::get_env_var("AGENT_NAME").unwrap_or_else(|_| "agent".into());
         let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
         if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
             let entry_id = format!("entry-{}", uuid::Uuid::new_v4());
@@ -2467,8 +2467,8 @@ async fn eval_single_tool(
                     return Ok(json!({"error": {"type": "escalation_halted", "message": "Action halted by human operator"}}));
                 }
                 crate::safety::VerdictDecision::Revert => {
-                    let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
-                    let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "orchestrator".into());
+                    let tree_id = crate::utils::get_env_var("TREE_ID").unwrap_or_else(|_| "tree-local".into());
+                    let agent_id = crate::utils::get_env_var("AGENT_NAME").unwrap_or_else(|_| "orchestrator".into());
                     let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&config.read().safety.escalation_dir);
                     if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
                         let outcome = journal.replay_last().await?;
@@ -2591,7 +2591,7 @@ async fn eval_agent_tool_subprocess(
     call: &ToolCall,
 ) -> Result<(serde_json::Value, f64, TokenUsage)> {
     // 1. Check depth limit
-    let current_depth: usize = std::env::var("AICHAT_AGENT_DEPTH")
+    let current_depth: usize = crate::utils::get_env_var("AGENT_DEPTH")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
@@ -2629,29 +2629,45 @@ async fn eval_agent_tool_subprocess(
     let mut cmd = tokio::process::Command::new(&aichat_bin);
     cmd.arg("--agent").arg(&agent_name);
     cmd.arg("--show-cost");
-    if std::env::var("AICHAT_WSLINKS").map(|v| v == "true" || v == "1").unwrap_or(false) {
+
+    let set_dual_env = |c: &mut tokio::process::Command, key: &str, val: &str| {
+        let raw = key
+            .strip_prefix("PERRY_")
+            .or_else(|| key.strip_prefix("perry_"))
+            .or_else(|| key.strip_prefix("AICHAT_"))
+            .or_else(|| key.strip_prefix("aichat_"))
+            .unwrap_or(key);
+        let primary = crate::utils::get_env_name(raw);
+        let legacy = crate::utils::get_legacy_env_name(raw);
+        c.env(&primary, val);
+        if legacy != primary {
+            c.env(&legacy, val);
+        }
+    };
+
+    if crate::utils::get_env_bool("WSLINKS").unwrap_or(false) {
         cmd.arg("--wslinks");
-        cmd.env("AICHAT_WSLINKS", "true");
+        set_dual_env(&mut cmd, "WSLINKS", "true");
     }
     cmd.arg(&task_message);
 
     // Pass depth to child
-    cmd.env("AICHAT_AGENT_DEPTH", (current_depth + 1).to_string());
-    cmd.env("AICHAT_AGENT_NAME", &agent_name);
-    if let Ok(start_ms) = std::env::var("AICHAT_START_TIME_MS") {
-        cmd.env("AICHAT_START_TIME_MS", start_ms);
+    set_dual_env(&mut cmd, "AGENT_DEPTH", &(current_depth + 1).to_string());
+    set_dual_env(&mut cmd, "AGENT_NAME", &agent_name);
+    if let Ok(start_ms) = crate::utils::get_env_var("START_TIME_MS") {
+        set_dual_env(&mut cmd, "START_TIME_MS", &start_ms);
     }
 
     // Allocate mutually exclusive color for subagent
     static SUBAGENT_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     let subagent_seq = SUBAGENT_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    let parent_seq: usize = std::env::var("AICHAT_SUBAGENT_SEQ")
+    let parent_seq: usize = crate::utils::get_env_var("SUBAGENT_SEQ")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1);
     let subagent_color = allocate_subagent_color(current_depth, parent_seq, subagent_seq);
-    cmd.env("AICHAT_AGENT_COLOR", subagent_color);
-    cmd.env("AICHAT_SUBAGENT_SEQ", subagent_seq.to_string());
+    set_dual_env(&mut cmd, "AGENT_COLOR", subagent_color);
+    set_dual_env(&mut cmd, "SUBAGENT_SEQ", &subagent_seq.to_string());
 
     // Backlog #6d (FR-6d.18): hierarchical upfront permission provisioning.
     let parent_is_readonly = under_readonly_mask();
@@ -2676,8 +2692,8 @@ async fn eval_agent_tool_subprocess(
         }
     };
 
-    cmd.env("AICHAT_CAPABILITY_MASK", &provisioned_mask);
-    cmd.env("AICHAT_AUTHORITY_CEILING", provisioned_ceiling.tier().as_str());
+    set_dual_env(&mut cmd, "CAPABILITY_MASK", &provisioned_mask);
+    set_dual_env(&mut cmd, "AUTHORITY_CEILING", provisioned_ceiling.tier().as_str());
 
     // Backlog #6d: pass escalation listener connection parameters to child
     if let Ok(Some(listener)) = get_or_init_parent_listener(config).await {
@@ -2689,15 +2705,15 @@ async fn eval_agent_tool_subprocess(
     }
 
     // Inherit config dir so sub-agent sees same agents/tools/MCP
-    if let Ok(config_dir) = std::env::var("AICHAT_CONFIG_DIR") {
-        cmd.env("AICHAT_CONFIG_DIR", config_dir);
+    if let Ok(config_dir) = crate::utils::get_env_var("CONFIG_DIR") {
+        set_dual_env(&mut cmd, "CONFIG_DIR", &config_dir);
     }
 
     if config.read().agent_loop.show_dialog {
-        cmd.env("AICHAT_DIALOG_RELAY", "stderr");
-        cmd.env("AICHAT_AGENT_LOOP_SHOW_DIALOG", "true");
+        set_dual_env(&mut cmd, "DIALOG_RELAY", "stderr");
+        set_dual_env(&mut cmd, "AGENT_LOOP_SHOW_DIALOG", "true");
         if config.read().agent_loop.dialog_no_truncate {
-            cmd.env("AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE", "true");
+            set_dual_env(&mut cmd, "AGENT_LOOP_DIALOG_NO_TRUNCATE", "true");
         }
     }
 
@@ -3208,7 +3224,8 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     let _ = get_or_init_child_client().await;
 
     // Ensure root agent has a stable, exclusive color (default Cyan) if not set
-    if current_agent_depth() == 0 && std::env::var("AICHAT_AGENT_COLOR").is_err() {
+    if current_agent_depth() == 0 && crate::utils::get_env_var("AGENT_COLOR").is_err() {
+        std::env::set_var("PERRY_AGENT_COLOR", AGENT_PALETTE[0].0);
         std::env::set_var("AICHAT_AGENT_COLOR", AGENT_PALETTE[0].0);
     }
 
@@ -3216,6 +3233,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     if current_agent_depth() == 0 {
         if let Some(level) = params.config.read().safety.autonomy {
             if let Some(mask) = level.capability_mask() {
+                std::env::set_var("PERRY_CAPABILITY_MASK", mask);
                 std::env::set_var("AICHAT_CAPABILITY_MASK", mask);
             }
             if params.config.read().agent_loop.show_trace || params.config.read().multi_agent.show_trace {
@@ -3352,7 +3370,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
             });
             eprintln!(
                 "Warning: Agent loop exceeded the ${:.4} cost limit (spent ${:.4}). \
-                 Increase with `agent_loop.max_cost` in config.yaml or AICHAT_AGENT_LOOP_MAX_COST=N.",
+                 Increase with `agent_loop.max_cost` in config.yaml or PERRY_AGENT_LOOP_MAX_COST=N (or AICHAT_AGENT_LOOP_MAX_COST=N).",
                 max_cost, params.progress.cost()
             );
             if let Some(client) = get_or_init_child_client().await {
@@ -3388,8 +3406,8 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                     )
                     .await;
             } else if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-                let depth = std::env::var("AICHAT_AGENT_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
-                let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| format!("agent-d{depth}"));
+                let depth = crate::utils::get_env_var("AGENT_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                let agent_id = crate::utils::get_env_var("AGENT_NAME").unwrap_or_else(|_| format!("agent-d{depth}"));
                 let _ = crate::escalation::notify_parent_result(
                     &parent_info,
                     &agent_id,
@@ -3593,8 +3611,8 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
         });
 
         if let Some(denied_res) = blocked_denial {
-            let tree_id = std::env::var("AICHAT_TREE_ID").unwrap_or_else(|_| "tree-local".into());
-            let agent_id = std::env::var("AICHAT_AGENT_NAME").unwrap_or_else(|_| "agent".into());
+            let tree_id = crate::utils::get_env_var("TREE_ID").unwrap_or_else(|_| "tree-local".into());
+            let agent_id = crate::utils::get_env_var("AGENT_NAME").unwrap_or_else(|_| "agent".into());
             let journal_dir = crate::safety::RollbackJournal::resolve_journal_dir(&params.config.read().safety.escalation_dir);
             let unwound = if let Ok(journal) = crate::safety::RollbackJournal::open(&journal_dir, &tree_id, &agent_id) {
                 journal.replay_last().await.is_ok()
@@ -3650,7 +3668,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
                         )
                         .await;
                 } else if let Some(parent_info) = crate::escalation::ParentConnInfo::from_env() {
-                    let depth = std::env::var("AICHAT_AGENT_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+                    let depth = crate::utils::get_env_var("AGENT_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
                     let _ = crate::escalation::notify_parent_result(
                         &parent_info,
                         &agent_id,
@@ -3699,7 +3717,7 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
     params.progress.emit(AgentLoopEvent::BudgetExhausted { max_turns });
     eprintln!(
         "Warning: Agent loop reached the {}-turn limit without completing. \
-         Increase with `agent_loop.max_turns` in config.yaml or AICHAT_AGENT_LOOP_MAX_TURNS=N.",
+         Increase with `agent_loop.max_turns` in config.yaml or PERRY_AGENT_LOOP_MAX_TURNS=N (or AICHAT_AGENT_LOOP_MAX_TURNS=N).",
         max_turns
     );
 
@@ -3881,22 +3899,22 @@ pub fn current_agent_name(config: &GlobalConfig) -> String {
         .map(|a| a.name().to_string())
         .or_else(|| config.read().role.as_ref().map(|r| r.name().to_string()))
         .or_else(|| {
-            std::env::var("AICHAT_AGENT_NAME")
+            crate::utils::get_env_var("AGENT_NAME")
                 .ok()
                 .filter(|s| !s.is_empty())
         })
         .or_else(|| {
-            std::env::var("AICHAT_INVOKING_AGENT")
+            crate::utils::get_env_var("INVOKING_AGENT")
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|inv| format!("nano-{inv}"))
         })
-        .unwrap_or_else(|| "aichat".to_string())
+        .unwrap_or_else(|| "perry".to_string())
 }
 
 /// Helper to get current agent nesting depth (0 for root/orchestrator).
 pub fn current_agent_depth() -> usize {
-    std::env::var("AICHAT_AGENT_DEPTH")
+    crate::utils::get_env_var("AGENT_DEPTH")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(0)
@@ -3931,7 +3949,7 @@ pub fn agent_color(name: &str) -> nu_ansi_term::Color {
         return nu_ansi_term::Color::LightCyan;
     }
 
-    if let Ok(color_str) = std::env::var("AICHAT_AGENT_COLOR") {
+    if let Ok(color_str) = crate::utils::get_env_var("AGENT_COLOR") {
         if let Some(c) = color_from_name(&color_str) {
             return c;
         }
@@ -4408,7 +4426,7 @@ pub fn visible_width(s: &str) -> usize {
 /// Query active terminal width, supporting environment overrides (`AICHAT_TERMINAL_WIDTH`, `COLUMNS`)
 /// and crossterm detection, with safe default.
 pub fn get_terminal_width() -> usize {
-    if let Ok(val) = std::env::var("AICHAT_TERMINAL_WIDTH") {
+    if let Ok(val) = crate::utils::get_env_var("TERMINAL_WIDTH") {
         if let Ok(w) = val.parse::<usize>() {
             if w >= 20 {
                 return w;
@@ -4710,7 +4728,7 @@ pub fn petname_for_pid(pid: u32) -> String {
 
 /// Helper to identify the current process's petname, honoring inherited petnames for nanoworkers.
 pub fn current_agent_petname() -> String {
-    std::env::var("AICHAT_AGENT_PETNAME")
+    crate::utils::get_env_var("AGENT_PETNAME")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| petname_for_pid(std::process::id()))
@@ -4721,7 +4739,7 @@ pub fn current_agent_petname() -> String {
 /// the inherited petname is displayed instead of computing from PID.
 pub fn format_agent_pid(pid: u32) -> String {
     if pid == std::process::id() {
-        if let Ok(inherited) = std::env::var("AICHAT_AGENT_PETNAME") {
+        if let Ok(inherited) = crate::utils::get_env_var("AGENT_PETNAME") {
             if !inherited.is_empty() {
                 return format!("{pid} ({inherited})");
             }
@@ -4953,9 +4971,7 @@ pub fn emit_dialog_block_with_model(
 
 /// Check if agent loop debug mode is active via environment variable.
 pub fn is_agent_loop_debug() -> bool {
-    std::env::var("AICHAT_AGENT_LOOP_DEBUG")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
+    crate::utils::get_env_bool("AGENT_LOOP_DEBUG").unwrap_or(false)
 }
 
 /// Format an event as a trace line for stderr output (unstyled fallback).
@@ -5559,11 +5575,11 @@ fn notification_for_event(event: &AgentLoopEvent) -> Option<(&'static str, &'sta
 
 /// Compute the elapsed seconds since the agent run began.
 ///
-/// Reads `AICHAT_START_TIME_MS` from the process environment if available,
+/// Reads `PERRY_START_TIME_MS` (or `AICHAT_START_TIME_MS`) from the process environment if available,
 /// allowing child/sub-agent processes to measure seconds from the root orchestrator's start.
 /// If not set or invalid, falls back to `snapshot.elapsed`.
 pub fn get_trace_elapsed_seconds(snapshot: &AgentLoopSnapshot) -> f64 {
-    if let Ok(val) = std::env::var("AICHAT_START_TIME_MS") {
+    if let Ok(val) = crate::utils::get_env_var("START_TIME_MS") {
         if let Ok(start_ms) = val.parse::<u128>() {
             if let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
                 let now_ms = now.as_millis();

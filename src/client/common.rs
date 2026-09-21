@@ -455,6 +455,10 @@ fn request_patch_env_name(client_name: &str, api: RequestApi) -> String {
     get_env_name(&format!("patch_{client_name}_{}", api.api_name()))
 }
 
+fn request_patch_legacy_env_name(client_name: &str, api: RequestApi) -> String {
+    get_legacy_env_name(&format!("patch_{client_name}_{}", api.api_name()))
+}
+
 fn apply_request_patches<F>(
     model: &Model,
     patch_config: Option<&RequestPatch>,
@@ -470,7 +474,16 @@ fn apply_request_patches<F>(
         }
     }
 
-    let patch_map = env_lookup(&request_patch_env_name(model.client_name(), api))
+    let primary_env = request_patch_env_name(model.client_name(), api);
+    let legacy_env = request_patch_legacy_env_name(model.client_name(), api);
+    let patch_map = env_lookup(&primary_env)
+        .or_else(|| {
+            if primary_env != legacy_env {
+                env_lookup(&legacy_env)
+            } else {
+                None
+            }
+        })
         .and_then(|value| serde_json::from_str(&value).ok())
         .or_else(|| {
             patch_config
@@ -1433,12 +1446,41 @@ responses:
             &mut request,
             RequestApi::Responses,
             |name| {
-                assert_eq!(name, "AICHAT_PATCH_OPENAI_RESPONSES");
+                assert_eq!(name, "PERRY_PATCH_OPENAI_RESPONSES");
                 Some(r#"{"gpt-test":{"body":{"patch_source":"env"}}}"#.into())
             },
         );
 
         assert_eq!(request.body, json!({"patch_source": "env"}));
+    }
+
+    #[test]
+    fn responses_env_patch_falls_back_to_legacy_aichat_env() {
+        let model = Model::new("openai", "gpt-test");
+        let patch = RequestPatch {
+            responses: Some(api_patch(
+                "gpt-test",
+                json!({"body": {"patch_source": "config"}}),
+            )),
+            ..Default::default()
+        };
+        let mut request = RequestData::new("https://example.invalid", json!({}));
+
+        apply_request_patches(
+            &model,
+            Some(&patch),
+            &mut request,
+            RequestApi::Responses,
+            |name| {
+                if name == "AICHAT_PATCH_OPENAI_RESPONSES" {
+                    Some(r#"{"gpt-test":{"body":{"patch_source":"legacy_env"}}}"#.into())
+                } else {
+                    None
+                }
+            },
+        );
+
+        assert_eq!(request.body, json!({"patch_source": "legacy_env"}));
     }
 
     #[test]

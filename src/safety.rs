@@ -1523,17 +1523,22 @@ impl RollbackJournal {
         if let Some(dir) = configured_dir {
             return dir.join("journals");
         }
-        if let Ok(dir) = std::env::var("AICHAT_SAFETY_ESCALATION_DIR") {
+        if let Ok(dir) = crate::utils::get_env_var("SAFETY_ESCALATION_DIR") {
             if !dir.trim().is_empty() {
                 return PathBuf::from(dir).join("journals");
             }
         }
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
             if !runtime_dir.trim().is_empty() {
-                return PathBuf::from(runtime_dir).join("aichat").join("journals");
+                let p = PathBuf::from(&runtime_dir).join(env!("CARGO_CRATE_NAME")).join("journals");
+                if p.exists() || !PathBuf::from(&runtime_dir).join("aichat").join("journals").exists() {
+                    return p;
+                } else {
+                    return PathBuf::from(runtime_dir).join("aichat").join("journals");
+                }
             }
         }
-        std::env::temp_dir().join("aichat").join("journals")
+        std::env::temp_dir().join(env!("CARGO_CRATE_NAME")).join("journals")
     }
 
     /// Open or create a journal for a specific tree and agent.

@@ -370,12 +370,12 @@ impl RoleLike for Agent {
     fn to_role(&self) -> Role {
         let mut prompt = self.interpolated_instructions();
         if !self.is_nano() && self.skills_setting().is_enabled() {
-            let workspace_dir = std::env::var("AICHAT_WORKSPACE_DIR")
+            let workspace_dir = crate::utils::get_env_var("WORKSPACE_DIR")
                 .ok()
                 .map(PathBuf::from)
                 .or_else(|| std::env::current_dir().ok());
             let global_dir = Config::skills_dir();
-            let builtin_dir = std::env::var("AICHAT_BUILTIN_SKILLS_DIR")
+            let builtin_dir = crate::utils::get_env_var("BUILTIN_SKILLS_DIR")
                 .ok()
                 .map(PathBuf::from);
             let registry = crate::skill::SkillRegistry::discover(
@@ -532,7 +532,7 @@ impl AgentConfig {
         if let Some(v) = read_env_value::<bool>(&with_prefix("nano")) {
             self.nano = v;
         }
-        if let Ok(v) = env::var(with_prefix("variables")) {
+        if let Ok(v) = get_env_var(&with_prefix("variables")) {
             if let Ok(v) = serde_json::from_str(&v) {
                 self.variables = v;
             }
@@ -540,10 +540,7 @@ impl AgentConfig {
     }
 
     pub fn is_nano(&self) -> bool {
-        if std::env::var("AICHAT_AGENT_NANO")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-        {
+        if crate::utils::get_env_bool("AGENT_NANO").unwrap_or(false) {
             return true;
         }
         self.nano.unwrap_or(false)

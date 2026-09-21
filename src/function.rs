@@ -788,8 +788,8 @@ impl ToolCall {
             None => self.extract_call_config_from_config(config)?,
         };
 
-        if let Ok(start_ms) = std::env::var("AICHAT_START_TIME_MS") {
-            envs.insert("AICHAT_START_TIME_MS".into(), start_ms);
+        if let Ok(start_ms) = crate::utils::get_env_var("START_TIME_MS") {
+            crate::utils::envs_insert_dual(&mut envs, "START_TIME_MS", start_ms);
         }
 
         let is_nano_tool = config
@@ -813,16 +813,16 @@ impl ToolCall {
             .as_ref()
             .map(|a| a.name().to_string())
             .or_else(|| {
-                std::env::var("AICHAT_INVOKING_AGENT")
+                crate::utils::get_env_var("INVOKING_AGENT")
                     .ok()
                     .filter(|s| !s.is_empty())
             })
             .or_else(|| {
-                std::env::var("AICHAT_AGENT_NAME")
+                crate::utils::get_env_var("AGENT_NAME")
                     .ok()
                     .and_then(|name| {
                         let clean = name.strip_prefix("nano-").unwrap_or(&name).to_string();
-                        if clean.is_empty() || clean == "aichat" {
+                        if clean.is_empty() || clean == "aichat" || clean == "perry" {
                             None
                         } else {
                             Some(clean)
@@ -832,19 +832,19 @@ impl ToolCall {
             .unwrap_or_default();
 
         if is_nano_tool && !invoking_agent.is_empty() {
-            envs.insert("AICHAT_INVOKING_AGENT".into(), invoking_agent.clone());
-            envs.insert("AICHAT_AGENT_NAME".into(), format!("nano-{}", self.name));
+            crate::utils::envs_insert_dual(&mut envs, "INVOKING_AGENT", invoking_agent.clone());
+            crate::utils::envs_insert_dual(&mut envs, "AGENT_NAME", format!("nano-{}", self.name));
             let current_depth = crate::agent_loop::current_agent_depth();
-            envs.insert("AICHAT_AGENT_DEPTH".into(), (current_depth + 1).to_string());
+            crate::utils::envs_insert_dual(&mut envs, "AGENT_DEPTH", (current_depth + 1).to_string());
 
             use std::sync::atomic::{AtomicUsize, Ordering};
             static NANO_COUNTER: AtomicUsize = AtomicUsize::new(0);
             let seq = NANO_COUNTER.fetch_add(1, Ordering::SeqCst) + 1;
             let parent_petname = crate::agent_loop::current_agent_petname();
-            envs.insert("AICHAT_AGENT_PETNAME".into(), format!("nano-{parent_petname}-{seq}"));
+            crate::utils::envs_insert_dual(&mut envs, "AGENT_PETNAME", format!("nano-{parent_petname}-{seq}"));
 
             let color_name = crate::agent_loop::current_agent_color_name(&invoking_agent);
-            envs.insert("AICHAT_AGENT_COLOR".into(), color_name.to_string());
+            crate::utils::envs_insert_dual(&mut envs, "AGENT_COLOR", color_name.to_string());
         }
 
         let json_data = if self.arguments.is_object() {
@@ -862,7 +862,7 @@ impl ToolCall {
         };
 
         if config.read().agent_loop.show_dialog {
-            envs.insert("AICHAT_DIALOG_RELAY".into(), "stderr".into());
+            crate::utils::envs_insert_dual(&mut envs, "DIALOG_RELAY", "stderr");
         }
 
         cmd_args.push(json_data.to_string());

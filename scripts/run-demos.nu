@@ -48,25 +48,39 @@
 # ─── Configuration ────────────────────────────────────────────────────────────
 
 # Resolve paths relative to this script's location (scripts/).
-# The release binary lives at <project>/target/release/aichat; project root is
+# The release binary lives at <project>/target/release/perry (or legacy aichat); project root is
 # one level up from scripts/. Falls back to a debug build if release is absent.
 const SCRIPT_DIR = (path self | path dirname)
 let project_dir = ($SCRIPT_DIR | path join ".." | path expand)
-let aichat_bin = (
-    if ($env.AICHAT_BIN? | default "" | is-not-empty) {
-        $env.AICHAT_BIN
-    } else if (($project_dir | path join "target/debug/aichat") | path exists) and (($project_dir | path join "target/release/aichat") | path exists) {
-        if ((ls ($project_dir | path join "target/debug/aichat") | get modified.0) > (ls ($project_dir | path join "target/release/aichat") | get modified.0)) {
-            $project_dir | path join "target/debug/aichat"
-        } else {
-            $project_dir | path join "target/release/aichat"
+let perry_bin = (
+    match ($env | get --optional PERRY_BIN) {
+        $bin if ($bin != null and $bin != "") => $bin,
+        _ => {
+            match ($env | get --optional AICHAT_BIN) {
+                $bin if ($bin != null and $bin != "") => $bin,
+                _ => {
+                    mut found = []
+                    for candidate in [
+                        ($project_dir | path join "target/release/perry")
+                        ($project_dir | path join "target/debug/perry")
+                        ($project_dir | path join "target/release/aichat")
+                        ($project_dir | path join "target/debug/aichat")
+                    ] {
+                        if ($candidate | path exists) {
+                            $found = ($found | append $candidate)
+                        }
+                    }
+                    if ($found | is-not-empty) {
+                        $found | sort-by { |p| (ls $p | get modified.0) } | last
+                    } else {
+                        $project_dir | path join "target/debug/perry"
+                    }
+                }
+            }
         }
-    } else if (($project_dir | path join "target/release/aichat") | path exists) {
-        $project_dir | path join "target/release/aichat"
-    } else {
-        $project_dir | path join "target/debug/aichat"
     }
 )
+let aichat_bin = $perry_bin
 let functions_dir = ($env.HOME | path join "projects/innators")
 let manual_pdf = ($project_dir | path join "manual.pdf")
 
@@ -74,7 +88,7 @@ let manual_pdf = ($project_dir | path join "manual.pdf")
 # cost-effective Google Search retrieval.
 const DEFAULT_WEB_SEARCH_MODEL = "gemini:gemini-2.5-flash"
 
-# Base environment for all aichat invocations is constructed dynamically
+# Base environment for all perry invocations is constructed dynamically
 # inside def main below to honor the --dialog flag.
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -96,21 +110,36 @@ def show-cmd [env_or_cmd: any, cmd_args: list<string> = []] {
         let has_web_search = ($cmd_args | any { |a| ($a in ["orchestrator", "researcher"]) or ($a | str contains "web_search") or ($a | str contains "fetch_and_summarize") })
         # Select relevant execution environment variables to display (ignoring PATH and standard system vars)
         let candidate_keys = [
+            "PERRY_MODEL",
             "AICHAT_MODEL",
             (if $has_web_search { "WEB_SEARCH_MODEL" } else { "" }),
+            "PERRY_USE_TOOLS",
             "AICHAT_USE_TOOLS",
+            "PERRY_BUILTIN_SKILLS_DIR",
             "AICHAT_BUILTIN_SKILLS_DIR",
+            "PERRY_WORKSPACE_DIR",
             "AICHAT_WORKSPACE_DIR",
+            "PERRY_AUTONOMY",
             "AICHAT_AUTONOMY",
+            "PERRY_SAFETY_DEFAULT_CEILING",
             "AICHAT_SAFETY_DEFAULT_CEILING",
+            "PERRY_SAFETY_POLICY_FILE",
             "AICHAT_SAFETY_POLICY_FILE",
+            "PERRY_AGENT_LOOP_SHOW_TRACE",
             "AICHAT_AGENT_LOOP_SHOW_TRACE",
+            "PERRY_AGENT_LOOP_SHOW_DIALOG",
             "AICHAT_AGENT_LOOP_SHOW_DIALOG",
+            "PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE",
             "AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE",
+            "PERRY_AGENT_LOOP_MAX_TURNS",
             "AICHAT_AGENT_LOOP_MAX_TURNS",
+            "PERRY_WSLINKS",
             "AICHAT_WSLINKS",
+            "PERRY_AGENT_PARENT_ADDR",
             "AICHAT_AGENT_PARENT_ADDR",
+            "PERRY_SAFETY_VERDICT_TIMEOUT_SECS",
             "AICHAT_SAFETY_VERDICT_TIMEOUT_SECS",
+            "PERRY_CONFIG_DIR",
             "AICHAT_CONFIG_DIR",
         ] | where { ($in | str length) > 0 }
         let env_parts = ($candidate_keys | where { $in in $env_record } | each { |k|
@@ -130,7 +159,8 @@ def show-cmd [env_or_cmd: any, cmd_args: list<string> = []] {
                 $arg
             }
         })
-        let cmd_parts = ($env_parts | append "aichat" | append $formatted_flags)
+        let bin_name = ($perry_bin | path basename)
+        let cmd_parts = ($env_parts | append $bin_name | append $formatted_flags)
         let cmd_line = ($cmd_parts | str join " ")
 
         print $"  (ansi yellow)▶(ansi reset) (ansi white_dimmed)($cmd_line)(ansi reset)"
@@ -170,7 +200,13 @@ def show-output [output: string, --max-lines: int = 15, --no-truncate] {
     let lines = ($output | str trim | lines)
     if ($lines | length) > 0 {
         print $"  (ansi green)┄┄┄ output ┄┄┄(ansi reset)"
-        let should_not_truncate = ($no_truncate or ($env.AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE? == "true"))
+        let should_not_truncate = ($no_truncate or (match ($env | get --optional PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE) {
+            "true" => true,
+            _ => (match ($env | get --optional AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE) {
+                "true" => true,
+                _ => false,
+            })
+        }))
         let display_lines = if $should_not_truncate {
             $lines
         } else if ($lines | length) > $max_lines {
@@ -197,7 +233,14 @@ def show-cost [stderr: string] {
     let cost_line = ($stderr | lines | where { $in | str contains "Estimated cost:" } | first | default "")
     if ($cost_line | str length) > 0 {
         print $"  (ansi yellow)💰 ($cost_line)(ansi reset)"
-        if ($env.AICHAT_DEMO_COST_LOG? | default "" | is-not-empty) {
+        let cost_log = match ($env | get --optional PERRY_DEMO_COST_LOG) {
+            $v if ($v != null and $v != "") => $v,
+            _ => (match ($env | get --optional AICHAT_DEMO_COST_LOG) {
+                $v if ($v != null and $v != "") => $v,
+                _ => "",
+            }),
+        }
+        if ($cost_log | is-not-empty) {
             let after_dollar = ($cost_line | split row "Estimated cost: $" | get --optional 1 | default "")
             let first_word = ($after_dollar | split row " " | get --optional 0 | default "0" | str trim)
             let cost = (try { $first_word | into float } catch { 0.0 })
@@ -214,7 +257,7 @@ def show-cost [stderr: string] {
                 try { $s | into int } catch { 0 }
             } else { 0 }
 
-            $"($cost) ($inp) ($out)\n" | save --append $env.AICHAT_DEMO_COST_LOG
+            $"($cost) ($inp) ($out)\n" | save --append $cost_log
         }
     }
 }
@@ -257,7 +300,7 @@ def should-run-demo [demo_id: string, target_demo: string] {
 }
 
 def main [
-    --model (-m): string = "", # Override model across all demos (defaults to aichat's configured default model)
+    --model (-m): string = "", # Override model across all demos (defaults to perry's configured default model)
     --debug (-d),             # Execute tests one by one, waiting for user input to proceed
     --dialog,                 # Display full submitted LLM prompt and response observability trace
     --no-truncate (-n),       # Cancel default truncation of dialog traces and output
@@ -270,54 +313,66 @@ def main [
         exit 1
     }
     if $no_truncate {
+        $env.PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE = "true"
         $env.AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE = "true"
     }
     if $wslinks {
+        $env.PERRY_WSLINKS = "true"
         $env.AICHAT_WSLINKS = "true"
-    } else if ("AICHAT_WSLINKS" in $env) {
-        hide-env AICHAT_WSLINKS
+    } else {
+        if ("PERRY_WSLINKS" in $env) { hide-env PERRY_WSLINKS }
+        if ("AICHAT_WSLINKS" in $env) { hide-env AICHAT_WSLINKS }
     }
     if ("SUMMARIZE_MODEL" in $env) {
         hide-env SUMMARIZE_MODEL
     }
 
     # Initialize cost accumulator log
-    let cost_log = ($nu.temp-dir | path join $"aichat-run-demos-cost-($nu.pid).txt")
+    let cost_log = ($nu.temp-dir | path join $"perry-run-demos-cost-($nu.pid).txt")
     if ($cost_log | path exists) { rm -f $cost_log }
+    $env.PERRY_DEMO_COST_LOG = $cost_log
     $env.AICHAT_DEMO_COST_LOG = $cost_log
 
-    # Resolve default aichat model dynamically if not specified via --model / -m
+    # Resolve default perry model dynamically if not specified via --model / -m
     let demo_model = (
         if ($model | is-not-empty) {
             $model
-        } else if ($env.AICHAT_MODEL? | default "" | is-not-empty) {
-            $env.AICHAT_MODEL
         } else {
-            try {
-                (^$aichat_bin --info | complete | get stdout | lines | where { $in | str starts-with "model " } | first | split column -r '\s+' key model | get model.0 | str trim)
-            } catch {
-                ""
+            match ($env | get --optional PERRY_MODEL) {
+                $m if ($m != null and $m != "") => $m,
+                _ => {
+                    match ($env | get --optional AICHAT_MODEL) {
+                        $m if ($m != null and $m != "") => $m,
+                        _ => {
+                            try {
+                                (^$perry_bin --info | complete | get stdout | lines | where { $in | str starts-with "model " } | first | split column -r '\s+' key model | get model.0 | str trim)
+                            } catch {
+                                ""
+                            }
+                        }
+                    }
+                }
             }
         }
     )
 
-    # Base environment for all aichat invocations.
-    # AICHAT_MODEL makes every demo use the resolved model without needing a per-demo -m flag;
+    # Base environment for all perry invocations.
+    # PERRY_MODEL makes every demo use the resolved model without needing a per-demo -m flag;
     # WEB_SEARCH_MODEL points the researcher/web-search tooling at flash with search grounding;
-    # AICHAT_AGENT_LOOP_SHOW_DIALOG enables the LLM dialog trace when --dialog is set.
-    # AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE disables dialog truncation when --no-truncate is set.
-    # AICHAT_WSLINKS enables link exploration mode for web searches across sub-agent trees when --wslinks is set.
-    # AICHAT_BUILTIN_SKILLS_DIR binds the permanent builtin skills repository.
+    # PERRY_AGENT_LOOP_SHOW_DIALOG enables the LLM dialog trace when --dialog is set.
+    # PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE disables dialog truncation when --no-truncate is set.
+    # PERRY_WSLINKS enables link exploration mode for web searches across sub-agent trees when --wslinks is set.
+    # PERRY_BUILTIN_SKILLS_DIR binds the permanent builtin skills repository.
     let base_env = {
         PATH: ($env.PATH | prepend ($project_dir | path join "target/debug") | prepend ($project_dir | path join "target/release"))
-        AICHAT_FUNCTIONS_DIR: $functions_dir
-        AICHAT_BUILTIN_SKILLS_DIR: ($project_dir | path join "assets/builtin-skills")
+        PERRY_FUNCTIONS_DIR: $functions_dir
+        PERRY_BUILTIN_SKILLS_DIR: ($project_dir | path join "assets/builtin-skills")
         WEB_SEARCH_MODEL: $DEFAULT_WEB_SEARCH_MODEL
-    } | merge (if ($demo_model | is-not-empty) { { AICHAT_MODEL: $demo_model, AICHAT_SAFETY_RISK_MODEL: $demo_model } } else { {} })
-      | merge (if $dialog { { AICHAT_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
-      | merge (if $no_truncate { { AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE: "true" } } else { {} })
-      | merge (if $debug { { AICHAT_AGENT_LOOP_DEBUG: "true" } } else { {} })
-      | merge (if $wslinks { { AICHAT_WSLINKS: "true" } } else { {} })
+    } | merge (if ($demo_model | is-not-empty) { { PERRY_MODEL: $demo_model, PERRY_SAFETY_RISK_MODEL: $demo_model } } else { {} })
+      | merge (if $dialog { { PERRY_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
+      | merge (if $no_truncate { { PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE: "true" } } else { {} })
+      | merge (if $debug { { PERRY_AGENT_LOOP_DEBUG: "true" } } else { {} })
+      | merge (if $wslinks { { PERRY_WSLINKS: "true" } } else { {} })
 
     let wslinks_args = if $wslinks { ["--wslinks"] } else { [] }
     let wslinks_cmd_str = if $wslinks { " --wslinks" } else { "" }
@@ -331,8 +386,8 @@ def main [
         print $"  (ansi white_dimmed)Default model: ($demo_model)(ansi reset)\n"
     }
 
-if not ($aichat_bin | path exists) {
-    print $"(ansi red_bold)ERROR:(ansi reset) Binary not found at ($aichat_bin). Run: cargo build --release"
+if not ($perry_bin | path exists) {
+    print $"(ansi red_bold)ERROR:(ansi reset) Binary not found at ($perry_bin). Run: cargo build --release"
     exit 1
 }
 
@@ -358,8 +413,8 @@ if not ($link_target | str contains "run-tool.sh") {
 }
 
 # Verify agents list
-show-cmd "aichat --list-agents"
-let agents_result = (do { "" | with-env $base_env { ^$aichat_bin --list-agents } } | complete)
+show-cmd $"($perry_bin | path basename) --list-agents"
+let agents_result = (do { "" | with-env $base_env { ^$perry_bin --list-agents } } | complete)
 let agents = ($agents_result.stdout | str trim | lines)
 let expected_agents = ["coder", "orchestrator", "researcher"]
 let agents_ok = ($expected_agents | all { |a| $a in $agents })
@@ -372,13 +427,13 @@ header "Demo 1: Parallel Tool Execution"
 show-desc "Verifies parallel tool execution: calls slow_task 3 times concurrently, confirming total wall-clock time is ~2s rather than 6s sequential."
 
 let demo1_prompt = "You MUST call slow_task exactly 3 times in parallel: label='first' delay=2, label='second' delay=2, label='third' delay=2. Do NOT answer without calling the tools."
-let demo1_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo1_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo1_args = [--show-cost -r "%functions:slow_task%" $demo1_prompt]
 show-cmd $demo1_env $demo1_args
 step-pause $should_pause
 
 let demo1 = (do {
-    "" | with-env $demo1_env { ^$aichat_bin ...$demo1_args }
+    "" | with-env $demo1_env { ^$perry_bin ...$demo1_args }
 } | complete)
 
 let trace1 = ($demo1.stderr | default "")
@@ -404,13 +459,13 @@ header "Demo 2: Turn Budget"
 show-desc "Verifies turn budget enforcement: sets max turns to 1 and asserts that the agent triggers a turn limit warning when more turns are required."
 
 let demo2_prompt = "Read each of the files /etc/hostname, /etc/os-release, /etc/shells, /etc/fstab one by one and summarize each"
-let demo2_env = ($base_env | merge { AICHAT_AGENT_LOOP_MAX_TURNS: "1", AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo2_env = ($base_env | merge { PERRY_AGENT_LOOP_MAX_TURNS: "1", PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo2_args = [--show-cost -r "%functions:fs_cat%" $demo2_prompt]
 show-cmd $demo2_env $demo2_args
 step-pause $should_pause
 
 let demo2 = (do {
-    "" | with-env $demo2_env { ^$aichat_bin ...$demo2_args }
+    "" | with-env $demo2_env { ^$perry_bin ...$demo2_args }
 } | complete)
 
 let combined2 = $"($demo2.stdout)($demo2.stderr | default '')"
@@ -431,13 +486,13 @@ show-desc "Demonstrates structured planning: orchestrator formulates an upfront 
 let demo3_prompt = "Read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
 if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
 
-let demo3_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo3_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo3_args = [--show-cost --agent orchestrator $demo3_prompt]
 show-cmd $demo3_env $demo3_args
 step-pause $should_pause
 
 let demo3 = (do {
-    "" | with-env $demo3_env { ^$aichat_bin ...$demo3_args }
+    "" | with-env $demo3_env { ^$perry_bin ...$demo3_args }
 } | complete)
 
 let trace3 = ($demo3.stderr | default "")
@@ -483,7 +538,7 @@ let demo4_desc = if $wslinks {
 show-desc $demo4_desc
 
 let demo4_prompt = "You MUST delegate this to the researcher agent (do NOT answer yourself): Search the web for 'what is Model Context Protocol MCP by Anthropic' and return a summary with sources."
-let demo4_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo4_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo4_args = [
     --show-cost
     ...$wslinks_args
@@ -494,7 +549,7 @@ show-cmd $demo4_env $demo4_args
 step-pause $should_pause
 
 let demo4 = (do {
-    "" | with-env $demo4_env { ^$aichat_bin ...$demo4_args }
+    "" | with-env $demo4_env { ^$perry_bin ...$demo4_args }
 } | complete)
 
 let trace4 = ($demo4.stderr | default "")
@@ -526,7 +581,7 @@ let demo5_desc = if $wslinks {
 show-desc $demo5_desc
 
 let demo5_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
-let demo5_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo5_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo5_args = [
     --show-cost
     ...$wslinks_args
@@ -537,7 +592,7 @@ show-cmd $demo5_env $demo5_args
 step-pause $should_pause
 
 let demo5 = (do {
-    "" | with-env $demo5_env { ^$aichat_bin ...$demo5_args }
+    "" | with-env $demo5_env { ^$perry_bin ...$demo5_args }
 } | complete)
 
 let trace5 = ($demo5.stderr | default "")
@@ -564,16 +619,16 @@ if (should-run-demo "5b" $demo) {
 # ─── Demo 5b: Parallel Delegation (Direct Grounded Search) ──────────────────────
 
 header "Demo 5b: Parallel Delegation (Direct Grounded Search)"
-show-desc "Demonstrates parallel sub-agent delegation explicitly pinned to direct grounded web search (AICHAT_WSLINKS=false): orchestrator invokes two researcher agents concurrently, using direct grounded search results without secondary page scraping."
+show-desc "Demonstrates parallel sub-agent delegation explicitly pinned to direct grounded web search (PERRY_WSLINKS=false): orchestrator invokes two researcher agents concurrently, using direct grounded search results without secondary page scraping."
 
 let demo5b_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
-let demo5b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true", AICHAT_WSLINKS: "false" })
+let demo5b_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true", PERRY_WSLINKS: "false" })
 let demo5b_args = [--show-cost --agent orchestrator $demo5b_prompt]
 show-cmd $demo5b_env $demo5b_args
 step-pause $should_pause
 
 let demo5b = (do {
-    "" | with-env $demo5b_env { ^$aichat_bin ...$demo5b_args }
+    "" | with-env $demo5b_env { ^$perry_bin ...$demo5b_args }
 } | complete)
 
 let trace5b = ($demo5b.stderr | default "")
@@ -601,7 +656,7 @@ header "Demo 6: External Observability (status file + tmux title)"
 show-desc "Demonstrates external observability: asserts background JSON status file emission in XDG_RUNTIME_DIR and dynamic tmux pane title updates."
 
 let demo6_prompt = "You MUST call slow_task with label=observability-test and delay=8. Do NOT answer without calling the tool."
-let demo6_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo6_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo6_args = [--show-cost -r "%functions:slow_task%" $demo6_prompt]
 show-cmd $demo6_env $demo6_args
 step-pause $should_pause
@@ -610,36 +665,36 @@ let in_tmux = ($env | get TMUX? | default "" | str length) > 0
 let status_dir = $"/run/user/(id -u | str trim)"
 
 # Clean any stale status files
-glob $"($status_dir)/aichat-*.json" | each { |f| rm -f $f }; null
+glob $"($status_dir)/perry-*.json" | append (glob $"($status_dir)/aichat-*.json") | each { |f| rm -f $f }; null
 
 if $in_tmux {
     # Record title before
     let title_before = (tmux display-message -p '#{pane_title}' | str trim)
 
-    # Launch aichat in background, poll status file and tmux title mid-execution
+    # Launch perry in background, poll status file and tmux title mid-execution
     # NOTE: stderr is NOT redirected — it goes to /dev/tty naturally, which allows
     # OSC title codes to reach tmux. We capture trace from the status file instead.
-    let aichat_cmd = ([
-        $"AICHAT_FUNCTIONS_DIR=($functions_dir)"
+    let perry_cmd = ([
+        $"PERRY_FUNCTIONS_DIR=($functions_dir)"
         $"WEB_SEARCH_MODEL=($DEFAULT_WEB_SEARCH_MODEL)"
-        (if ($demo_model | is-not-empty) { $"AICHAT_MODEL=($demo_model)" } else { "" })
-        $"AICHAT_AGENT_LOOP_SHOW_TRACE=true"
-        (if $dialog { "AICHAT_AGENT_LOOP_SHOW_DIALOG=true" } else { "" })
-        $"($aichat_bin) --show-cost -r '%functions:slow_task%'"
+        (if ($demo_model | is-not-empty) { $"PERRY_MODEL=($demo_model)" } else { "" })
+        $"PERRY_AGENT_LOOP_SHOW_TRACE=true"
+        (if $dialog { "PERRY_AGENT_LOOP_SHOW_DIALOG=true" } else { "" })
+        $"($perry_bin) --show-cost -r '%functions:slow_task%'"
         $"\"($demo6_prompt)\""
         "< /dev/null > /tmp/demo6-stdout.txt &"
     ] | where { ($in | str length) > 0 } | str join " ")
 
     let bg_script = ([
-        $aichat_cmd
-        "AICHAT_PID=$!"
+        $perry_cmd
+        "PERRY_PID=$!"
         "sleep 5"
         "echo '---STATUS---'"
-        $"cat ($status_dir)/aichat-*.json 2>/dev/null || echo NO_STATUS_FILE"
+        $"cat ($status_dir)/perry-*.json ($status_dir)/aichat-*.json 2>/dev/null || echo NO_STATUS_FILE"
         "echo '---TITLE_DURING---'"
         "tmux display-message -p '#{pane_title}'"
         "echo '---WAIT---'"
-        "wait $AICHAT_PID"
+        "wait $PERRY_PID"
         "echo '---TITLE_AFTER---'"
         "tmux display-message -p '#{pane_title}'"
     ] | str join "\n")
@@ -693,18 +748,18 @@ header "Demo 7: Tool Output Auto-Capping"
 show-desc "Demonstrates tool output auto-capping: large tool output exceeding thresholds is safely written to disk and summarized to avoid token bloat."
 
 let demo7_prompt = "Use fs_cat to read the file /usr/share/dict/cracklib-small"
-let demo7_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo7_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo7_args = [--show-cost -r "%functions:fs_cat%" $demo7_prompt]
 show-cmd $demo7_env $demo7_args
 step-pause $should_pause
 
 let demo7 = (do {
-    "" | with-env $demo7_env { ^$aichat_bin ...$demo7_args }
+    "" | with-env $demo7_env { ^$perry_bin ...$demo7_args }
 } | complete)
 
 # Trace visible live on terminal via /dev/tty
 
-let cap_files = (glob /tmp/aichat-tool-fs_cat-*.out)
+let cap_files = (glob /tmp/perry-tool-fs_cat-*.out | append (glob /tmp/aichat-tool-fs_cat-*.out))
 let cap_file_exists = ($cap_files | length) > 0
 
 report "Auto-cap engaged (temp file created)" $cap_file_exists
@@ -729,13 +784,13 @@ header "Demo 8: Pipe Routing (fetch_and_summarize)"
 show-desc "Demonstrates pipe routing: executes fetch_and_summarize tool pipeline where fetched web content is parsed to Markdown via html-to-markdown and piped directly to summarizer without LLM token consumption."
 
 let demo8_prompt = "You MUST call the fetch_and_summarize tool with url 'https://example.com'. Do not use any other tool."
-let demo8_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo8_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo8_args = [--show-cost --autonomy readonly -r "%functions:fetch_and_summarize%" $demo8_prompt]
 show-cmd $demo8_env $demo8_args
 step-pause $should_pause
 
 let demo8 = (do {
-    "" | with-env $demo8_env { ^$aichat_bin ...$demo8_args }
+    "" | with-env $demo8_env { ^$perry_bin ...$demo8_args }
 } | complete)
 
 let trace8 = ($demo8.stderr | default "")
@@ -760,13 +815,13 @@ header "Demo 9: File Destination (generate_data)"
 show-desc "Demonstrates file destination routing: tool data is written directly to a designated file path on disk without polluting model context."
 
 let demo9_prompt = "You MUST call generate_data with rows=20. Do NOT answer without calling the tool."
-let demo9_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo9_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo9_args = [--show-cost -r "%functions:generate_data%" $demo9_prompt]
 show-cmd $demo9_env $demo9_args
 step-pause $should_pause
 
 let demo9 = (do {
-    "" | with-env $demo9_env { ^$aichat_bin ...$demo9_args }
+    "" | with-env $demo9_env { ^$perry_bin ...$demo9_args }
 } | complete)
 
 let trace9 = ($demo9.stderr | default "")
@@ -803,13 +858,13 @@ header "Demo 10: PDF Reading (manual.pdf)"
 show-desc "Demonstrates native PDF reading: executes read_pdf on manual.pdf and verifies extracted text is processed by the model."
 
 let demo10_prompt = $"Use read_pdf to read the file ($manual_pdf) and tell me what this document is about. List the main sections."
-let demo10_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo10_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo10_args = [--show-cost -r "%functions:read_pdf%" $demo10_prompt]
 show-cmd $demo10_env $demo10_args
 step-pause $should_pause
 
 let demo10 = (do {
-    "" | with-env $demo10_env { ^$aichat_bin ...$demo10_args }
+    "" | with-env $demo10_env { ^$perry_bin ...$demo10_args }
 } | complete)
 
 let trace10 = ($demo10.stderr | default "")
@@ -830,13 +885,13 @@ header "Demo 10b: PDF Page Selection + Compact"
 show-desc "Demonstrates targeted PDF extraction: reads specific page ranges (5-10) with compact formatting for token efficiency."
 
 let demo10b_prompt = $"You MUST call read_pdf with path='($manual_pdf)', pages='5-10', and the compact flag. Then summarize what those pages cover."
-let demo10b_env = ($base_env | merge { AICHAT_AGENT_LOOP_SHOW_TRACE: "true" })
+let demo10b_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo10b_args = [--show-cost --autonomy readonly -r "%functions:read_pdf%" $demo10b_prompt]
 show-cmd $demo10b_env $demo10b_args
 step-pause $should_pause
 
 let demo10b = (do {
-    "" | with-env $demo10b_env { ^$aichat_bin ...$demo10b_args }
+    "" | with-env $demo10b_env { ^$perry_bin ...$demo10b_args }
 } | complete)
 
 let trace10b = ($demo10b.stderr | default "")
@@ -868,8 +923,8 @@ show-desc $demo11_desc
 
 let demo11_prompt = "You MUST plan first using the exact tool named '_plan' (with leading underscore, do NOT call 'plan'). Then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. In your final answer, state the findings and mention the researcher agent. Do NOT answer from memory — you MUST delegate."
 let demo11_env = ($base_env | merge {
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "15"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "15"
 })
 let demo11_args = [
     --show-cost
@@ -881,7 +936,7 @@ show-cmd $demo11_env $demo11_args
 step-pause $should_pause
 
 let demo11 = (do {
-    "" | with-env $demo11_env { ^$aichat_bin ...$demo11_args }
+    "" | with-env $demo11_env { ^$perry_bin ...$demo11_args }
 } | complete)
 
 let trace11 = ($demo11.stderr | default "")
@@ -925,25 +980,24 @@ if (should-run-demo "12" $demo) {
 header "Demo 12: Sub-Agent Crash Isolation (deterministic, offline)"
 show-desc "Demonstrates sub-agent crash isolation: verifies that a crashing child agent does not panic the parent process, returning a structured error."
 
-let crash_cfg_dir = ($nu.temp-dir | path join $"aichat-crash-demo-($nu.pid)")
+let crash_cfg_dir = ($nu.temp-dir | path join $"perry-crash-demo-($nu.pid)")
 mkdir $crash_cfg_dir
 "model: openai:gpt-4o-mini\nclients:\n- type: openai\n  api_key: sk-fake-crash-demo\n" | save -f ($crash_cfg_dir | path join "config.yaml")
 
-# Override AICHAT_MODEL (inherited from base_env) to match this throwaway
-# Override AICHAT_MODEL (inherited from base_env) to match this throwaway
+# Override PERRY_MODEL (inherited from base_env) to match this throwaway
 # config's own client, so the ONLY failure is the unknown agent — not an
 # unrelated "unknown model" error from the harness-wide flash default.
 let crash_env = ($base_env | merge {
-    AICHAT_CONFIG_DIR: $crash_cfg_dir
-    AICHAT_MODEL: "openai:gpt-4o-mini"
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_CONFIG_DIR: $crash_cfg_dir
+    PERRY_MODEL: "openai:gpt-4o-mini"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
 })
 let demo12_args = [--agent "__nonexistent_crash_test__" "trigger crash"]
 show-cmd $crash_env $demo12_args
 step-pause $should_pause
 
 let demo12 = (do {
-    "" | with-env $crash_env { ^$aichat_bin ...$demo12_args }
+    "" | with-env $crash_env { ^$perry_bin ...$demo12_args }
 } | complete)
 
 let crash_stderr = ($demo12.stderr | default "")
@@ -972,12 +1026,12 @@ if (should-run-demo "13" $demo) {
 # (no `date` output leaks through). Single tool, 2-turn budget → minimal spend.
 #
 # Reuses the real config dir (for the provider key + model catalog) and injects
-# the policy via AICHAT_SAFETY_POLICY_FILE — no config.yaml edits needed.
+# the policy via PERRY_SAFETY_POLICY_FILE — no config.yaml edits needed.
 
 header $"Demo 13: Protected Policy File — forbid \(live, ($demo_model)\)"
 show-desc "Demonstrates policy-based tool forbidding: an owner-only 0600 policy explicitly forbids get_current_time, asserting deterministic safety blocking."
 
-let d13_dir = ($nu.temp-dir | path join $"aichat-policy-forbid-($nu.pid)")
+let d13_dir = ($nu.temp-dir | path join $"perry-policy-forbid-($nu.pid)")
 mkdir $d13_dir
 let d13_policy = ($d13_dir | path join "policy.yaml")
 "rules:\n  - tool: get_current_time\n    forbid: true\n" | save -f $d13_policy
@@ -985,16 +1039,16 @@ chmod 0600 $d13_policy
 
 let d13_prompt = "You MUST call the get_current_time tool exactly once to tell me the current time. Do not answer from memory."
 let d13_env = ($base_env | merge {
-    AICHAT_SAFETY_POLICY_FILE: $d13_policy
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_SAFETY_POLICY_FILE: $d13_policy
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo13_args = [--show-cost -r "%functions:get_current_time%" $d13_prompt]
 show-cmd $d13_env $demo13_args
 step-pause $should_pause
 
 let demo13 = (do {
-    "" | with-env $d13_env { ^$aichat_bin ...$demo13_args }
+    "" | with-env $d13_env { ^$perry_bin ...$demo13_args }
 } | complete)
 
 let trace13 = ($demo13.stderr | default "")
@@ -1029,7 +1083,7 @@ if (should-run-demo "14" $demo) {
 header $"Demo 14: Authority Ceiling Exceeded \(live, ($demo_model)\)"
 show-desc "Demonstrates authority ceiling enforcement: policy raises get_current_time to catastrophic (> destructive ceiling), asserting it is blocked before execution."
 
-let d14_dir = ($nu.temp-dir | path join $"aichat-authority-($nu.pid)")
+let d14_dir = ($nu.temp-dir | path join $"perry-authority-($nu.pid)")
 mkdir $d14_dir
 let d14_policy = ($d14_dir | path join "policy.yaml")
 "rules:\n  - tool: get_current_time\n    raise: catastrophic\n" | save -f $d14_policy
@@ -1037,17 +1091,17 @@ chmod 0600 $d14_policy
 
 let d14_prompt = "You MUST call the get_current_time tool exactly once to tell me the current time. Do not answer from memory."
 let d14_env = ($base_env | merge {
-    AICHAT_SAFETY_POLICY_FILE: $d14_policy
-    AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_SAFETY_POLICY_FILE: $d14_policy
+    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo14_args = [--show-cost -r "%functions:get_current_time%" $d14_prompt]
 show-cmd $d14_env $demo14_args
 step-pause $should_pause
 
 let demo14 = (do {
-    "" | with-env $d14_env { ^$aichat_bin ...$demo14_args }
+    "" | with-env $d14_env { ^$perry_bin ...$demo14_args }
 } | complete)
 
 let trace14 = ($demo14.stderr | default "")
@@ -1080,7 +1134,7 @@ if (should-run-demo "15" $demo) {
 header $"Demo 15: Argument-Sensitive Policy Escalation \(live, ($demo_model)\)"
 show-desc "Demonstrates argument-sensitive policy escalation: policy matches dangerous patterns (rm -rf) in arguments to dynamically elevate authority requirements."
 
-let d15_dir = ($nu.temp-dir | path join $"aichat-argpolicy-($nu.pid)")
+let d15_dir = ($nu.temp-dir | path join $"perry-argpolicy-($nu.pid)")
 mkdir $d15_dir
 let d15_policy = ($d15_dir | path join "policy.yaml")
 "rules:\n  - tool: execute_command\n    arg_contains: \"rm -rf\"\n    raise: catastrophic\n" | save -f $d15_policy
@@ -1088,17 +1142,17 @@ chmod 0600 $d15_policy
 
 let d15_prompt = "You MUST call execute_command exactly once with this exact command: echo 'the phrase rm -rf is dangerous'. Do not answer without calling the tool."
 let d15_env = ($base_env | merge {
-    AICHAT_SAFETY_POLICY_FILE: $d15_policy
-    AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_SAFETY_POLICY_FILE: $d15_policy
+    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo15_args = [--show-cost -r "%functions:execute_command%" $d15_prompt]
 show-cmd $d15_env $demo15_args
 step-pause $should_pause
 
 let demo15 = (do {
-    "" | with-env $d15_env { ^$aichat_bin ...$demo15_args }
+    "" | with-env $d15_env { ^$perry_bin ...$demo15_args }
 } | complete)
 
 let trace15 = ($demo15.stderr | default "")
@@ -1124,10 +1178,10 @@ if (should-run-demo "16" $demo) {
 # DETERMINISTIC / OFFLINE — no LLM or network.
 # Exercises the #6d escalation failure boundaries, zero-config degrade path,
 # and rollback journal permissions deterministically and offline:
-#   1. Zero-config degrade: With no parent listener (AICHAT_AGENT_PARENT_ADDR unset),
+#   1. Zero-config degrade: With no parent listener (PERRY_AGENT_PARENT_ADDR unset),
 #      a tool requiring authority above the ceiling fails closed immediately with
 #      authority_exceeded / policy denial.
-#   2. Unreachable / invalid parent: If AICHAT_AGENT_PARENT_ADDR is set to an
+#   2. Unreachable / invalid parent: If PERRY_AGENT_PARENT_ADDR is set to an
 #      unreachable endpoint, the child fails closed safely (escalation_failed)
 #      without executing the tool or hanging indefinitely.
 #   3. Rollback journal durability: Journals are created with strict 0600 (owner-only)
@@ -1136,7 +1190,7 @@ if (should-run-demo "16" $demo) {
 header "Demo 16: Multi-Process Escalation & Rollback Journal (deterministic, offline)"
 show-desc "Demonstrates multi-process escalation & rollback journaling: verifies 0600 journal permissions, unreachable parent timeout fail-closed, and mTLS security."
 
-let d16_dir = ($nu.temp-dir | path join $"aichat-escalation-demo-($nu.pid)")
+let d16_dir = ($nu.temp-dir | path join $"perry-escalation-demo-($nu.pid)")
 mkdir $d16_dir
 let d16_policy = ($d16_dir | path join "policy.yaml")
 "rules:\n  - tool: get_current_time\n    raise: catastrophic\n" | save -f $d16_policy
@@ -1148,49 +1202,49 @@ mkdir $d16_cfg_dir
 
 # Part 1: Zero-config degrade check (no parent endpoint)
 let d16_env_degrade = ($base_env | merge {
-    AICHAT_CONFIG_DIR: $d16_cfg_dir
-    AICHAT_MODEL: "openai:gpt-4o-mini"
-    AICHAT_SAFETY_POLICY_FILE: $d16_policy
-    AICHAT_SAFETY_DEFAULT_CEILING: "read_only"
+    PERRY_CONFIG_DIR: $d16_cfg_dir
+    PERRY_MODEL: "openai:gpt-4o-mini"
+    PERRY_SAFETY_POLICY_FILE: $d16_policy
+    PERRY_SAFETY_DEFAULT_CEILING: "read_only"
 })
 let d16_args = [--agent "esc_demo_agent" "trigger"]
 show-cmd $d16_env_degrade $d16_args
 step-pause $should_pause
 let demo16_degrade = (do {
-    "" | with-env $d16_env_degrade { ^$aichat_bin ...$d16_args }
+    "" | with-env $d16_env_degrade { ^$perry_bin ...$d16_args }
 } | complete)
 let d16_degrade_passed = ($demo16_degrade.exit_code != 0)
 report "Zero-config degrade path cleanly blocks when parent absent" $d16_degrade_passed
 
 # Part 2: Escalation fail-closed check with unreachable parent endpoint
 let d16_env_escalate = ($d16_env_degrade | merge {
-    AICHAT_AGENT_PARENT_ADDR: "127.0.0.1:1"
-    AICHAT_AGENT_PARENT_FP: "0000000000000000000000000000000000000000000000000000000000000000"
-    AICHAT_AGENT_PARENT_FINGERPRINT: "0000000000000000000000000000000000000000000000000000000000000000"
-    AICHAT_TREE_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
-    AICHAT_AGENT_TREE_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
-    AICHAT_TREE_ID: "demo-tree-16"
-    AICHAT_AGENT_TREE_ID: "demo-tree-16"
-    AICHAT_SAFETY_VERDICT_TIMEOUT_SECS: "1"
-    AICHAT_SAFETY_ESCALATION_DIR: ($d16_dir | path join "journals")
+    PERRY_AGENT_PARENT_ADDR: "127.0.0.1:1"
+    PERRY_AGENT_PARENT_FP: "0000000000000000000000000000000000000000000000000000000000000000"
+    PERRY_AGENT_PARENT_FINGERPRINT: "0000000000000000000000000000000000000000000000000000000000000000"
+    PERRY_TREE_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
+    PERRY_AGENT_TREE_SECRET: "0000000000000000000000000000000000000000000000000000000000000000"
+    PERRY_TREE_ID: "demo-tree-16"
+    PERRY_AGENT_TREE_ID: "demo-tree-16"
+    PERRY_SAFETY_VERDICT_TIMEOUT_SECS: "1"
+    PERRY_SAFETY_ESCALATION_DIR: ($d16_dir | path join "journals")
 })
 show-cmd $d16_env_escalate $d16_args
 let t_start = (date now)
 let demo16_escalate = (do {
-    "" | with-env $d16_env_escalate { ^$aichat_bin ...$d16_args }
+    "" | with-env $d16_env_escalate { ^$perry_bin ...$d16_args }
 } | complete)
 let t_elapsed = ((date now) - $t_start)
 let d16_escalate_passed = ($demo16_escalate.exit_code != 0) and ($t_elapsed < 3sec)
 report "Escalation to unreachable parent fails closed safely in <= 1s" $d16_escalate_passed $"elapsed=($t_elapsed)"
 
 # Run offline assertions via cargo test harness for mTLS and Journal durability
-show-cmd "cargo test --bin aichat safety::tests::journal_"
+show-cmd "cargo test --bin perry safety::tests::journal_"
 let t_journal = (do {
-    ^cargo test --bin aichat safety::tests::journal_
+    ^cargo test --bin perry safety::tests::journal_
 } | complete)
-show-cmd "cargo test --bin aichat escalation::tests::"
+show-cmd "cargo test --bin perry escalation::tests::"
 let t_escalation = (do {
-    ^cargo test --bin aichat escalation::tests::
+    ^cargo test --bin perry escalation::tests::
 } | complete)
 
 let d16_journal_passed = ($t_journal.exit_code == 0)
@@ -1214,21 +1268,21 @@ if (should-run-demo "17" $demo) {
 header $"Demo 17: Full Safety Lifecycle — Happy Path \(live, ($demo_model)\)"
 show-desc "Demonstrates full safety lifecycle happy path: executing a mutating tool (fs_write) within authorized authority with live trace logging."
 
-let d17_target = ($nu.temp-dir | path join $"aichat-safe-write-($nu.pid).txt")
+let d17_target = ($nu.temp-dir | path join $"perry-safe-write-($nu.pid).txt")
 if ($d17_target | path exists) { rm -f $d17_target }
 
 let d17_prompt = $"You MUST use the exact tool 'fs_write' to write the text 'SAFETY_VERIFIED' to ($d17_target). Do not answer without calling the tool."
 let d17_env = ($base_env | merge {
-    AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo17_args = [--show-cost -r "%functions:fs_write%" $d17_prompt]
 show-cmd $d17_env $demo17_args
 step-pause $should_pause
 
 let demo17 = (do {
-    "" | with-env $d17_env { ^$aichat_bin ...$demo17_args }
+    "" | with-env $d17_env { ^$perry_bin ...$demo17_args }
 } | complete)
 
 let trace17 = ($demo17.stderr | default "")
@@ -1265,20 +1319,20 @@ if (should-run-demo "18" $demo) {
 header $"Demo 18: Pre-flight Opportunistic Remediation \(Option B — live, ($demo_model)\)"
 show-desc "Demonstrates Option B pre-flight reversibility: creates file backups prior to mutation under --autonomy reversible to enable opportunistic remediation and safe execution."
 
-let d18_target = ($nu.temp-dir | path join $"aichat-remediated-write-($nu.pid).txt")
+let d18_target = ($nu.temp-dir | path join $"perry-remediated-write-($nu.pid).txt")
 if ($d18_target | path exists) { rm -f $d18_target }
 
 let d18_prompt = $"You MUST call fs_write to write 'REMEDIATION_SUCCESS' to ($d18_target). Do not answer without calling the tool."
 let d18_env = ($base_env | merge {
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo18_args = [--show-cost --autonomy reversible -r "%functions:fs_write%" $d18_prompt]
 show-cmd $d18_env $demo18_args
 step-pause $should_pause
 
 let demo18 = (do {
-    "" | with-env $d18_env { ^$aichat_bin ...$demo18_args }
+    "" | with-env $d18_env { ^$perry_bin ...$demo18_args }
 } | complete)
 
 let trace18 = ($demo18.stderr | default "")
@@ -1313,21 +1367,21 @@ if (should-run-demo "19" $demo) {
 header $"Demo 19: Authority Ceiling Fail-Closed \(live, ($demo_model)\)"
 show-desc "Demonstrates authority ceiling escalation and fail-closed defense: irreversibly destructive tool is refused when authority exceeds safe ceiling."
 
-let d19_target = ($nu.temp-dir | path join $"aichat-blocked-write-($nu.pid).txt")
+let d19_target = ($nu.temp-dir | path join $"perry-blocked-write-($nu.pid).txt")
 if ($d19_target | path exists) { rm -f $d19_target }
 
 let d19_prompt = $"You MUST call fs_write to write 'UNAUTHORIZED_DATA' to ($d19_target). Do not answer without calling the tool."
 let d19_env = ($base_env | merge {
-    AICHAT_SAFETY_DEFAULT_CEILING: "safe"
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_SAFETY_DEFAULT_CEILING: "safe"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo19_args = [--show-cost -r "%functions:fs_write%" $d19_prompt]
 show-cmd $d19_env $demo19_args
 step-pause $should_pause
 
 let demo19 = (do {
-    "" | with-env $d19_env { ^$aichat_bin ...$demo19_args }
+    "" | with-env $d19_env { ^$perry_bin ...$demo19_args }
 } | complete)
 
 let trace19 = ($demo19.stderr | default "")
@@ -1362,20 +1416,20 @@ if (should-run-demo "20" $demo) {
 header $"Demo 20: Hard Authority Ceiling Sandboxing & Re-Delegation \(live, ($demo_model)\)"
 show-desc "Demonstrates hard authority ceiling sandboxing: sub-agent attempts disruptive action exceeding its reversible ceiling, is hard-blocked with zero downward permits, unwinds, and parent re-delegates with disruptive ceiling."
 
-let d20_target = ($nu.temp-dir | path join $"aichat-orch-esc-($nu.pid).txt")
+let d20_target = ($nu.temp-dir | path join $"perry-orch-esc-($nu.pid).txt")
 if ($d20_target | path exists) { rm -f $d20_target }
 
 let d20_prompt = $"Delegate to coder with permissions_mask 'mutating' and permissions_ceiling 'reversible': write the exact text HARD_CEILING_OK to ($d20_target) using fs_write. When coder reports permission_blocked due to authority_exceeded, re-delegate with permissions_ceiling 'disruptive' to complete the task."
 let d20_env = ($base_env | merge {
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "5"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
 let demo20_args = [--show-cost --agent orchestrator $d20_prompt]
 show-cmd $d20_env $demo20_args
 step-pause $should_pause
 
 let demo20 = (do {
-    "" | with-env $d20_env { ^$aichat_bin ...$demo20_args }
+    "" | with-env $d20_env { ^$perry_bin ...$demo20_args }
 } | complete)
 
 let trace20 = ($demo20.stderr | default "")
@@ -1411,20 +1465,20 @@ if (should-run-demo "21" $demo) {
 header $"Demo 21: Sub-Agent Capability Block & Re-Delegation \(live, ($demo_model)\)"
 show-desc "Demonstrates sub-agent capability boundary enforcement: when a child agent lacks capability for a tool, parent re-delegates to a capable agent."
 
-let d21_target = ($nu.temp-dir | path join $"aichat-orch-redelegate-($nu.pid).txt")
+let d21_target = ($nu.temp-dir | path join $"perry-orch-redelegate-($nu.pid).txt")
 if ($d21_target | path exists) { rm -f $d21_target }
 
 let d21_prompt = $"Delegate to coder: write the exact text PERMISSION_UNWOUND_OK to ($d21_target) using fs_write. Do NOT specify permissions upfront. When coder reports permission_blocked, re-delegate with permissions_mask 'mutating' and permissions_ceiling 'disruptive'."
 let d21_env = ($base_env | merge {
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "5"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
 let demo21_args = [--show-cost --agent orchestrator $d21_prompt]
 show-cmd $d21_env $demo21_args
 step-pause $should_pause
 
 let demo21 = (do {
-    "" | with-env $d21_env { ^$aichat_bin ...$demo21_args }
+    "" | with-env $d21_env { ^$perry_bin ...$demo21_args }
 } | complete)
 
 let trace21 = ($demo21.stderr | default "")
@@ -1451,14 +1505,14 @@ if (should-run-demo "22" $demo) {
 header $"Demo 22: Progressive Disclosure Runbook \(sys_triage — Builtin, Trusted\) \(live, ($demo_model)\)"
 show-desc "Demonstrates SKILL.md progressive disclosure: prompt contains minimal catalog (~25 tokens), model calls read_skill in-thread to load procedural instructions on demand, and executes tools."
 
-let d22_target = ($nu.temp-dir | path join $"aichat-triage-($nu.pid).txt")
+let d22_target = ($nu.temp-dir | path join $"perry-triage-($nu.pid).txt")
 if ($d22_target | path exists) { rm -f $d22_target }
 
 let d22_prompt = $"You MUST follow the 'sys_triage' skill procedure. Start by calling read_skill with name='sys_triage'. Write your final summary report to ($d22_target) and output it to the terminal. Do not answer without following the runbook."
 let d22_env = ($base_env | merge {
-    AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "5"
+    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
 let demo22_args = [--show-cost -r "%functions:get_current_time,fs_cat,fs_write%" $d22_prompt]
 show-cmd $d22_env $demo22_args
@@ -1466,7 +1520,7 @@ step-pause $should_pause
 
 let demo22 = (try {
     do {
-        "" | with-env $d22_env { ^$aichat_bin ...$demo22_args }
+        "" | with-env $d22_env { ^$perry_bin ...$demo22_args }
     } | complete
 } catch { |err|
     if ($d22_target | path exists) { rm -f $d22_target }
@@ -1505,7 +1559,7 @@ header $"Demo 23: Workspace Skill Discovery & Provenance Taint \(live, ($demo_mo
 show-desc "Demonstrates workspace skill discovery and provenance taint tracking: local .kiro/skills runbook is marked WorkspaceTainted, feeding untrusted_runbook: true into %assess-risk%."
 
 # Set up temporary workspace repository with .kiro/skills/repo_patcher
-let d23_ws = ($nu.temp-dir | path join $"aichat-skill-ws-($nu.pid)")
+let d23_ws = ($nu.temp-dir | path join $"perry-skill-ws-($nu.pid)")
 let d23_skill_dir = ($d23_ws | path join ".kiro" | path join "skills" | path join "repo_patcher")
 mkdir $d23_skill_dir
 
@@ -1532,10 +1586,10 @@ $d23_skill_content | save -f ($d23_skill_dir | path join "SKILL.md")
 
 let d23_prompt = $"You MUST follow the 'repo_patcher' skill procedure found in the workspace. Start by calling read_skill with name='repo_patcher'. Record the patch entry to ($d23_target) and output it to the terminal."
 let d23_env = ($base_env | merge {
-    AICHAT_WORKSPACE_DIR: $d23_ws
-    AICHAT_SAFETY_DEFAULT_CEILING: "destructive"
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "5"
+    PERRY_WORKSPACE_DIR: $d23_ws
+    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
 let demo23_args = [--show-cost -r "%functions:fs_cat,fs_write%" $d23_prompt]
 show-cmd $d23_env $demo23_args
@@ -1543,7 +1597,7 @@ step-pause $should_pause
 
 let demo23 = (try {
     do {
-        "" | with-env $d23_env { ^$aichat_bin ...$demo23_args }
+        "" | with-env $d23_env { ^$perry_bin ...$demo23_args }
     } | complete
 } catch { |err|
     rm -rf $d23_ws
@@ -1598,20 +1652,20 @@ header $"Demo 24: Autonomy Ladder — Macro Postures \(live, ($demo_model)\)"
 show-desc "Demonstrates Autonomy Ladder presets: readonly blocks at Gate 1 without evaluator cost, reversible auto-remediates via Option B, and consult enforces evaluator-first human authorization."
 
 # ── Part 1: ReadOnly Posture ──
-let d24_p1_target = ($nu.temp-dir | path join $"aichat-autonomy-ro-($nu.pid).txt")
+let d24_p1_target = ($nu.temp-dir | path join $"perry-autonomy-ro-($nu.pid).txt")
 if ($d24_p1_target | path exists) { rm -f $d24_p1_target }
 
 let d24_p1_prompt = $"You MUST call fs_write to write 'READONLY_TEST' to ($d24_p1_target). Do not answer without calling the tool."
 let d24_p1_env = ($base_env | merge {
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo24_p1_args = [--show-cost --autonomy readonly -r "%functions:fs_write%" $d24_p1_prompt]
 show-cmd $d24_p1_env $demo24_p1_args
 step-pause $should_pause
 
 let demo24_p1 = (do {
-    "" | with-env $d24_p1_env { ^$aichat_bin ...$demo24_p1_args }
+    "" | with-env $d24_p1_env { ^$perry_bin ...$demo24_p1_args }
 } | complete)
 
 let trace24_p1 = ($demo24_p1.stderr | default "")
@@ -1628,20 +1682,20 @@ report "ReadOnly target file was NOT created (fail-closed)" $d24_p1_not_created
 if ($d24_p1_target | path exists) { rm -f $d24_p1_target }
 
 # ── Part 2: Reversible Posture ──
-let d24_p2_target = ($nu.temp-dir | path join $"aichat-autonomy-rev-($nu.pid).txt")
+let d24_p2_target = ($nu.temp-dir | path join $"perry-autonomy-rev-($nu.pid).txt")
 if ($d24_p2_target | path exists) { rm -f $d24_p2_target }
 
 let d24_p2_prompt = $"You MUST call fs_write to write 'REVERSIBLE_TEST' to ($d24_p2_target). Do not answer without calling the tool."
 let d24_p2_env = ($base_env | merge {
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo24_p2_args = [--show-cost --autonomy reversible -r "%functions:fs_write%" $d24_p2_prompt]
 show-cmd $d24_p2_env $demo24_p2_args
 step-pause $should_pause
 
 let demo24_p2 = (do {
-    "" | with-env $d24_p2_env { ^$aichat_bin ...$demo24_p2_args }
+    "" | with-env $d24_p2_env { ^$perry_bin ...$demo24_p2_args }
 } | complete)
 
 let trace24_p2 = ($demo24_p2.stderr | default "")
@@ -1655,20 +1709,20 @@ report "Reversible posture target file created successfully" $d24_p2_file_writte
 if ($d24_p2_target | path exists) { rm -f $d24_p2_target }
 
 # ── Part 3: Consult Posture ──
-let d24_p3_target = ($nu.temp-dir | path join $"aichat-autonomy-consult-($nu.pid).txt")
+let d24_p3_target = ($nu.temp-dir | path join $"perry-autonomy-consult-($nu.pid).txt")
 if ($d24_p3_target | path exists) { rm -f $d24_p3_target }
 
 let d24_p3_prompt = $"You MUST call fs_write to write 'CONSULT_TEST' to ($d24_p3_target). Do not answer without calling the tool."
 let d24_p3_env = ($base_env | merge {
-    AICHAT_AGENT_LOOP_SHOW_TRACE: "true"
-    AICHAT_AGENT_LOOP_MAX_TURNS: "2"
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
 let demo24_p3_args = [--show-cost --autonomy consult -r "%functions:fs_write%" $d24_p3_prompt]
 show-cmd $d24_p3_env $demo24_p3_args
 step-pause $should_pause
 
 let demo24_p3 = (do {
-    "" | with-env $d24_p3_env { ^$aichat_bin ...$demo24_p3_args }
+    "" | with-env $d24_p3_env { ^$perry_bin ...$demo24_p3_args }
 } | complete)
 
 let trace24_p3 = ($demo24_p3.stderr | default "")
@@ -1718,7 +1772,7 @@ if ($cost_log | path exists) {
 }
 
 print ""
-print $"(ansi white_dimmed)Trace output appears live on terminal via /dev/tty, controlled by AICHAT_AGENT_LOOP_SHOW_TRACE."
+print $"(ansi white_dimmed)Trace output appears live on terminal via /dev/tty, controlled by PERRY_AGENT_LOOP_SHOW_TRACE."
 print $"Tmux title updates via /dev/tty — works regardless of pipe state.(ansi reset)"
 print ""
 }

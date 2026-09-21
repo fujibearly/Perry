@@ -1,14 +1,16 @@
 [package]
-name = "aichat"
+name = "perry"
 version = "0.31.0-fork.9"
 edition = "2021"
-authors = ["sigoden <sigoden@gmail.com>"]
-description = "All-in-one LLM CLI Tool"
+authors = ["fujibearly <bello.inbox@gmail.com>"]
+# Perry (Agent P) is a high-performance, provider-agnostic LLM CLI and agentic SRE harness,
+# originally inspired by and branched from the aichat project by sigoden.
+description = "High-performance, provider-agnostic LLM CLI and agentic SRE harness (inspired by and continued from aichat)"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/fujibearly/Perry"
 repository = "https://github.com/fujibearly/Perry"
 categories = ["command-line-utilities"]
-keywords = ["chatgpt", "llm", "cli", "ai", "repl"]
+keywords = ["llm", "cli", "ai", "repl", "agent", "sre", "aichat"]
 
 [dependencies]
 anyhow = "1.0.69"

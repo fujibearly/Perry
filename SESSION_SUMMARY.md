@@ -361,6 +361,8 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Cloud-Clone-First Protocol:** Complete 1:1 cloud replicas were pushed and verified on GitHub before a single local file was modified.
       * **Pristine Subfolder Workspaces:** Clean clones were established in `/home/istari/projects/perry` and `/home/istari/projects/innators` as the primary active development homes, leaving legacy directories (`/home/istari/projects/aichat` and `/home/istari/projects/llm-functions`) untouched as local backups.
       * **Agentic Pairing Infrastructure (`AGENTS.md`):** Added zero-turn onboarding manifests (`AGENTS.md`) to both repositories, establishing guidelines for Antigravity (AGY) and future AI coding assistants regarding project roles, safety metadata, and Nushell script conventions.
-      * **Verification & Testing:** `cargo check` passed in dev profile with 0 errors; Nushell demo harness (`scripts/run-demos.nu`) sourced with 0 errors; all four repositories audited and verified clean.
+      * **Cargo.toml Package Rebranding:** Synchronized root crate name to `perry`, updated authorship to `fujibearly <bello.inbox@gmail.com>`, and enriched description and tags acknowledging `aichat` as inspiring foundation.
+      * **Upstream vs. Perry Architectural Comparison:** Authored [`.kiro/docs/upstream-vs-perry-comparison-2026-09-18.md`](.kiro/docs/upstream-vs-perry-comparison-2026-09-18.md) documenting Perry's ~3.0× Rust codebase growth (49,831 vs 16,715 lines), 13.6MB release binary footprint, and 7 newly introduced enterprise subsystems.
+      * **Verification & Testing:** `cargo check` passed in dev profile with 0 errors; Nushell demo harness (`scripts/run-demos.nu`) updated with idiomatic procedural binary resolution; all 13 CLI tests and security integration tests passing.
       * **State:** on branch `main` in `/projects/perry` and `/projects/innators`; tracked to private GitHub origins.
 

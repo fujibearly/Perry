@@ -59,8 +59,95 @@ pub fn get_env_name(key: &str) -> String {
     format!("{}_{key}", env!("CARGO_CRATE_NAME"),).to_ascii_uppercase()
 }
 
+pub fn get_legacy_env_name(key: &str) -> String {
+    format!("AICHAT_{}", normalize_env_name(key))
+}
+
 pub fn normalize_env_name(value: &str) -> String {
     value.replace('-', "_").to_ascii_uppercase()
+}
+
+pub fn get_env_var(key: &str) -> Result<String, env::VarError> {
+    let raw = key
+        .strip_prefix("PERRY_")
+        .or_else(|| key.strip_prefix("perry_"))
+        .or_else(|| key.strip_prefix("AICHAT_"))
+        .or_else(|| key.strip_prefix("aichat_"))
+        .unwrap_or(key);
+
+    let primary = get_env_name(raw);
+    match env::var(&primary) {
+        Ok(val) => Ok(val),
+        Err(env::VarError::NotPresent) => {
+            let legacy = get_legacy_env_name(raw);
+            if legacy != primary {
+                match env::var(&legacy) {
+                    Ok(val) => Ok(val),
+                    Err(env::VarError::NotPresent) => env::var(raw),
+                    Err(e) => Err(e),
+                }
+            } else {
+                env::var(raw)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub fn get_env_bool(key: &str) -> Option<bool> {
+    get_env_var(key).ok().and_then(|v| parse_bool(&v))
+}
+
+#[allow(dead_code)]
+pub fn cmd_set_env(cmd: &mut process::Command, key: &str, val: impl AsRef<std::ffi::OsStr>) {
+    let raw = key
+        .strip_prefix("PERRY_")
+        .or_else(|| key.strip_prefix("perry_"))
+        .or_else(|| key.strip_prefix("AICHAT_"))
+        .or_else(|| key.strip_prefix("aichat_"))
+        .unwrap_or(key);
+    let primary = get_env_name(raw);
+    let legacy = get_legacy_env_name(raw);
+    cmd.env(&primary, val.as_ref());
+    if legacy != primary {
+        cmd.env(&legacy, val.as_ref());
+    }
+}
+
+pub trait EnvMap {
+    fn insert_env(&mut self, key: String, val: String);
+}
+
+impl EnvMap for indexmap::IndexMap<String, String> {
+    fn insert_env(&mut self, key: String, val: String) {
+        self.insert(key, val);
+    }
+}
+
+impl EnvMap for std::collections::HashMap<String, String> {
+    fn insert_env(&mut self, key: String, val: String) {
+        self.insert(key, val);
+    }
+}
+
+pub fn envs_insert_dual<M: EnvMap>(
+    envs: &mut M,
+    key: &str,
+    val: impl Into<String>,
+) {
+    let val = val.into();
+    let raw = key
+        .strip_prefix("PERRY_")
+        .or_else(|| key.strip_prefix("perry_"))
+        .or_else(|| key.strip_prefix("AICHAT_"))
+        .or_else(|| key.strip_prefix("aichat_"))
+        .unwrap_or(key);
+    let primary = get_env_name(raw);
+    let legacy = get_legacy_env_name(raw);
+    envs.insert_env(primary.clone(), val.clone());
+    if legacy != primary {
+        envs.insert_env(legacy, val);
+    }
 }
 
 pub fn parse_bool(value: &str) -> Option<bool> {
@@ -337,5 +424,66 @@ mod tests {
         ] {
             assert_eq!(strip_think_tag(text), text);
         }
+    }
+
+    #[test]
+    fn test_env_var_precedence_and_fallback() {
+        let key = "TEST_SAMPLE_KEY_ABC";
+        let perry_key = "PERRY_TEST_SAMPLE_KEY_ABC";
+        let aichat_key = "AICHAT_TEST_SAMPLE_KEY_ABC";
+
+        std::env::remove_var(perry_key);
+        std::env::remove_var(aichat_key);
+
+        assert!(get_env_var(key).is_err());
+
+        // Raw key fallback
+        std::env::set_var(key, "raw_val");
+        assert_eq!(get_env_var(key).unwrap(), "raw_val");
+
+        // AICHAT fallback
+        std::env::set_var(aichat_key, "legacy_val");
+        assert_eq!(get_env_var(key).unwrap(), "legacy_val");
+        assert_eq!(get_env_var(aichat_key).unwrap(), "legacy_val");
+        assert_eq!(get_env_var(perry_key).unwrap(), "legacy_val");
+
+        // PERRY precedence
+        std::env::set_var(perry_key, "perry_val");
+        assert_eq!(get_env_var(key).unwrap(), "perry_val");
+        assert_eq!(get_env_var(aichat_key).unwrap(), "perry_val");
+        assert_eq!(get_env_var(perry_key).unwrap(), "perry_val");
+
+        std::env::remove_var(perry_key);
+        std::env::remove_var(aichat_key);
+        std::env::remove_var(key);
+    }
+
+    #[test]
+    fn test_env_bool_parsing() {
+        let key = "TEST_BOOL_KEY_DEF";
+        let perry_key = "PERRY_TEST_BOOL_KEY_DEF";
+        let aichat_key = "AICHAT_TEST_BOOL_KEY_DEF";
+
+        std::env::remove_var(perry_key);
+        std::env::remove_var(aichat_key);
+
+        assert_eq!(get_env_bool(key), None);
+
+        std::env::set_var(aichat_key, "1");
+        assert_eq!(get_env_bool(key), Some(true));
+
+        std::env::set_var(perry_key, "false");
+        assert_eq!(get_env_bool(key), Some(false));
+
+        std::env::remove_var(perry_key);
+        std::env::remove_var(aichat_key);
+    }
+
+    #[test]
+    fn test_dual_export_helpers() {
+        let mut envs = indexmap::IndexMap::new();
+        envs_insert_dual(&mut envs, "CUSTOM_VAR", "hello");
+        assert_eq!(envs.get("PERRY_CUSTOM_VAR").map(String::as_str), Some("hello"));
+        assert_eq!(envs.get("AICHAT_CUSTOM_VAR").map(String::as_str), Some("hello"));
     }
 }

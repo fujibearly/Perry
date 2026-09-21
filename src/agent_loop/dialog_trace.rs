@@ -40,7 +40,7 @@ pub enum DialogOutputDestination {
 }
 
 pub fn dialog_output_destination() -> DialogOutputDestination {
-    if let Ok(val) = std::env::var("AICHAT_DIALOG_OUTPUT") {
+    if let Ok(val) = crate::utils::get_env_var("DIALOG_OUTPUT") {
         if val.eq_ignore_ascii_case("stderr") {
             return DialogOutputDestination::Stderr;
         }
@@ -79,7 +79,7 @@ impl DialogTraceSink {
 }
 
 pub fn render_dialog_event(event: &DialogEvent) {
-    if std::env::var("AICHAT_DIALOG_RELAY").as_deref() == Ok("stderr") {
+    if crate::utils::get_env_var("DIALOG_RELAY").as_deref() == Ok("stderr") {
         if let Some(frame) = format_relay_frame(event) {
             use std::io::Write;
             let mut stderr = std::io::stderr().lock();
