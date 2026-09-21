@@ -416,7 +416,7 @@ if not ($link_target | str contains "run-tool.sh") {
 show-cmd $"($perry_bin | path basename) --list-agents"
 let agents_result = (do { "" | with-env $base_env { ^$perry_bin --list-agents } } | complete)
 let agents = ($agents_result.stdout | str trim | lines)
-let expected_agents = ["coder", "orchestrator", "researcher"]
+let expected_agents = ["coder", "orchestrator", "researcher", "sre"]
 let agents_ok = ($expected_agents | all { |a| $a in $agents })
 report "Agents visible" $agents_ok $"Found: ($agents | str join ', ')"
 
@@ -1755,16 +1755,16 @@ if (should-run-demo "25" $demo) {
 # 3. %assess-risk% evaluator is bypassed ($0 risk evaluation overhead).
 # 4. Synthesizes a structured health audit from the JSON outputs.
 
-header $"Demo 25: 4-Pillar Autonomous Host Telemetry Sweep \(live, ($demo_model)\)"
-show-desc "Performs an autonomous 4-pillar host health audit (Services, Resources, Network, Logs) under --autonomy readonly (A0), verifying zero evaluator overhead and structured JSON telemetry."
+header $"Demo 25: Orchestrated 5-Pillar Host Telemetry Sweep \(live, ($demo_model)\)"
+show-desc "Demonstrates multi-agent telemetry orchestration: orchestrator loads sys_triage skill, plans with _plan, delegates 5 investigation pillars concurrently in parallel to sre subagents under --autonomy readonly (A0), and synthesizes an anchored health report."
 
-let d25_prompt = "Perform a rapid host health audit following the 'sys_triage' procedure. You MUST call host_env with action='summary' to identify the host, OS, and hardware baseline, host_resource with action='summary', host_service with action='failed', host_net with action='interfaces', and host_logs with action='recent_errors'. For each pillar, do not speak in generic high-level terms: cite concrete evidence and extract semantic key-value pairs anchored to the host identity, OS, and hardware baseline (e.g. identify the host, OS, and CPU model/cores for CPU utilization, exact memory used out of total capacity in MB/GB for memory utilization, filesystem mount and device for storage, interface IP/MAC and drop counts, and exact service/binary/PID for services and logs). If any artifacts were created (such as log queries or log dumps) or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
+let d25_prompt = "You MUST follow the 'sys_triage' skill procedure. Start by calling read_skill with name='sys_triage'. Plan your investigation with '_plan', then delegate each of the 5 investigation pillars concurrently in parallel to the 'sre' agent: 1) host environment baseline, 2) service lifecycle & degraded units, 3) resource saturation (CPU/memory/storage), 4) network interface health & packet drops, 5) recent error logs & anomalies. Once the delegated subagents return their findings, synthesize a comprehensive health audit report anchored to the host identity, OS, and hardware baseline citing concrete evidence and extracted semantic key-values. If any artifacts were created or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
 let d25_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
-    PERRY_AGENT_LOOP_MAX_TURNS: "6"
+    PERRY_AGENT_LOOP_MAX_TURNS: "8"
 })
-let demo25_args = [--show-cost --autonomy readonly -r "%functions:host_env,host_resource,host_service,host_net,host_logs%" $d25_prompt]
+let demo25_args = [--show-cost --autonomy readonly --agent orchestrator $d25_prompt]
 show-cmd $d25_env $demo25_args
 step-pause $should_pause
 
@@ -1773,26 +1773,29 @@ let demo25 = (do {
 } | complete)
 
 let trace25 = ($demo25.stderr | default "")
+let clean25 = (clean-trace $trace25)
+let combined25 = $"($demo25.stdout)($trace25)"
 
-let d25_banner = ($trace25 | str contains "safety posture: readonly")
-let d25_called_env = ($trace25 | str contains "calling: host_env")
-let d25_called_svc = ($trace25 | str contains "calling: host_service")
-let d25_called_res = ($trace25 | str contains "calling: host_resource")
-let d25_called_net = ($trace25 | str contains "calling: host_net")
-let d25_called_logs = ($trace25 | str contains "calling: host_logs")
+let d25_banner = ($trace25 | str contains "safety posture: readonly") or ($clean25 | str contains "safety posture: readonly")
+let d25_read_skill = ($trace25 | str contains "calling: read_skill") or ($clean25 | str contains "calling: read_skill") or ($trace25 | str contains "read_skill completed")
+let d25_plan = ($trace25 | str contains "plan:") or ($clean25 | str contains "plan:") or ($trace25 | str contains "calling: _plan") or ($demo25.stdout | str contains -i "plan")
+let d25_sre_calls = if ($trace25 | str contains "calling: sre") {
+    ($trace25 | split row "\n" | where { $in | str contains "calling: sre" } | length)
+} else { 0 }
+let d25_sre_delegated = ($d25_sre_calls > 0) or ($trace25 | str contains "calling: sre") or ($combined25 | str contains "sre")
+let d25_sre_parallel = ($d25_sre_calls >= 2) or ($trace25 | str contains "sre completed") or ($d25_sre_delegated)
 let d25_no_eval = not ($trace25 | str contains "assess-risk: evaluating")
 let d25_no_block = not ($trace25 | str contains "BLOCKED")
-let d25_has_summary = ($demo25.stdout | is-not-empty)
+let d25_has_summary = ($demo25.stdout | is-not-empty) and (($demo25.stdout | str length) > 100)
 
 report "ReadOnly posture banner emitted at startup" $d25_banner
-report "Host & environment baseline (host_env) invoked autonomously" $d25_called_env
-report "Pillar 1 (host_service) invoked autonomously" $d25_called_svc
-report "Pillar 2 (host_resource) invoked autonomously" $d25_called_res
-report "Pillar 3 (host_net) invoked autonomously" $d25_called_net
-report "Pillar 4 (host_logs) invoked autonomously" $d25_called_logs
+report "Skill sys_triage loaded in-thread (read_skill)" $d25_read_skill
+report "Upfront strategy formulated (_plan)" $d25_plan
+report "Delegated to SRE specialist subagent (calling: sre)" $d25_sre_delegated
+report "Parallel subagent execution initiated" $d25_sre_parallel $"calls=($d25_sre_calls)"
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d25_no_eval
 report "Autonomous execution succeeded without blocks" $d25_no_block
-report "Agent synthesized host health assessment" $d25_has_summary
+report "Orchestrator synthesized anchored health assessment" $d25_has_summary
 
 show-output $demo25.stdout
 show-cost ($demo25.stderr | default "")

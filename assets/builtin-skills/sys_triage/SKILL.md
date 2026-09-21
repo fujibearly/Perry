@@ -3,8 +3,8 @@ name: sys_triage
 description: Comprehensive 5-pillar host triage and incident diagnosis runbook
 compatibility:
   os: [linux]
-  tools: [host_env, host_resource, host_service, host_net, host_logs]
-allowed_tools: [host_env, host_resource, host_service, host_net, host_logs]
+  tools: [host_env, host_resource, host_service, host_net, host_logs, sre, _plan]
+allowed_tools: [host_env, host_resource, host_service, host_net, host_logs, sre, _plan]
 ---
 
 # Comprehensive Host SRE Triage Procedure
@@ -13,38 +13,36 @@ This runbook defines the canonical SRE procedure for triaging a host system acro
 
 ## Triage Workflow
 
-Execute the following investigation pillars in sequence:
+The 5 investigation pillars are mutually independent. Execute or delegate them **concurrently in parallel** (either directly using the host tools or by delegating to specialist subagents such as `sre`) to minimize latency and turn overhead:
 
-### 1. Environment & Hardware Baseline Anchor (`host_env`)
-- Call `host_env` with `action='summary'`.
-- Establish the canonical hostname, OS distribution, kernel version, CPU architecture/model/cores, total physical RAM, and virtualization/container boundary.
-- All subsequent metric interpretations must be anchored to this baseline.
+### Multi-Agent Orchestration Mode
+When operating as an orchestrator, plan upfront using `_plan` and delegate the 5 pillars in parallel to the `sre` specialist subagent:
+- `sre`: task="Audit host environment and hardware baseline using host_env"
+- `sre`: task="Audit degraded services and unit states using host_service"
+- `sre`: task="Audit CPU, memory, and storage saturation using host_resource"
+- `sre`: task="Audit network interfaces and packet drops using host_net"
+- `sre`: task="Audit recent error logs and anomalies using host_logs"
+Once the subagents complete, synthesize their findings into the final report.
 
-### 2. Service Lifecycle & Process Topology (`host_service`)
-- Call `host_service` with `action='failed'` to detect degraded units.
-- If degraded units exist:
-  - Note the unit name, load state, description, and unit file path (`unit_file`).
-  - Optionally call `host_service` with `action='status'` and `unit='<target>'` to inspect its failure code, PID, and recent journal output.
-- If high CPU or memory pressure is observed, call `host_service` with `action='top_procs'` to identify offending processes.
-
-### 3. Resource Saturation & Bottlenecks (`host_resource`)
-- Call `host_resource` with `action='summary'`.
-- Audit CPU utilization (busy %, I/O wait %, steal %) against the known core count from `host_env`.
-- Audit memory utilization (used MB vs total capacity, available MB, swap percentage and volume).
-- Audit root storage fullness (mount point, underlying block device, and percent used).
-
-### 4. Network Health & Packet Integrity (`host_net`)
-- Call `host_net` with `action='interfaces'`.
-- Check all physical and virtual interfaces for packet drops (`tx_dropped`, `rx_dropped`) and errors.
-- Identify degraded interfaces, noting IP and MAC addresses.
-- If socket starvation or backlog saturation is suspected, call `host_net` with `action='listen_queues'`.
-
-### 5. Log Signatures & Anomaly Spotting (`host_logs`)
-- Call `host_logs` with `action='recent_errors'` (or with `since='24h'` for wider historical lookbacks).
-- Inspect dual-arm anomaly clusters:
-  - Flag critical singleton anomalies (OOM kills, kernel panics, segfaults, hardware resets).
-  - Flag volume surges (repeated service restart loops, connection retry storms).
-- Retain verbatim key evidence and materialize the log query and dump artifacts.
+### Standalone Direct Execution Mode
+When operating standalone with direct tool access, invoke the 5 tool actions in parallel:
+1. **Environment & Hardware Baseline Anchor (`host_env`)**:
+   - Call `host_env` with `action='summary'`.
+   - Establish hostname, OS distribution, kernel version, CPU architecture/model/cores, total physical RAM, and virtualization/container boundary.
+   - All subsequent metric interpretations must be anchored to this baseline.
+2. **Service Lifecycle & Process Topology (`host_service`)**:
+   - Call `host_service` with `action='failed'` to detect degraded units.
+   - If degraded units exist, note unit name, load state, description, and unit file path (`unit_file`).
+3. **Resource Saturation & Bottlenecks (`host_resource`)**:
+   - Call `host_resource` with `action='summary'`.
+   - Audit CPU utilization against known core count, memory used vs total capacity, swap, and root storage device/mount.
+4. **Network Health & Packet Integrity (`host_net`)**:
+   - Call `host_net` with `action='interfaces'`.
+   - Check all physical and virtual interfaces for packet drops (`tx_dropped`, `rx_dropped`) and errors.
+5. **Log Signatures & Anomaly Spotting (`host_logs`)**:
+   - Call `host_logs` with `action='recent_errors'` (or with `since='24h'`).
+   - Spot critical singleton anomalies (OOM kills, panics, segfaults) and volume surges (restart loops).
+   - Retain verbatim key evidence and materialize log query/dump artifacts.
 
 ## Incident Synthesis & Reporting Requirements
 
