@@ -63,23 +63,32 @@ Synthesize a high-density, glanceable SRE health scorecard adhering strictly to 
    `### Host Triage: <hostname> (<OS> <kernel> | <primary_ip> | <cores>c/<threads>t <cpu_model> | <total_ram> RAM | Up: <uptime> | virt: <virt>)`
    (If discrete/integrated GPU is detected, include its model in the header or Resources. If hosting containers or VMs, note active guest count).
 
-2. **High-Density 5-Column Side-by-Side Scorecard Table**:
-   Directly below the cross-column host identification header, render an operational summary table with **5 columns (one column per pillar)** showing all dimensions side-by-side.
-   - **CRITICAL TERMINAL FORMATTING RULES**:
-     - **NEVER use `<br>` tags inside cells**: `<br>` is not a newline in terminal markdown renderers and creates wrapped lines that destroy column visibility.
-     - **Wider Columns (~26-28 characters wide)**: Make each column ~50% wider (target ~26-28 characters per cell) so metric descriptions, full unit names, and values read naturally without aggressive abbreviation.
-     - **Independent Row Count (Pillars Take As Many Rows As Needed)**: Each pillar column can have as many rows as needed to convey its telemetry. If a pillar has fewer items than others, leave its trailing cells blank (` `). The number of rows per pillar does NOT need to be the same.
-     - **Pad with Whitespace**: Space-pad cells so the pipes `|` align vertically in plain terminal text.
+2. **Terminal-Native 5-Column Box-Drawing Panel**:
+   Directly below the cross-column host identification header, render an operational 5-column box panel inside a fenced text block (```text ... ```) to guarantee exact monospace alignment across all terminal environments.
+   - **Equal-Width Columns (31 characters wide each)**:
+     - 5 equal-width columns of exactly 31 characters each (total panel width = 161 characters).
+     - Column headers are clean pillar names without column-wide badges: `ENVIRONMENT`, `SERVICES`, `RESOURCES`, `NETWORK`, `LOGS`.
+   - **Granular Inline Alert Badges (NO Column-Wide Painting)**:
+     - Do NOT brand an entire pillar header with `[FAIL]` or `[WARN]`.
+     - Tie status tags (`[OK]`, `[WARN]`, `[FAIL]`) directly to the specific items they refer to (e.g., `• thermald.service [FAIL]`, `Disk /: 292G/340G (90%) [WARN]`, `GPU: 90°C [WARN]`, `wlan0: 34 drops [WARN]`).
+   - **Variable Row Depths & Natural In-Column Text Wrapping**:
+     - Columns take as many rows as needed. If text exceeds 31 characters, wrap it naturally onto the next line within that column cell.
+     - Pillars with fewer items leave their trailing cells blank (` `). The number of rows per pillar does not need to be equal.
+   - **Unicode Box Framing**:
+     - Use standard box characters: top `┌─┬─┐`, header divider `├─┼─┤`, cell borders `│`, bottom `└─┴─┘`.
 
-   | Environment                | Services                   | Resources                  | Network                    | Logs                       |
-   |:---------------------------|:---------------------------|:---------------------------|:---------------------------|:---------------------------|
-   | `[OK]`                     | `[FAIL]`                   | `[WARN]`                   | `[WARN]`                   | `[FAIL]`                   |
-   | Host: `<hostname>`         | Failed: `<count> units`    | CPU: `<busy>% of <cores>c` | `<iface>: <drop> drops`    | `<count>x <event/surge>`   |
-   | OS: `<OS> <kernel>`        | • `<unit1>` (`<state>`)    | Mem: `<used>/<total> (%)`  | `<iface>: <drop> drops`    | • `<affected_service>`     |
-   | Hardware: `<cores>c, <RAM>`| • `<unit2>` (`<state>`)    | Swap: `<used>/<total>`     | Listeners: `<count>`       | Reason: `<missing binary>` |
-   | Uptime: `<uptime>`         | Active Guests: `<count>`   | Disk `/`: `<used>/<total>` | Remote IPs: `<count>`      | `<count>x <singleton>`     |
-   | Hosting: `<virt/hosting>`  |                            | GPU: `<temp>°C (<busy>%)`  | Established: `<count>`     | Core Dumps: `<count>`      |
-   | KVM Support: `<enabled>`   |                            | GPU Model: `<model>`       |                            |                            |
+```text
+┌───────────────────────────────┬───────────────────────────────┬───────────────────────────────┬───────────────────────────────┬───────────────────────────────┐
+│ ENVIRONMENT                   │ SERVICES                      │ RESOURCES                     │ NETWORK                       │ LOGS                          │
+├───────────────────────────────┼───────────────────────────────┼───────────────────────────────┼───────────────────────────────┼───────────────────────────────┤
+│ Host: <hostname> [OK]         │ Failed Units: <count> [FAIL]  │ CPU: <busy>% of <c>c [OK]     │ <iface>: <drop> tx_drop [WARN]│ <count>x <service> [FAIL]     │
+│ OS: <OS> <kernel> [OK]        │ • <failed_unit1> [FAIL]       │ Mem: <used>/<total> (%) [OK]  │ <iface>: <drop> tx_drop [WARN]│   <failure_description>       │
+│ CPU: <cores>c/<threads>t      │ • <failed_unit2>-             │ Swap: <used>/<total> [OK]     │ Listeners: <count> [OK]       │   Reason: <missing_binary>    │
+│ RAM: <total_ram> total [OK]   │   <service_name> [FAIL]       │ Disk /: <used>/<total> [WARN] │ Remote IPs: <count> [OK]      │ Kernel: <warning_msg> [WARN]  │
+│ Uptime: <uptime> [OK]         │ Active Guests: <count> [OK]   │ GPU: <temp>°C (thermal!) [WARN│ Established: <count> conns    │ Core Dumps: <count> [OK]      │
+│ Hosting: <virt/hosting> [OK]  │                               │ GPU Compute: <busy>% [OK]     │                               │                               │
+└───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┴───────────────────────────────┘
+```
 
 3. **Bounding Rule (Capacity / Denominator)**:
    Relative percentages MUST always be presented with their absolute capacity bounds as compact ratios: `used / total (pct%)` (e.g. `3.2G / 15.5G (20.6%)`, `315G / 340G (90%)`, `24.6% of 4 cores`). Never output floating percentages in a vacuum.
