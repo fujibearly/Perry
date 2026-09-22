@@ -867,6 +867,7 @@ impl ToolCall {
 
         if config.read().agent_loop.show_dialog {
             crate::utils::envs_insert_dual(&mut envs, "DIALOG_RELAY", "stderr");
+            crate::utils::envs_insert_dual(&mut envs, "AGENT_LOOP_SHOW_DIALOG", "true");
         }
 
         cmd_args.push(json_data.to_string());
@@ -987,11 +988,16 @@ pub fn run_llm_function(
         }
     };
     if output.is_none() && !stdout.trim().is_empty() {
-        output = Some(stdout);
+        output = Some(stdout.clone());
     }
     if let Some(sink) = &dialog_sink {
         if !has_relays && !cmd_args.iter().any(|a| a == "--agent" || a.starts_with("--agent=")) {
-            if let Some(ref out_text) = output {
+            let display_text = if !stdout.trim().is_empty() {
+                Some(stdout)
+            } else {
+                output.clone()
+            };
+            if let Some(ref out_text) = display_text {
                 if !out_text.trim().is_empty() {
                     sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
                         trace_id: String::new(),
