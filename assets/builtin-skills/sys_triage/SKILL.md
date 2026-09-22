@@ -38,8 +38,8 @@ When operating standalone with direct tool access, invoke the 5 tool actions in 
    - Call `host_resource` with `action='summary'`.
    - Audit CPU utilization against known core count, memory used vs total capacity, swap, and root storage device/mount.
 4. **Network Health, Packet Integrity & Listening Services (`host_net`)**:
-   - Call `host_net` with `action='interfaces'` (or `action='listeners'` to audit bound ports).
-   - Check all physical and virtual interfaces for packet drops (`tx_dropped`, `rx_dropped`), errors, and enumerate active listening services/ports.
+   - Call `host_net` with `action='interfaces'` (or `action='listeners'` to audit bound ports, `action='connections'` to audit active remote IPs/connections).
+   - Check all physical and virtual interfaces for packet drops (`tx_dropped`, `rx_dropped`), errors, and enumerate active listening services/ports and connected remote IPs.
 5. **Log Signatures & Anomaly Spotting (`host_logs`)**:
    - Call `host_logs` with `action='recent_errors'` (or with `since='24h'`).
    - Spot critical singleton anomalies (OOM kills, panics, segfaults) and volume surges (restart loops).
