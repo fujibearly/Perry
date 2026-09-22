@@ -532,6 +532,7 @@ pub struct Config {
 
     pub rag_embedding_model: Option<String>,
     pub rag_reranker_model: Option<String>,
+    pub web_search_model: Option<String>,
     pub rag_top_k: usize,
     pub rag_chunk_size: Option<usize>,
     pub rag_chunk_overlap: Option<usize>,
@@ -628,6 +629,7 @@ impl Default for Config {
 
             rag_embedding_model: None,
             rag_reranker_model: None,
+            web_search_model: None,
             rag_top_k: 5,
             rag_chunk_size: None,
             rag_chunk_overlap: None,
@@ -892,6 +894,19 @@ impl Config {
         Self::local_path("models-override.yaml")
     }
 
+    pub fn resolve_web_search_model(&self) -> String {
+        if let Some(ref m) = self.web_search_model {
+            let trimmed = m.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        if !self.model_id.trim().is_empty() {
+            return self.model_id.trim().to_string();
+        }
+        "gemini:gemini-2.5-flash".to_string()
+    }
+
     pub fn state(&self) -> StateFlags {
         let mut flags = StateFlags::empty();
         if let Some(session) = &self.session {
@@ -1077,6 +1092,10 @@ impl Config {
             (
                 "rag_reranker_model",
                 format_option_value(&rag_reranker_model),
+            ),
+            (
+                "web_search_model",
+                format_option_value(&self.web_search_model),
             ),
             ("rag_top_k", rag_top_k.to_string()),
             ("dry_run", self.dry_run.to_string()),
@@ -3101,6 +3120,16 @@ impl Config {
         if let Some(v) = read_env_value::<String>(&get_env_name("rag_reranker_model")) {
             self.rag_reranker_model = v;
         }
+        if let Some(v) = read_env_value::<String>(&get_env_name("web_search_model")) {
+            self.web_search_model = v;
+        }
+        if self.web_search_model.is_none() {
+            if let Ok(v) = std::env::var("WEB_SEARCH_MODEL") {
+                if !v.trim().is_empty() {
+                    self.web_search_model = Some(v);
+                }
+            }
+        }
         if let Some(Some(v)) = read_env_value::<usize>(&get_env_name("rag_top_k")) {
             self.rag_top_k = v;
         }
@@ -4128,4 +4157,38 @@ multi_agent:
         std::env::remove_var("AICHAT_WORKSPACE_DIR");
         let _ = std::fs::remove_dir_all(&temp);
     }
+
+    #[test]
+    fn test_web_search_model_resolution() {
+        // 1. When neither web_search_model nor model is configured, falls back to gemini default
+        let mut config = Config::default();
+        config.model_id = String::new();
+        config.web_search_model = None;
+        assert_eq!(config.resolve_web_search_model(), "gemini:gemini-2.5-flash");
+
+        // 2. When model is configured in config.yaml, falls back to config.model
+        config.model_id = "claude:claude-3-5-sonnet".to_string();
+        config.web_search_model = None;
+        assert_eq!(config.resolve_web_search_model(), "claude:claude-3-5-sonnet");
+
+        // 3. When web_search_model is explicitly configured, it takes precedence over model
+        config.web_search_model = Some("gemini:gemini-2.5-flash".to_string());
+        assert_eq!(config.resolve_web_search_model(), "gemini:gemini-2.5-flash");
+    }
+
+    #[test]
+    fn test_web_search_model_deserialization() {
+        let yaml = r#"
+model: claude:claude-3-5-sonnet
+web_search_model: gemini:gemini-2.5-flash
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("deserialize config");
+        assert_eq!(config.model_id, "claude:claude-3-5-sonnet");
+        assert_eq!(
+            config.web_search_model,
+            Some("gemini:gemini-2.5-flash".to_string())
+        );
+        assert_eq!(config.resolve_web_search_model(), "gemini:gemini-2.5-flash");
+    }
 }
+

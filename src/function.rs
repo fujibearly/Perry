@@ -870,6 +870,19 @@ impl ToolCall {
             crate::utils::envs_insert_dual(&mut envs, "AGENT_LOOP_SHOW_DIALOG", "true");
         }
 
+        if !envs.contains_key("WEB_SEARCH_MODEL") && std::env::var("WEB_SEARCH_MODEL").is_err() {
+            let resolved_search_model = config.read().resolve_web_search_model();
+            envs.insert("WEB_SEARCH_MODEL".into(), resolved_search_model);
+        }
+
+        let config_dir_str = Config::config_dir().display().to_string();
+        if !envs.contains_key("PERRY_CONFIG_DIR") && std::env::var("PERRY_CONFIG_DIR").is_err() {
+            envs.insert("PERRY_CONFIG_DIR".into(), config_dir_str.clone());
+        }
+        if !envs.contains_key("AICHAT_CONFIG_DIR") && std::env::var("AICHAT_CONFIG_DIR").is_err() {
+            envs.insert("AICHAT_CONFIG_DIR".into(), config_dir_str);
+        }
+
         cmd_args.push(json_data.to_string());
 
         let dialog_sink = config.read().dialog_sink();
