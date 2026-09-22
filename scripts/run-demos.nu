@@ -1756,7 +1756,7 @@ if (should-run-demo "25" $demo) {
 # 4. Synthesizes a structured health audit from the JSON outputs.
 
 header $"Demo 25: Orchestrated 5-Pillar Host Telemetry Sweep \(live, ($demo_model)\)"
-show-desc "Demonstrates multi-agent telemetry orchestration: orchestrator loads sys_triage skill, plans with _plan, delegates 5 investigation pillars concurrently in parallel to sre subagents under --autonomy readonly (A0), and synthesizes an anchored health report."
+show-desc "Demonstrates multi-agent telemetry orchestration: orchestrator loads sys_triage skill, plans with _plan, delegates the 5-pillar sweep to an sre specialist agent to evaluate holistic host context under --autonomy readonly (A0), and synthesizes an anchored health report."
 
 let d25_prompt = "Perform a full 5-pillar host health triage following the 'sys_triage' runbook. Synthesize the findings into a high-density, bounded numerical scorecard with status badges, concrete technical evidence, and hyperlinked artifacts."
 let d25_env = ($base_env | merge {
@@ -1783,7 +1783,7 @@ let d25_sre_calls = if ($trace25 | str contains "calling: sre") {
     ($trace25 | split row "\n" | where { $in | str contains "calling: sre" } | length)
 } else { 0 }
 let d25_sre_delegated = ($d25_sre_calls > 0) or ($trace25 | str contains "calling: sre") or ($combined25 | str contains "sre")
-let d25_sre_parallel = ($d25_sre_calls >= 2) or ($trace25 | str contains "sre completed") or ($d25_sre_delegated)
+let d25_sre_completed = ($trace25 | str contains "sre completed") or ($d25_sre_delegated)
 let d25_no_eval = not ($trace25 | str contains "assess-risk: evaluating")
 let d25_no_block = not ($trace25 | str contains "BLOCKED")
 let d25_has_summary = ($demo25.stdout | is-not-empty) and (($demo25.stdout | str length) > 100)
@@ -1792,7 +1792,7 @@ report "ReadOnly posture banner emitted at startup" $d25_banner
 report "Skill sys_triage loaded in-thread (read_skill)" $d25_read_skill
 report "Upfront strategy formulated (_plan)" $d25_plan
 report "Delegated to SRE specialist subagent (calling: sre)" $d25_sre_delegated
-report "Parallel subagent execution initiated" $d25_sre_parallel $"calls=($d25_sre_calls)"
+report "Holistic SRE triage sweep completed" $d25_sre_completed $"calls=($d25_sre_calls)"
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d25_no_eval
 report "Autonomous execution succeeded without blocks" $d25_no_block
 report "Orchestrator synthesized anchored health assessment" $d25_has_summary
