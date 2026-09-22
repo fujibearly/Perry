@@ -28,11 +28,12 @@ Once the subagents complete, synthesize their findings into the final report.
 When operating standalone with direct tool access, invoke the 5 tool actions in parallel:
 1. **Environment & Hardware Baseline Anchor (`host_env`)**:
    - Call `host_env` with `action='summary'`.
-   - Establish hostname, OS distribution, kernel version, CPU architecture/model/cores, total physical RAM, and virtualization/container boundary.
+   - Establish hostname, OS distribution, kernel version, CPU architecture/model/cores, total physical RAM, virtualization/container boundary, and hosted virtualization workloads (Docker/Podman/KVM/LXC).
    - All subsequent metric interpretations must be anchored to this baseline.
 2. **Service Lifecycle & Process Topology (`host_service`)**:
    - Call `host_service` with `action='failed'` to detect degraded units.
    - If degraded units exist, note unit name, load state, description, and unit file path (`unit_file`).
+   - If the host runs virtualized workloads, call `action='guests'` to audit active containers and VMs.
 3. **Resource Saturation & Bottlenecks (`host_resource`)**:
    - Call `host_resource` with `action='summary'`.
    - Audit CPU utilization against known core count, memory used vs total capacity, swap, and root storage device/mount.
@@ -51,7 +52,7 @@ Synthesize a high-density, glanceable SRE health scorecard adhering strictly to 
 1. **Host Identity & Hardware Anchor**:
    Start with a compact single-line header establishing host identity, hardware bounds, and IP address:
    `### Host Triage: <hostname> (<OS> <kernel> | <primary_ip> | <cores>c/<threads>t <cpu_model> | <total_ram> RAM | Up: <uptime> | virt: <virt>)`
-   (If discrete/integrated GPU is detected, include its model in the header or Resources).
+   (If discrete/integrated GPU is detected, include its model in the header or Resources. If hosting containers or VMs, note active guest count).
 
 2. **High-Density Telemetry Scorecard Table**:
    Render an operational summary table. Use text status badges `[OK]`, `[WARN]`, `[FAIL]` (NO emojis):
