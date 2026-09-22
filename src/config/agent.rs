@@ -378,11 +378,15 @@ impl RoleLike for Agent {
             let builtin_dir = crate::utils::get_env_var("BUILTIN_SKILLS_DIR")
                 .ok()
                 .map(PathBuf::from);
-            let registry = crate::skill::SkillRegistry::discover(
+            let mut registry = crate::skill::SkillRegistry::discover(
                 workspace_dir.as_deref(),
                 Some(&global_dir),
                 builtin_dir.as_deref(),
             );
+            let agent_skills_dir = Config::agent_functions_dir(self.name()).join("skills");
+            if agent_skills_dir.is_dir() {
+                registry.load_dir(&agent_skills_dir, crate::skill::SkillProvenance::Global);
+            }
             let eligible = registry.filter_eligible(&self.skills_setting(), false);
             if let Some(catalogue) = registry.format_prompt_catalogue(&eligible) {
                 if !prompt.is_empty() {

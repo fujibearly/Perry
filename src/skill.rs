@@ -283,11 +283,18 @@ pub fn get_eligible_skills_for_config(config: &Config) -> Vec<Skill> {
         .ok()
         .map(PathBuf::from);
 
-    let reg = SkillRegistry::discover(
+    let mut reg = SkillRegistry::discover(
         workspace_dir.as_deref(),
         Some(&global_dir),
         builtin_dir.as_deref(),
     );
+
+    if let Some(agent) = &config.agent {
+        let agent_skills_dir = Config::agent_functions_dir(agent.name()).join("skills");
+        if agent_skills_dir.is_dir() {
+            reg.load_dir(&agent_skills_dir, SkillProvenance::Global);
+        }
+    }
 
     let (setting, is_nano) = if let Some(agent) = &config.agent {
         (agent.skills_setting(), agent.is_nano())

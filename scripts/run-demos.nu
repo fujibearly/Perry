@@ -1765,9 +1765,9 @@ if (should-run-demo "25" $demo) {
 # 4. Synthesizes a structured health audit from the JSON outputs.
 
 header $"Demo 25: Orchestrated 5-Pillar Host Telemetry Sweep \(live, ($demo_model)\)"
-show-desc "Demonstrates multi-agent telemetry orchestration: orchestrator loads sys_triage skill, plans with _plan, delegates the 5-pillar sweep to an sre specialist agent to evaluate holistic host context under --autonomy readonly (A0), and synthesizes an anchored health report."
+show-desc "Demonstrates progressive disclosure: orchestrator delegates 5-pillar sweep to sre specialist (which executes sys_triage and returns structured JSON), then orchestrator loads box_panel_scorecard presentation skill to render a 5-column terminal dashboard."
 
-let d25_prompt = "Perform a full 5-pillar host health triage following the 'sys_triage' runbook. Synthesize the findings into a high-density, bounded numerical scorecard with status badges, concrete technical evidence, and hyperlinked artifacts."
+let d25_prompt = "Triage host health using the SRE specialist subagent, read the 'box_panel_scorecard' presentation skill, and render the compiled telemetry into a 5-column terminal scorecard in your final response."
 let d25_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1786,26 +1786,26 @@ let clean25 = (clean-trace $trace25)
 let combined25 = $"($demo25.stdout)($trace25)"
 
 let d25_banner = ($trace25 | str contains "safety posture: readonly") or ($clean25 | str contains "safety posture: readonly")
-let d25_read_skill = ($trace25 | str contains "calling: read_skill") or ($clean25 | str contains "calling: read_skill") or ($trace25 | str contains "read_skill completed")
 let d25_plan = ($trace25 | str contains "plan:") or ($clean25 | str contains "plan:") or ($trace25 | str contains "calling: _plan") or ($demo25.stdout | str contains -i "plan")
 let d25_sre_calls = if ($trace25 | str contains "calling: sre") {
     ($trace25 | split row "\n" | where { $in | str contains "calling: sre" } | length)
 } else { 0 }
 let d25_sre_delegated = ($d25_sre_calls > 0) or ($trace25 | str contains "calling: sre") or ($combined25 | str contains "sre")
 let d25_sre_completed = ($trace25 | str contains "sre completed") or ($d25_sre_delegated)
+let d25_read_scorecard = ($trace25 | str contains "box_panel_scorecard") or ($clean25 | str contains "box_panel_scorecard") or ($trace25 | str contains "read_skill") or ($clean25 | str contains "read_skill")
 let d25_no_eval = not ($trace25 | str contains "assess-risk: evaluating")
 let d25_no_block = not ($trace25 | str contains "BLOCKED")
 let d25_has_summary = ($demo25.stdout | is-not-empty) and (($demo25.stdout | str length) > 100)
 let d25_has_artifacts = ($demo25.stdout | str contains "file://") or ($combined25 | str contains "file://")
 
 report "ReadOnly posture banner emitted at startup" $d25_banner
-report "Skill sys_triage loaded in-thread (read_skill)" $d25_read_skill
 report "Upfront strategy formulated (_plan)" $d25_plan
 report "Delegated to SRE specialist subagent (calling: sre)" $d25_sre_delegated
 report "Holistic SRE triage sweep completed" $d25_sre_completed $"calls=($d25_sre_calls)"
+report "Presentation skill loaded (box_panel_scorecard)" $d25_read_scorecard
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d25_no_eval
 report "Autonomous execution succeeded without blocks" $d25_no_block
-report "Orchestrator synthesized anchored health assessment" $d25_has_summary
+report "Orchestrator synthesized terminal scorecard" $d25_has_summary
 report "Local telemetry artifacts hyperlinked (file://)" $d25_has_artifacts
 
 show-output $demo25.stdout --max-lines 50
