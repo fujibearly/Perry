@@ -37,21 +37,22 @@ See #[[file:.kiro/architecture.md]] for full architecture documentation.
 
 This system has both a production (installed) and development setup:
 
-### Production (live system)
-- **Binary:** `/usr/bin/aichat` (v0.30.0)
-- **Config:** `~/.config/aichat/config.yaml`
-- **Functions (live):** `~/clones/llm-functions` — already built (`functions.json`, `bin/`, `tools.txt`, `agents.txt` present). Symlinked from `~/.config/aichat/functions`.
+### Perry Local Environment
+- **Binary:** `~/.local/bin/perry` (symlinked from `~/projects/perry/target/release/perry`)
+- **Config Root:** `~/.config/perry/config.yaml` (independent from legacy `~/.config/aichat/`)
+- **Functions:** `~/.config/perry/functions -> ~/projects/innators`
+- **Default Autonomy Posture:** `--autonomy readonly` (least privilege baseline; opt out with `--autonomy none`)
+- **Web Search Model Fallback:** Configurable via `web_search_model:` in `config.yaml` or `WEB_SEARCH_MODEL` / `PERRY_WEB_SEARCH_MODEL` env vars (falls back to `model:` in `config.yaml`)
 
-### Development (this workspace)
+### Development Workspaces
 - **Perry source:** `~/projects/perry` (primary development, tracking `fujibearly/Perry.git:main`)
 - **Innators source:** `~/projects/innators` (companion actuation tools, tracking `fujibearly/innators.git:main`)
 
-### Important notes
-- The original `~/projects/aichat` and `~/projects/llm-functions` are preserved as local backups.
-- Do NOT modify `~/clones/llm-functions` without explicit permission — it's the live functions directory used by the installed aichat.
-- The `~/projects/innators` clone is safe to experiment with.
-- To test dev-built perry with dev innators: `export AICHAT_FUNCTIONS_DIR=~/projects/innators`
-- The installed aichat at `/usr/bin/aichat` may hang on `--info` if run non-interactively (it prompts for config creation).
+### Historical / Upstream Backups
+- Upstream `/usr/bin/aichat` and `~/clones/llm-functions` remain preserved as legacy references.
+- Local backups in `~/projects/aichat` and `~/projects/llm-functions` are read-only.
+- The `~/projects/innators` clone is the active actuator layer for Perry.
+- Dual subprocess injection ensures tools executing `aichat` inherit `AICHAT_CONFIG_DIR=~/.config/perry`.
 
 ## Conventions
 

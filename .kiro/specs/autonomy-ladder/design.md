@@ -152,8 +152,8 @@ impl AutonomyLevel {
 | Component | File | Changes |
 |---|---|---|
 | `AutonomyLevel` enum | `src/safety.rs` | Define enum, `from_str_loose`, mapping helpers for mask, ceiling, and reversibility. |
-| Configuration | `src/config/mod.rs` | Add `autonomy: Option<AutonomyLevel>` to `SafetyConfig`, env var `AICHAT_AUTONOMY` in `load_envs`. |
-| CLI Argument | `src/cli.rs` | Add `--autonomy <LEVEL>` to `Cli` struct; apply in `config_override`. |
+| Configuration | `src/config/mod.rs` | Add `autonomy: Option<AutonomyLevel>` to `SafetyConfig` (defaults to `Some(AutonomyLevel::ReadOnly)`), env var `AICHAT_AUTONOMY` in `load_envs`. Support `none` to opt out. |
+| CLI Argument | `src/cli.rs` | Add `--autonomy <LEVEL>` to `Cli` struct [default: readonly]; apply in `config_override`. |
 | Posture Expansion | `src/agent_loop.rs` | Expand root posture at start of `run`/`run_agent`. |
 | Reversibility Clamp | `src/agent_loop.rs` | In `authority_denied_result`, check `permits_autonomous_reversibility()` before allowing Option B to auto-pass mutations. |
 | Evaluator-First Funnel | `src/agent_loop.rs` | Restructure `eval_single_tool` to run Gate 3 before presenting the unified human prompt on Gate 2 over-ceiling events. |

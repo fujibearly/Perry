@@ -31,7 +31,8 @@ While mechanically complete, operating this system requires configuring multiple
   - `a0`, `observer` $\to$ `ReadOnly`
   - `a1`, `copilot` $\to$ `Consult`
   - `a2`, `autopilot` $\to$ `Reversible`
-- **Default:** If `--autonomy` is omitted, the engine remains backwards compatible, falling back to `safety.default_ceiling` (defaulting to `Destructive`) and leaving the root process unmasked.
+  - `none`, `unrestricted`, `off`, `full` $\to$ clears the macro posture (`autonomy: None`)
+- **Default:** If `--autonomy` is omitted, the engine defaults to `readonly` (`AutonomyLevel::ReadOnly`, implementing the principle of least privilege). To run unconstrained without a macro posture, the operator explicitly passes `--autonomy none`. If `--autonomy none` is set, the engine falls back to `safety.default_ceiling` (defaulting to `Destructive`) and leaves the root process unmasked.
 
 ### FR-19.2 — 2D Posture Decomposition (Root Macro Expansion)
 `AutonomyLevel` MUST expand at root process startup into the two canonical safety axes:

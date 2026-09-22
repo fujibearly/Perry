@@ -286,4 +286,47 @@ This document captures architectural lessons, debugging insights, and operationa
 - **Actionable Rule for Agents:**
   *Do not force open-ended system diagnostic evidence into rigid schema enums. Employ dynamic semantic key-value extraction to discover diagnostic keys organically from live system outputs.*
 
+---
+
+### [2026-09-22T14:10:00-04:00] Config Directory Decoupling & Dual Subprocess Interoperability
+- **Category:** Configuration & Process Environment
+- **Problem:**
+  When transitioning a codebase from upstream (`aichat`) to a dedicated fork namespace (`perry`), the engine's default configuration path moved from `~/.config/aichat/` to `~/.config/perry/`. However, existing actuator tool scripts, child tools, or companion wrappers often invoke `/usr/bin/aichat` or look for upstream configuration paths, causing them to fall back to stale or missing credentials if only `~/.config/perry/` is populated.
+- **Consequence:**
+  Child tools executed by Perry failed due to missing configuration or prompted interactively for configuration creation, breaking non-interactive agent execution.
+- **Resolution:**
+  Established a dedicated `~/.config/perry/` directory (with `functions/` symlinked to `~/projects/innators`). In [`src/function.rs`](file:///home/istari/projects/perry/src/function.rs), Perry's `eval_shell` automatically injects both `PERRY_CONFIG_DIR` and `AICHAT_CONFIG_DIR` pointing to the resolved Perry config directory into child tool process environments.
+- **Actionable Rule for Agents:**
+  *When migrating or decoupling a CLI fork's configuration path, inject dual config directory environment pointers into subprocesses and tool wrappers so that legacy actuator scripts seamlessly read the new configuration root without breaking.*
+
+---
+
+### [2026-09-22T14:15:00-04:00] Default Autonomy Posture: Engine-Level Principle of Least Privilege
+- **Category:** Safety & Autonomy Ladder
+- **Problem:**
+  Without an explicit `--autonomy` flag, the agent loop previously defaulted to an unconstrained operational posture (`autonomy: None`), leaving the root process Gate 2 authority ceiling at `Destructive`. This violated the principle of least privilege: an operator running `perry --agent sre` could unintentionally execute destructive commands without realizing that unconstrained autonomy was active.
+- **Consequence:**
+  Automated agent invocations lacked a safe baseline posture by default, requiring operators to remember to pass `--autonomy readonly` on every invocation.
+- **Resolution:**
+  Implemented Method 2: Made `--autonomy readonly` the engine-level default in `SafetyConfig`. Unconstrained execution now requires an explicit opt-out (`--autonomy none` or `unrestricted`). Fine-grained authority overrides (e.g. `--ceiling` or role-specific ceilings) remain strictly isolated, and unit tests verify that macro postures do not accidentally bleed across isolated gate tests.
+- **Actionable Rule for Agents:**
+  *Default autonomous agent loops to the safest operational posture (`readonly`). Provide an explicit opt-out (`--autonomy none`) rather than making unconstrained execution the silent default.*
+
+---
+
+### [2026-09-22T14:35:00-04:00] Actuator Tool Environment Dependencies & Hierarchical Config Fallbacks
+- **Category:** Actuator Governance & Configuration
+- **Problem:**
+  External tool scripts defined with `argc` mandatory environment variables (e.g. `# @env WEB_SEARCH_MODEL!`) failed immediately with non-zero exit codes if the environment variable was not explicitly exported in the parent shell, even when valid models were configured in `config.yaml`. Furthermore, Perry had no engine-level `web_search_model` key in `Config`.
+- **Consequence:**
+  Agents calling `web_search` crashed during tool pre-flight before `main()` could run, unless the user manually set `export WEB_SEARCH_MODEL=...` beforehand.
+- **Resolution:**
+  1. Relaxed `argc` declaration in `web_search_aichat.sh` from required (`!`) to optional (`# @env WEB_SEARCH_MODEL`).
+  2. Implemented hierarchical resolution in both the shell tool and Perry core engine:
+     `WEB_SEARCH_MODEL` (env) $\to$ `web_search_model` (`config.yaml`) $\to$ `model` (primary `config.yaml` model) $\to$ default (`gemini:gemini-2.5-flash`).
+  3. Perry's `eval_shell` automatically injects `WEB_SEARCH_MODEL` into tool process environments if unset.
+- **Actionable Rule for Agents:**
+  *Never make environment variables mandatory (`!`) in actuator scripts if sensible defaults or configuration file fallbacks can be resolved. Support a hierarchical resolution order: explicit env var $\to$ specific config key $\to$ general config model $\to$ stable default.*
+
+
 
