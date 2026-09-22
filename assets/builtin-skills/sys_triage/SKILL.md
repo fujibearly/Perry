@@ -51,12 +51,13 @@ Synthesize a high-density, glanceable SRE health scorecard adhering strictly to 
 1. **Host Identity & Hardware Anchor**:
    Start with a compact single-line header establishing host identity, hardware bounds, and IP address:
    `### Host Triage: <hostname> (<OS> <kernel> | <primary_ip> | <cores>c/<threads>t <cpu_model> | <total_ram> RAM | Up: <uptime> | virt: <virt>)`
+   (If discrete/integrated GPU is detected, include its model in the header or Resources).
 
 2. **High-Density Telemetry Scorecard Table**:
    Render an operational summary table. Use text status badges `[OK]`, `[WARN]`, `[FAIL]` (NO emojis):
    | Pillar | Status | Telemetry Summary (Bounded Metrics & Ratios) |
    |:---|:---:|:---|
-   | **Resources** | `[OK]` or `[WARN]` | CPU: `<busy>% of <cores>c (idle <idle>%)` \| Mem: `<used>/<total> (<pct>%)` \| Swap: `<used>/<total> (<pct>%)` \| Disk `/`: `<used>/<total> (<pct>% - <avail> free)` |
+   | **Resources** | `[OK]` or `[WARN]` | CPU: `<busy>% of <cores>c (idle <idle>%)` \| Mem: `<used>/<total> (<pct>%)` \| Swap: `<used>/<total> (<pct>%)` \| Disk `/`: `<used>/<total> (<pct>% - <avail> free)` (include `\| GPU: <busy>% (<used>/<total> VRAM, <temp>°C)` if present) |
    | **Services** | `[OK]` or `[FAIL]` | Degraded unit list with state or `None degraded` |
    | **Network** | `[OK]` or `[WARN]` | Interface packet drop ratios: `<iface>: <tx_drop> tx_drop / <tx_mb> MB` |
    | **Logs** | `[OK]` or `[FAIL]` | Active volume surges and notable singletons |
