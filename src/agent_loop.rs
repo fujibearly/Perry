@@ -197,10 +197,13 @@ pub enum AgentLoopEvent {
     TelemetryDistillationStart {
         tool: String,
         model: String,
+        lines_in: usize,
     },
     TelemetryDistillationComplete {
         tool: String,
         duration: Duration,
+        lines_in: usize,
+        lines_out: usize,
     },
     TelemetryDistillationFallback {
         tool: String,
@@ -1906,11 +1909,13 @@ async fn run_telemetry_distiller(
         Ok(s) => s,
         Err(_) => raw_payload.to_string(),
     };
+    let lines_in = payload_str.lines().count();
 
     if let Some(p) = progress {
         p.emit(AgentLoopEvent::TelemetryDistillationStart {
             tool: tool_name.to_string(),
             model: distill_model.clone(),
+            lines_in,
         });
     }
 
@@ -2002,15 +2007,19 @@ async fn run_telemetry_distiller(
             match serde_json::from_str::<serde_json::Value>(json_str) {
                 Ok(mut parsed) => {
                     let elapsed = start_time.elapsed();
+                    let lines_out = json_str.lines().count();
                     if let Some(p) = progress {
                         p.emit(AgentLoopEvent::TelemetryDistillationComplete {
                             tool: tool_name.to_string(),
                             duration: elapsed,
+                            lines_in,
+                            lines_out,
                         });
                     }
                     if let serde_json::Value::Object(ref mut map) = parsed {
                         map.insert("distilled".to_string(), serde_json::json!(true));
                     }
+                    sanitize_artifact_script_paths(&mut parsed);
                     parsed
                 }
                 Err(e) => {
@@ -2020,7 +2029,9 @@ async fn run_telemetry_distiller(
                             reason: format!("JSON parse error: {e}"),
                         });
                     }
-                    raw_payload
+                    let mut fallback = raw_payload;
+                    sanitize_artifact_script_paths(&mut fallback);
+                    fallback
                 }
             }
         }
@@ -2031,8 +2042,55 @@ async fn run_telemetry_distiller(
                     reason: format!("LLM completion error: {err}"),
                 });
             }
-            raw_payload
+            let mut fallback = raw_payload;
+            sanitize_artifact_script_paths(&mut fallback);
+            fallback
         }
+    }
+}
+
+/// User Safety Requirement: Catch script artifacts (.sh, .bash, .py, etc.)
+/// and surface them as safe .txt files with non-executable permissions to prevent
+/// accidental execution when following file:// URLs.
+pub fn sanitize_artifact_script_paths(val: &mut serde_json::Value) {
+    match val {
+        serde_json::Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                sanitize_artifact_script_paths(v);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                sanitize_artifact_script_paths(item);
+            }
+        }
+        serde_json::Value::String(s) => {
+            let script_exts = [
+                ".sh", ".bash", ".zsh", ".csh", ".ksh", ".py", ".nu", ".rb", ".pl", ".php", ".js",
+            ];
+            for ext in script_exts {
+                if s.ends_with(ext) {
+                    let path_str = s.strip_prefix("file://").unwrap_or(s.as_str());
+                    let path = std::path::Path::new(path_str);
+                    let target_str = format!("{path_str}.txt");
+                    let target_path = std::path::Path::new(&target_str);
+                    if path.exists() && !target_path.exists() {
+                        let _ = std::fs::copy(path, &target_path);
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let _ = std::fs::set_permissions(
+                                &target_path,
+                                std::fs::Permissions::from_mode(0o600),
+                            );
+                        }
+                    }
+                    *s = format!("{s}.txt");
+                    break;
+                }
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2784,9 +2842,11 @@ async fn eval_single_tool(
     // Route 3: Shell-exec tools (wrapped in spawn_blocking)
     let config_clone = config.clone();
     let call_clone = call.clone();
-    let result = tokio::task::spawn_blocking(move || call_clone.eval_shell(&config_clone))
+    let mut result = tokio::task::spawn_blocking(move || call_clone.eval_shell(&config_clone))
         .await
         .map_err(|e| anyhow::anyhow!("Tool task panicked: {e}"))??;
+
+    sanitize_artifact_script_paths(&mut result);
 
     let decl = find_tool_declaration(config, &call.name);
     if let Some(decl) = decl {
@@ -5625,16 +5685,16 @@ pub fn format_trace_event_styled(
                 Some(format!("{agent_tag} BLOCK {name}: {desc}"))
             }
         }
-        AgentLoopEvent::TelemetryDistillationStart { tool, model } => {
-            Some(format!("{agent_tag} distill-telemetry: distilling {tool} with {model}"))
+        AgentLoopEvent::TelemetryDistillationStart { tool, model, lines_in } => {
+            Some(format!("{agent_tag} distill-telemetry: distilling {tool} ({lines_in} lines in) with {model}"))
         }
-        AgentLoopEvent::TelemetryDistillationComplete { tool, duration } => {
+        AgentLoopEvent::TelemetryDistillationComplete { tool, duration, lines_in, lines_out } => {
             let dur_str = format!("{:.2?}", duration);
             if is_styled {
                 let tag = nu_ansi_term::Color::Cyan.paint("distill-telemetry");
-                Some(format!("{agent_tag} {tag}: distilled {tool} ({dur_str})"))
+                Some(format!("{agent_tag} {tag}: distilled {tool} ({dur_str}, {lines_in} lines in -> {lines_out} lines out)"))
             } else {
-                Some(format!("{agent_tag} distill-telemetry: distilled {tool} ({dur_str})"))
+                Some(format!("{agent_tag} distill-telemetry: distilled {tool} ({dur_str}, {lines_in} lines in -> {lines_out} lines out)"))
             }
         }
         AgentLoopEvent::TelemetryDistillationFallback { tool, reason } => {
@@ -6487,16 +6547,20 @@ agent_loop:
         let event = AgentLoopEvent::TelemetryDistillationStart {
             tool: "host_logs".to_string(),
             model: "gemini:gemini-2.5-flash".to_string(),
+            lines_in: 120,
         };
         let line = format_trace_event(&event, pid).unwrap();
-        assert_eq!(line, format!("{pid_str} distill-telemetry: distilling host_logs with gemini:gemini-2.5-flash"));
+        assert_eq!(line, format!("{pid_str} distill-telemetry: distilling host_logs (120 lines in) with gemini:gemini-2.5-flash"));
 
         let event = AgentLoopEvent::TelemetryDistillationComplete {
             tool: "host_logs".to_string(),
             duration: Duration::from_millis(450),
+            lines_in: 120,
+            lines_out: 25,
         };
         let line = format_trace_event(&event, pid).unwrap();
         assert!(line.contains("distill-telemetry: distilled host_logs"));
+        assert!(line.contains("120 lines in -> 25 lines out"));
 
         let event = AgentLoopEvent::TelemetryDistillationFallback {
             tool: "host_logs".to_string(),
@@ -6504,6 +6568,41 @@ agent_loop:
         };
         let line = format_trace_event(&event, pid).unwrap();
         assert_eq!(line, format!("{pid_str} distill-telemetry: fallback for host_logs (timeout)"));
+    }
+
+    #[test]
+    fn test_sanitize_artifact_script_paths_defangs_executable_scripts() {
+        let temp_dir = crate::utils::temp_file("-test-sanitize-", "");
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let script_path = temp_dir.join("investigate.sh");
+        std::fs::write(&script_path, "#!/bin/bash\necho hello\n").unwrap();
+
+        let mut payload = serde_json::json!({
+            "status": "ok",
+            "artifacts": {
+                "script": format!("file://{}", script_path.display()),
+                "data": "/tmp/output.log"
+            },
+            "list": [
+                format!("{}", script_path.display())
+            ]
+        });
+
+        sanitize_artifact_script_paths(&mut payload);
+
+        let sanitized_script = payload["artifacts"]["script"].as_str().unwrap();
+        assert!(sanitized_script.ends_with(".sh.txt"));
+        let safe_txt_path = temp_dir.join("investigate.sh.txt");
+        assert!(safe_txt_path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::metadata(&safe_txt_path).unwrap().permissions();
+            assert_eq!(perms.mode() & 0o777, 0o600);
+        }
+
+        // Non-script artifacts are unaffected
+        assert_eq!(payload["artifacts"]["data"], "/tmp/output.log");
     }
 
     #[test]

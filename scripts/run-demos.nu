@@ -195,25 +195,12 @@ def show-trace [trace: string] {
     }
 }
 
-# Print model output (truncated to keep readable unless no-truncate is specified)
+# Print model output (terminal output is never truncated)
 def show-output [output: string, --max-lines: int = 15, --no-truncate] {
     let lines = ($output | str trim | lines)
     if ($lines | length) > 0 {
         print $"  (ansi green)┄┄┄ output ┄┄┄(ansi reset)"
-        let should_not_truncate = ($no_truncate or (match ($env | get --optional PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE) {
-            "true" => true,
-            _ => (match ($env | get --optional AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE) {
-                "true" => true,
-                _ => false,
-            })
-        }))
-        let display_lines = if $should_not_truncate {
-            $lines
-        } else if ($lines | length) > $max_lines {
-            ($lines | first $max_lines) | append $"... \(($lines | length) lines total\)"
-        } else {
-            $lines
-        }
+        let display_lines = $lines
         $display_lines | each { |line|
             let styled = ($line
                 | str replace --all "[FAIL]" $"(ansi red_bold)[FAIL](ansi reset)"
@@ -1808,7 +1795,7 @@ report "Autonomous execution succeeded without blocks" $d25_no_block
 report "Orchestrator synthesized terminal scorecard" $d25_has_summary
 report "Local telemetry artifacts hyperlinked (file://)" $d25_has_artifacts
 
-show-output $demo25.stdout --max-lines 50
+show-output $demo25.stdout
 show-cost ($demo25.stderr | default "")
 }
 
