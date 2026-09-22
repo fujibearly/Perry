@@ -1758,7 +1758,7 @@ if (should-run-demo "25" $demo) {
 header $"Demo 25: Orchestrated 5-Pillar Host Telemetry Sweep \(live, ($demo_model)\)"
 show-desc "Demonstrates multi-agent telemetry orchestration: orchestrator loads sys_triage skill, plans with _plan, delegates 5 investigation pillars concurrently in parallel to sre subagents under --autonomy readonly (A0), and synthesizes an anchored health report."
 
-let d25_prompt = "You MUST follow the 'sys_triage' skill procedure. Start by calling read_skill with name='sys_triage'. Plan your investigation with '_plan', then delegate each of the 5 investigation pillars concurrently in parallel to the 'sre' agent: 1) host environment baseline, 2) service lifecycle & degraded units, 3) resource saturation (CPU/memory/storage), 4) network interface health & packet drops, 5) recent error logs & anomalies. Once the delegated subagents return their findings, synthesize a comprehensive health audit report anchored to the host identity, OS, and hardware baseline citing concrete evidence and extracted semantic key-values. If any artifacts were created or referenced, surface them as clickable markdown hyperlinks with file:// URLs."
+let d25_prompt = "Perform a full 5-pillar host health triage following the 'sys_triage' runbook. Synthesize the findings into a high-density, bounded numerical scorecard with status badges, concrete technical evidence, and hyperlinked artifacts."
 let d25_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"

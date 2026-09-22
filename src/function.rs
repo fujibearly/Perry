@@ -961,6 +961,7 @@ pub fn run_llm_function(
         .map_err(|err| anyhow!("Unable to run {cmd_name}, {err}"))?;
 
     let (relay_events, clean_stderr) = crate::agent_loop::dialog_trace::parse_relay_frames(&stderr);
+    let has_relays = !relay_events.is_empty();
     if let Some(sink) = &dialog_sink {
         for event in relay_events {
             sink.emit(event);
@@ -987,6 +988,27 @@ pub fn run_llm_function(
     };
     if output.is_none() && !stdout.trim().is_empty() {
         output = Some(stdout);
+    }
+    if let Some(sink) = &dialog_sink {
+        if !has_relays && !cmd_args.iter().any(|a| a == "--agent" || a.starts_with("--agent=")) {
+            if let Some(ref out_text) = output {
+                if !out_text.trim().is_empty() {
+                    sink.emit(crate::agent_loop::dialog_trace::DialogEvent {
+                        trace_id: String::new(),
+                        source: crate::agent_loop::dialog_trace::DialogSource::GenericTool,
+                        sequence: 0,
+                        agent: cmd_name.clone(),
+                        configured_model: String::new(),
+                        wire_model: None,
+                        pid: std::process::id(),
+                        turn: 0,
+                        max_turns: 0,
+                        direction: crate::agent_loop::DialogDirection::Response,
+                        content: out_text.clone(),
+                    });
+                }
+            }
+        }
     }
     Ok(output)
 }

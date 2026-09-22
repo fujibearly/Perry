@@ -5071,19 +5071,93 @@ pub fn format_dialog_block(
     format_dialog_block_with_model(agent, "", None, None, pid, turn, max_turns, direction, content)
 }
 
+/// Format a local tool output for rendering in dialog trace with guide rails and soft wrapping.
+pub fn format_tool_output_dialog_block(
+    tool_name: &str,
+    pid: u32,
+    content: &str,
+) -> String {
+    let depth = current_agent_depth();
+    let color = agent_color(tool_name);
+    let colored_tool = color.bold().paint(tool_name).to_string();
+
+    let outer_indent = ancestor_rails(depth);
+    let active_rail = match depth {
+        0 => "│ ",
+        1 => "║ ",
+        _ => "╏ ",
+    };
+    let active_rail_colored = color.bold().paint(active_rail).to_string();
+    let line_prefix = format!("{outer_indent}{active_rail_colored} ");
+    let prefix_visible_width = depth * 6 + 3;
+
+    let term_width = get_terminal_width();
+    let max_content_width = term_width.saturating_sub(prefix_visible_width).max(30);
+
+    let pid_str = format_agent_pid(pid);
+    let colored_pid_str = color.paint(&pid_str).to_string();
+    let dir_color = nu_ansi_term::Color::Yellow;
+    let header_title = format!("[{colored_pid_str} {colored_tool} {}]", dir_color.bold().paint("TOOL OUTPUT"));
+    let outer_indent_width = depth * 6;
+    let title_vis_width = visible_width(&header_title);
+    let top_prefix_width = outer_indent_width + 4; // for "┌── "
+    let top_total_width = top_prefix_width + title_vis_width;
+
+    let header_bar = if term_width > top_total_width + 2 {
+        let dashes_count = term_width - top_total_width - 2;
+        let dashes = "─".repeat(dashes_count);
+        format!("{outer_indent}┌── {header_title} {dashes}")
+    } else {
+        format!("{outer_indent}┌── {header_title}")
+    };
+
+    let footer_prefix_width = outer_indent_width + 4; // for "└── "
+    let footer_dashes_count = term_width.saturating_sub(footer_prefix_width + 1).max(10);
+    let footer_dashes = "┄".repeat(footer_dashes_count);
+    let footer_bar = format!("{outer_indent}└── {footer_dashes}");
+
+    let no_truncate = std::env::var("PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE")
+        .or_else(|_| std::env::var("AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE"))
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let truncated_content = truncate_payload_dialog(content, 20, 20, no_truncate);
+
+    let mut indented_lines = Vec::new();
+    for raw_line in truncated_content.lines() {
+        if raw_line.is_empty() {
+            indented_lines.push(line_prefix.clone());
+        } else {
+            let cont_indent = detect_continuation_indent(raw_line);
+            let wrapped_chunks = wrap_ansi_line(raw_line, max_content_width, cont_indent);
+            for chunk in wrapped_chunks {
+                indented_lines.push(format!("{line_prefix}{chunk}"));
+            }
+        }
+    }
+
+    format!(
+        "\n{header_bar}\n{}\n{footer_bar}",
+        indented_lines.join("\n")
+    )
+}
+
 /// Format a DialogEvent from the centralized DialogTraceSink.
 pub fn format_dialog_event(event: &DialogEvent) -> String {
-    format_dialog_block_with_model(
-        &event.agent,
-        &event.configured_model,
-        event.wire_model.as_deref(),
-        None,
-        event.pid,
-        event.turn,
-        event.max_turns,
-        event.direction,
-        &event.content,
-    )
+    if event.source == crate::agent_loop::dialog_trace::DialogSource::GenericTool {
+        format_tool_output_dialog_block(&event.agent, event.pid, &event.content)
+    } else {
+        format_dialog_block_with_model(
+            &event.agent,
+            &event.configured_model,
+            event.wire_model.as_deref(),
+            None,
+            event.pid,
+            event.turn,
+            event.max_turns,
+            event.direction,
+            &event.content,
+        )
+    }
 }
 
 /// Write a complete block or line of output to `/dev/tty` (or stderr) in a single atomic

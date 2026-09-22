@@ -46,8 +46,29 @@ When operating standalone with direct tool access, invoke the 5 tool actions in 
 
 ## Incident Synthesis & Reporting Requirements
 
-Synthesize an executive and diagnostic health report adhering to these rules:
-1. **Anchor to Host Baseline**: State the host, OS, CPU model/cores, and memory baseline. Never report floating percentages in a vacuum (e.g. state "26.1% CPU utilization across 4 logical cores of Intel Core i7-7Y75 on host mordor" and "4,345 MB used out of 15,883 MB total system RAM").
-2. **Concrete Technical Evidence**: Cite verbatim evidence lines, affected PIDs, process names, unit files, and interface names.
-3. **Semantic Key-Value Extraction**: Dynamically extract all diagnostic attributes relevant to the findings without assuming a fixed schema.
-4. **Artifact Hyperlinks**: Surface any generated log queries or log dump artifacts as clickable markdown links with `file://` URLs (e.g. `[Log Dump](file:///tmp/perry-host_logs-dump-....log)`).
+Synthesize a high-density, glanceable SRE health scorecard adhering strictly to these rules:
+
+1. **Host Identity & Hardware Anchor**:
+   Start with a compact single-line header establishing host identity, hardware bounds, and IP address:
+   `### Host Triage: <hostname> (<OS> <kernel> | <primary_ip> | <cores>c/<threads>t <cpu_model> | <total_ram> RAM | Up: <uptime> | virt: <virt>)`
+
+2. **High-Density Telemetry Scorecard Table**:
+   Render an operational summary table. Use text status badges `[OK]`, `[WARN]`, `[FAIL]` (NO emojis):
+   | Pillar | Status | Telemetry Summary (Bounded Metrics & Ratios) |
+   |:---|:---:|:---|
+   | **Resources** | `[OK]` or `[WARN]` | CPU: `<busy>% of <cores>c (idle <idle>%)` \| Mem: `<used>/<total> (<pct>%)` \| Swap: `<used>/<total> (<pct>%)` \| Disk `/`: `<used>/<total> (<pct>% - <avail> free)` |
+   | **Services** | `[OK]` or `[FAIL]` | Degraded unit list with state or `None degraded` |
+   | **Network** | `[OK]` or `[WARN]` | Interface packet drop ratios: `<iface>: <tx_drop> tx_drop / <tx_mb> MB` |
+   | **Logs** | `[OK]` or `[FAIL]` | Active volume surges and notable singletons |
+
+3. **Bounding Rule (Capacity / Denominator)**:
+   Relative percentages MUST always be presented with their absolute capacity bounds as compact ratios: `used / total (pct%)` (e.g. `3.2G / 15.5G (20.6%)`, `315G / 340G (90%)`, `24.6% of 4 cores`). Never output floating percentages in a vacuum.
+
+4. **Semantic Anomaly Correlation & Technical Evidence**:
+   Below the scorecard, list ONLY anomalous/degraded items and cross-pillar correlations:
+   - Correlate network drops (e.g. `wlan0`) with relevant driver or daemon logs (e.g. `wpa_supplicant`).
+   - Cite verbatim error lines, PIDs, unit files, and interface names.
+   - Surface any artifacts as clickable markdown links with `file://` URLs (e.g. `[Log Dump](file:///tmp/perry-host_logs-dump-....log)`).
+
+5. **Zero Conversational Prose**:
+   Strictly avoid conversational narrative ("This report details a comprehensive...", "In conclusion...", "As we can see..."). Every line must convey dense telemetry readable in a 1-second glance.
