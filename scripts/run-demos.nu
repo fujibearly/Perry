@@ -214,7 +214,16 @@ def show-output [output: string, --max-lines: int = 15, --no-truncate] {
         } else {
             $lines
         }
-        $display_lines | each { |line| print $"  ($line)" }
+        $display_lines | each { |line|
+            let styled = ($line
+                | str replace --all "[FAIL]" $"(ansi red_bold)[FAIL](ansi reset)"
+                | str replace --all "[WARN]" $"(ansi yellow_bold)[WARN](ansi reset)"
+                | str replace --all "[SERVICE FAIL]" $"(ansi red_bold)[SERVICE FAIL](ansi reset)"
+                | str replace --all "[LOGS FAIL]" $"(ansi red_bold)[LOGS FAIL](ansi reset)"
+                | str replace --all "[RESOURCE WARN]" $"(ansi yellow_bold)[RESOURCE WARN](ansi reset)"
+                | str replace --all "[NETWORK WARN]" $"(ansi yellow_bold)[NETWORK WARN](ansi reset)")
+            print $"  ($styled)"
+        }
         print $"  (ansi green)┄┄┄┄┄┄┄┄┄┄┄┄┄┄(ansi reset)"
     }
 }
@@ -1787,6 +1796,7 @@ let d25_sre_completed = ($trace25 | str contains "sre completed") or ($d25_sre_d
 let d25_no_eval = not ($trace25 | str contains "assess-risk: evaluating")
 let d25_no_block = not ($trace25 | str contains "BLOCKED")
 let d25_has_summary = ($demo25.stdout | is-not-empty) and (($demo25.stdout | str length) > 100)
+let d25_has_artifacts = ($demo25.stdout | str contains "file://") or ($combined25 | str contains "file://")
 
 report "ReadOnly posture banner emitted at startup" $d25_banner
 report "Skill sys_triage loaded in-thread (read_skill)" $d25_read_skill
@@ -1796,8 +1806,9 @@ report "Holistic SRE triage sweep completed" $d25_sre_completed $"calls=($d25_sr
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d25_no_eval
 report "Autonomous execution succeeded without blocks" $d25_no_block
 report "Orchestrator synthesized anchored health assessment" $d25_has_summary
+report "Local telemetry artifacts hyperlinked (file://)" $d25_has_artifacts
 
-show-output $demo25.stdout
+show-output $demo25.stdout --max-lines 50
 show-cost ($demo25.stderr | default "")
 }
 

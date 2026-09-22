@@ -77,11 +77,12 @@ impl MarkdownRender {
 
     pub fn render_line(&self, line: &str) -> String {
         let (_, code_syntax, is_code) = self.check_line(line);
-        if is_code {
+        let output = if is_code {
             self.highlight_code_line(line, &code_syntax)
         } else {
             self.highlight_line(line, &self.md_syntax, false)
-        }
+        };
+        colorize_status_tags(&output)
     }
 
     fn render_line_mut(&mut self, line: &str) -> String {
@@ -93,7 +94,7 @@ impl MarkdownRender {
         };
         self.prev_line_type = line_type;
         self.code_syntax = code_syntax;
-        output
+        colorize_status_tags(&output)
     }
 
     fn check_line(&self, line: &str) -> (LineType, Option<SyntaxReference>, bool) {
@@ -195,6 +196,16 @@ fn wrap(text: &str, width: usize) -> String {
         .wrap_algorithm(textwrap::WrapAlgorithm::FirstFit)
         .initial_indent(&text[0..indent]);
     textwrap::wrap(&text[indent..], wrap_options).join("\n")
+}
+
+fn colorize_status_tags(text: &str) -> String {
+    if !text.contains("[FAIL]") && !text.contains("[WARN]") {
+        return text.to_string();
+    }
+    let fail_colored = format!("{}", "[FAIL]".red().bold());
+    let warn_colored = format!("{}", "[WARN]".yellow().bold());
+    text.replace("[FAIL]", &fail_colored)
+        .replace("[WARN]", &warn_colored)
 }
 
 #[derive(Debug, Clone, Default)]
