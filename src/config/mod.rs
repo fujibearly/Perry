@@ -363,7 +363,7 @@ impl Default for SafetyConfig {
             default_ceiling: BlastRadius::Destructive,
             escalation_dir: None,
             verdict_timeout_secs: 300,
-            autonomy: None,
+            autonomy: Some(crate::safety::AutonomyLevel::ReadOnly),
         }
     }
 }
@@ -3206,6 +3206,8 @@ impl Config {
         if let Ok(v) = env::var(get_env_name("autonomy")).or_else(|_| env::var(get_env_name("safety_autonomy"))) {
             if let Some(level) = crate::safety::AutonomyLevel::from_str_loose(&v) {
                 self.safety.autonomy = Some(level);
+            } else if matches!(v.to_ascii_lowercase().as_str(), "none" | "unrestricted" | "off" | "full") {
+                self.safety.autonomy = None;
             }
         }
     }
@@ -3624,6 +3626,7 @@ mod tests {
         assert_eq!(s.default_ceiling, BlastRadius::Destructive);
         assert_eq!(s.escalation_dir, None);
         assert_eq!(s.verdict_timeout_secs, 300);
+        assert_eq!(s.autonomy, Some(crate::safety::AutonomyLevel::ReadOnly));
     }
 
     #[test]
@@ -3638,6 +3641,7 @@ mod tests {
         // Untouched fields stay at defaults.
         assert_eq!(s.policy_file, None);
         assert_eq!(s.verdict_timeout_secs, 300);
+        assert_eq!(s.autonomy, Some(crate::safety::AutonomyLevel::ReadOnly));
     }
 
     #[test]
@@ -3659,6 +3663,7 @@ safety:
         assert_eq!(s.risk_model.as_deref(), Some("openai:gpt-4o-mini"));
         assert_eq!(s.default_ceiling, BlastRadius::Disruptive);
         assert_eq!(s.verdict_timeout_secs, 60);
+        assert_eq!(s.autonomy, Some(crate::safety::AutonomyLevel::ReadOnly));
     }
 
     #[test]
@@ -3671,6 +3676,9 @@ safety:
 
         let config_rev: Config = serde_yaml::from_str("safety:\n  autonomy: reversible\n").unwrap();
         assert_eq!(config_rev.safety.autonomy, Some(crate::safety::AutonomyLevel::Reversible));
+
+        let config_none: Config = serde_yaml::from_str("safety:\n  autonomy: null\n").unwrap();
+        assert_eq!(config_none.safety.autonomy, None);
     }
 
     #[test]

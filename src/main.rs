@@ -213,9 +213,11 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
     if let Some(ref autonomy_str) = cli.autonomy {
         if let Some(level) = crate::safety::AutonomyLevel::from_str_loose(autonomy_str) {
             config.write().safety.autonomy = Some(level);
+        } else if matches!(autonomy_str.to_ascii_lowercase().as_str(), "none" | "unrestricted" | "off" | "full") {
+            config.write().safety.autonomy = None;
         } else {
             bail!(
-                "Invalid autonomy level '{autonomy_str}'. Valid postures: readonly, consult, reversible (or aliases a0, a1, a2)"
+                "Invalid autonomy level '{autonomy_str}'. Valid postures: readonly, consult, reversible, none (or aliases a0, a1, a2)"
             );
         }
     }

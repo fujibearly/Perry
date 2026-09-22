@@ -7742,7 +7742,9 @@ agent_loop:
                 "name": "mystery", "description": "no classification", "parameters": {"type":"object"}
             })).unwrap(),
         ]);
-        Arc::new(RwLock::new(Config { functions, ..Default::default() }))
+        let mut config = Config { functions, ..Default::default() };
+        config.safety.autonomy = None;
+        Arc::new(RwLock::new(config))
     }
 
     fn call(name: &str) -> ToolCall {
@@ -9252,8 +9254,15 @@ agent_loop:
         std::env::remove_var("AICHAT_AUTHORITY_CEILING");
         std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING");
 
-        // 1. Without autonomy set, falls back to default_ceiling (Destructive)
+        // 1. By default, SafetyConfig defaults to ReadOnly (Safe ceiling)
         let config = GlobalConfig::default();
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Safe)
+        );
+
+        // When autonomy is explicitly disabled (None), falls back to default_ceiling (Destructive)
+        config.write().safety.autonomy = None;
         assert_eq!(
             current_authority_ceiling(&config),
             AuthorityCeiling::UpTo(BlastRadius::Destructive)
