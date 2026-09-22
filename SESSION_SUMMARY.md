@@ -381,3 +381,15 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** All 564 unit and integration tests passing (`cargo test -- --test-threads=1`); Demos 22, 25, 26, and 27 verified 100% passing live.
       * **State:** on branch `main` in `/projects/perry` and `/projects/innators`.
 
+  31. **Session 31: Dedicated ~/.config/perry Migration, Default --autonomy readonly (Method 2), Hierarchical WEB_SEARCH_MODEL Resolution & Actuator Decoupling**
+    * **Period:** `2026-09-22`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-22-session31.md`](.kiro/docs/session-summary-2026-09-22-session31.md)
+    * **Focus Areas:**
+      * **Dedicated Configuration Decoupling:** Fully decoupled Perry from legacy `~/.config/aichat/`. Established independent configuration root at `~/.config/perry/` (with active `config.yaml`, roles, sessions, and symlink `functions -> ~/projects/innators`). Symlinked `target/release/perry` to `~/.local/bin/perry`.
+      * **Default Operational Autonomy Posture (Method 2):** Set `SafetyConfig::default().autonomy = Some(AutonomyLevel::ReadOnly)` as the engine-level default, enforcing least-privilege for autonomous runs. Provided explicit opt-out via `--autonomy none` / `unrestricted` while maintaining fine-grained authority ceiling isolation in test suites.
+      * **Hierarchical `WEB_SEARCH_MODEL` Resolution:** Added `web_search_model: Option<String>` to Perry's `Config` struct. In `eval_shell`, Perry automatically injects `WEB_SEARCH_MODEL`, `PERRY_CONFIG_DIR`, and `AICHAT_CONFIG_DIR` into child tool process environments if unset. Relaxed `argc` mandatory requirement in `innators/tools/web_search_aichat.sh` to optional, implementing a 4-tier resolution chain (env $\to$ `web_search_model` $\to$ `model` $\to$ `gemini:gemini-2.5-flash`).
+      * **Trace Line Accounting & Artifact Defanging:** Corrected distillation trace line counting (`lines_in -> lines_out`), repaired terminal truncation, and defanged dumped diagnostic scripts (`.sh` $\to$ `.txt`, `chmod 600`).
+      * **Verification & Testing:** All 567 unit and integration tests passing (`cargo test -- --test-threads=1`); release binary rebuilt; live dry-run SRE agent and standalone web-search tools verified passing.
+      * **State:** on branch `main` in `/projects/perry` and `/projects/innators`; clean and pushed to GitHub.
+
+

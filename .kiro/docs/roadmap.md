@@ -114,13 +114,15 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 
 # View 2 — Traction (progress)
 
-### Current State (2026-09-15 — Session 26)
+### Current State (2026-09-22 — Session 31)
 
-**Branch:** `feat/structured-plan-and-skills` — **Structured Plan Execution (#15) & Progressive Skill Runbooks (#17)**.
+**Branch:** `main` — **Project Perry (`/projects/perry`) & Innators (`/projects/innators`)**.
 **Version:** v0.31.0-fork.9
-**Tests:** 529 pass, 0 fail (521 unit/integration + 5 catalog-override + 3 web asset security) — suite passing; clippy clean (`-D warnings`); debug and release binaries verified.
+**Tests:** 567 pass, 0 fail (559 unit/integration + 5 catalog-override + 3 web asset security) — suite passing; clippy clean (`-D warnings`); debug and release binaries verified.
+**Runtime Environment:** Dedicated config root `~/.config/perry/` (with `functions -> ~/projects/innators`); global release binary at `~/.local/bin/perry`.
+**Safety & Autonomy:** Engine default `--autonomy readonly` (Method 2, principle of least privilege; opt out via `--autonomy none`). Hierarchical `WEB_SEARCH_MODEL` fallback (`env -> config.yaml web_search_model -> model -> default`).
 **#6d transport decision (Path 1′):** mutual-TLS over a raw loopback TCP stream + hand-rolled length-delimited JSON framing — **not** WebSocket (deferred behind the `EscalationTransport` trait). Only new crate `rcgen` (+ tiny `yasna`); `rustls`/`tokio-rustls` reused (single version, no OpenSSL). Child auth = channel-bound HMAC (no literal token).
-**E2E demos (2026-09-12, live on `gemini-2.5-flash`):** 22 demos in `scripts/run-demos.nu` (`1`–`21` and `10b`). Features unified scannable grammar (`ALLOW <tool>: risk <tier> <= ceiling <tier>`, `BLOCK <tool>: risk <tier> > ceiling <tier>`), interactive debug stepping (`--debug`), selective targeted execution (`--demo <ID>`), pre-pause demo objective banners (`ℹ`) and command rendering, agent hierarchy 6-column guide rails (`│     `), color-coded agent traces with branch-exclusive stratified palettes (`allocate_subagent_color`, `AICHAT_AGENT_COLOR`, `AICHAT_SUBAGENT_SEQ`), compact British humour petnames (`12345 (SnazzyBoffin)`), nanoworker parent petname and color inheritance (`nano-SnazzyBoffin-1`), LLM dialog observability (`--dialog`) with semantic role coloring and historic corpus dimming, untruncated trace observability (`--no-truncate` / `-n`), multi-step sub-agent research pipelines via `web_search --links` + native `html-to-markdown --url`, branch-wide web-search grounding control (`--wslinks` / `AICHAT_WSLINKS`), streamlined trace display (omitting redundant loop trace headers), dual-layer `MALFORMED_FUNCTION_CALL` recovery (system prompt + AST/kwargs parser), truthful `FAILED` tool reporting, and empty-response/transient backoff resilience in `call_llm_raw`.
+**E2E demos (2026-09-21, live on `gemini-2.5-flash`):** 27 demos in `scripts/run-demos.nu`. Features unified scannable grammar (`ALLOW <tool>: risk <tier> <= ceiling <tier>`, `BLOCK <tool>: risk <tier> > ceiling <tier>`), 5-pillar SRE host telemetry actuators (`host_env`, `host_service`, `host_resource`, `host_net`, `host_logs`), dedicated `sre` specialist agent, parallel multi-agent triage sweeps (Demo 25, 4 turns), correlated incident RCA (Demo 26), 24h historical telemetry lookback with decoupled distillation (Demo 27), interactive debug stepping (`--debug`), selective targeted execution (`--demo <ID>`), pre-pause demo objective banners (`ℹ`) and command rendering, agent hierarchy 6-column guide rails (`│     `), color-coded agent traces with branch-exclusive stratified palettes, compact British humour petnames, nanoworker parent petname and color inheritance, LLM dialog observability (`--dialog`) with semantic role coloring and historic corpus dimming, untruncated trace observability (`--no-truncate` / `-n`), multi-step sub-agent research pipelines, and branch-wide web-search grounding control (`--wslinks` / `AICHAT_WSLINKS`).
 **Agent Loop Coverage:** unit-test (`cargo test`) line coverage of `src/agent_loop.rs` rose **46.8% → 64.7%** (+17.9 pts) from #5 — see [coverage re-measurement 2026-09-02](coverage-remeasurement-2026-09-02.md). NB: not comparable to the older 72.9% figure (live E2E harness, different methodology — [2026-08-31 report](coverage-evaluation-2026-08-31.md)).
 
 ## Status Table (canonical)
@@ -142,7 +144,7 @@ Item dependency notes (View 3) govern fine ordering. Strategically:
 | **5** | **Test Suite & Coverage Hardening** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | — |
 | **15**| **Plan-Driven Execution** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | Consumes #6c |
 | **17**| **Progressive Disclosure Skills** | 🟢 Done | ➖ Med | 💎 High | 🚶 Med | | — |
-| **19**| **Autonomy Ladder** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🔧 Enhances #6 + #6d |
+| **19**| **Autonomy Ladder** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🔧 Enhances #6 + #6d. Default `--autonomy readonly` (Method 2); opt out via `none`. |
 | **18**| **Host SRE Telemetry & Multi-Agent Triage** | 🟢 Done | 🔥 High | 💎 High | 🏃 Small | 🎯 | 🆕 Shipped in `innators` + `perry` (5-Pillar suite, `host_env`, `sre` agent, parallel orchestration) |
 | &nbsp; | | | | | | | |
 | | **▼ PROPOSED (TO DO)** | | | | | | |
