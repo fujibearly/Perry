@@ -58,19 +58,18 @@ The diagnosing agent must actively cross-reference findings across co-located pi
 
 Synthesize a high-density, glanceable SRE health scorecard adhering strictly to these rules:
 
-1. **Host Identity & Hardware Anchor**:
-   Start with a compact single-line header establishing host identity, hardware bounds, and IP address:
+1. **Host Identity & Hardware Anchor (Cross-Column Single Row)**:
+   Start with a compact cross-column single-line header establishing host identity, hardware bounds, and IP address spanning across the full width:
    `### Host Triage: <hostname> (<OS> <kernel> | <primary_ip> | <cores>c/<threads>t <cpu_model> | <total_ram> RAM | Up: <uptime> | virt: <virt>)`
    (If discrete/integrated GPU is detected, include its model in the header or Resources. If hosting containers or VMs, note active guest count).
 
-2. **High-Density Telemetry Scorecard Table**:
-   Render an operational summary table. Use text status badges `[OK]`, `[WARN]`, `[FAIL]` (NO emojis):
-   | Pillar | Status | Telemetry Summary (Bounded Metrics & Ratios) |
-   |:---|:---:|:---|
-   | **Resources** | `[OK]` or `[WARN]` | CPU: `<busy>% of <cores>c (idle <idle>%)` \| Mem: `<used>/<total> (<pct>%)` \| Swap: `<used>/<total> (<pct>%)` \| Disk `/`: `<used>/<total> (<pct>% - <avail> free)` (include `\| GPU: <busy>% (<used>/<total> VRAM, <temp>°C)` if present) |
-   | **Services** | `[OK]` or `[FAIL]` | Degraded unit list with state or `None degraded` |
-   | **Network** | `[OK]` or `[WARN]` | Interface packet drop ratios and listening services: `<iface>: <tx_drop> tx_drop / <tx_mb> MB (listeners: <svcs/ports>)` |
-   | **Logs** | `[OK]` or `[FAIL]` | Active volume surges and notable singletons |
+2. **High-Density 5-Column Side-by-Side Scorecard Table**:
+   Directly below the cross-column host identification header, render an operational summary table with **5 columns (one column per pillar)** showing all dimensions side-by-side. Use text status badges `[OK]`, `[WARN]`, `[FAIL]` (NO emojis):
+
+   | Environment | Services | Resources | Network | Logs |
+   |:---|:---|:---|:---|:---|
+   | `[OK]` or `[WARN]` | `[OK]` or `[FAIL]` | `[OK]` or `[WARN]` | `[OK]` or `[WARN]` | `[OK]` or `[FAIL]` |
+   | **Host**: `<hostname>`<br>**OS**: `<OS> <kernel>`<br>**CPU**: `<cores>c/<threads>t`<br>**RAM**: `<total_ram>`<br>**Virt/Host**: `<virt/hosting>` | **Failed**: `<count> units`<br>• `<unit1>` (`<state>`)<br>• `<unit2>` (`<state>`)<br>*(or `None degraded`)*<br>**Guests**: `<count> active` | **CPU**: `<busy>% of <cores>c`<br>**Mem**: `<used>/<total> (<pct>%)`<br>**Swap**: `<used>/<total>`<br>**Disk `/`**: `<used>/<total> (<pct>%)`<br>**GPU**: `<busy>% (<temp>°C)` | **Drops**: `<iface> (<tx_drop> tx_drop)`<br>**Listeners**: `<svcs/ports>`<br>**Remote IPs**: `<count> connected` | **Surges**: `<count>x <pattern>`<br>**Singletons**: `<pattern>`<br>**Crashes**: `<count> core dumps` |
 
 3. **Bounding Rule (Capacity / Denominator)**:
    Relative percentages MUST always be presented with their absolute capacity bounds as compact ratios: `used / total (pct%)` (e.g. `3.2G / 15.5G (20.6%)`, `315G / 340G (90%)`, `24.6% of 4 cores`). Never output floating percentages in a vacuum.
