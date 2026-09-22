@@ -66,17 +66,20 @@ Synthesize a high-density, glanceable SRE health scorecard adhering strictly to 
 2. **High-Density 5-Column Side-by-Side Scorecard Table**:
    Directly below the cross-column host identification header, render an operational summary table with **5 columns (one column per pillar)** showing all dimensions side-by-side.
    - **CRITICAL TERMINAL FORMATTING RULES**:
-     - **NEVER use `<br>` tags inside cells**: `<br>` is not a newline in terminal markdown renderers and creates 600+ character wrapped lines that destroy column visibility.
-     - **Use Multiple Short Rows**: Distribute metrics across multiple concise table rows (keep each cell $\le$ 18-20 characters).
-     - **Pad with Whitespace**: Space-pad cells so the pipes `|` align vertically in plain terminal text. The entire table line MUST remain $\le 85$ characters wide.
+     - **NEVER use `<br>` tags inside cells**: `<br>` is not a newline in terminal markdown renderers and creates wrapped lines that destroy column visibility.
+     - **Wider Columns (~26-28 characters wide)**: Make each column ~50% wider (target ~26-28 characters per cell) so metric descriptions, full unit names, and values read naturally without aggressive abbreviation.
+     - **Independent Row Count (Pillars Take As Many Rows As Needed)**: Each pillar column can have as many rows as needed to convey its telemetry. If a pillar has fewer items than others, leave its trailing cells blank (` `). The number of rows per pillar does NOT need to be the same.
+     - **Pad with Whitespace**: Space-pad cells so the pipes `|` align vertically in plain terminal text.
 
-   | Environment     | Services        | Resources        | Network          | Logs             |
-   |:----------------|:----------------|:-----------------|:-----------------|:-----------------|
-   | `[OK]`          | `[FAIL]`        | `[WARN]`         | `[WARN]`         | `[FAIL]`         |
-   | `<hostname>`    | `<count> failed`| `CPU: <% of c>`  | `<iface>: <drop>`| `<count>x <msg>` |
-   | `<OS> <kernel>` | `<failed_unit1>`| `Mem: <u/tot>`   | `<iface>: <drop>`| `<missing bin>`  |
-   | `<cores>c <ram>`| `<failed_unit2>`| `Disk: <u/tot>`  | `<listeners>`    | `<singletons>`   |
-   | `<virt/hosting>`| `<guests> guests`| `GPU: <temp>`   | `<remotes> IPs`  | `<crashes>`      |
+   | Environment                | Services                   | Resources                  | Network                    | Logs                       |
+   |:---------------------------|:---------------------------|:---------------------------|:---------------------------|:---------------------------|
+   | `[OK]`                     | `[FAIL]`                   | `[WARN]`                   | `[WARN]`                   | `[FAIL]`                   |
+   | Host: `<hostname>`         | Failed: `<count> units`    | CPU: `<busy>% of <cores>c` | `<iface>: <drop> drops`    | `<count>x <event/surge>`   |
+   | OS: `<OS> <kernel>`        | • `<unit1>` (`<state>`)    | Mem: `<used>/<total> (%)`  | `<iface>: <drop> drops`    | • `<affected_service>`     |
+   | Hardware: `<cores>c, <RAM>`| • `<unit2>` (`<state>`)    | Swap: `<used>/<total>`     | Listeners: `<count>`       | Reason: `<missing binary>` |
+   | Uptime: `<uptime>`         | Active Guests: `<count>`   | Disk `/`: `<used>/<total>` | Remote IPs: `<count>`      | `<count>x <singleton>`     |
+   | Hosting: `<virt/hosting>`  |                            | GPU: `<temp>°C (<busy>%)`  | Established: `<count>`     | Core Dumps: `<count>`      |
+   | KVM Support: `<enabled>`   |                            | GPU Model: `<model>`       |                            |                            |
 
 3. **Bounding Rule (Capacity / Denominator)**:
    Relative percentages MUST always be presented with their absolute capacity bounds as compact ratios: `used / total (pct%)` (e.g. `3.2G / 15.5G (20.6%)`, `315G / 340G (90%)`, `24.6% of 4 cores`). Never output floating percentages in a vacuum.
