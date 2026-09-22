@@ -36,9 +36,9 @@ When operating standalone with direct tool access, invoke the 5 tool actions in 
 3. **Resource Saturation & Bottlenecks (`host_resource`)**:
    - Call `host_resource` with `action='summary'`.
    - Audit CPU utilization against known core count, memory used vs total capacity, swap, and root storage device/mount.
-4. **Network Health & Packet Integrity (`host_net`)**:
-   - Call `host_net` with `action='interfaces'`.
-   - Check all physical and virtual interfaces for packet drops (`tx_dropped`, `rx_dropped`) and errors.
+4. **Network Health, Packet Integrity & Listening Services (`host_net`)**:
+   - Call `host_net` with `action='interfaces'` (or `action='listeners'` to audit bound ports).
+   - Check all physical and virtual interfaces for packet drops (`tx_dropped`, `rx_dropped`), errors, and enumerate active listening services/ports.
 5. **Log Signatures & Anomaly Spotting (`host_logs`)**:
    - Call `host_logs` with `action='recent_errors'` (or with `since='24h'`).
    - Spot critical singleton anomalies (OOM kills, panics, segfaults) and volume surges (restart loops).
@@ -59,7 +59,7 @@ Synthesize a high-density, glanceable SRE health scorecard adhering strictly to 
    |:---|:---:|:---|
    | **Resources** | `[OK]` or `[WARN]` | CPU: `<busy>% of <cores>c (idle <idle>%)` \| Mem: `<used>/<total> (<pct>%)` \| Swap: `<used>/<total> (<pct>%)` \| Disk `/`: `<used>/<total> (<pct>% - <avail> free)` (include `\| GPU: <busy>% (<used>/<total> VRAM, <temp>°C)` if present) |
    | **Services** | `[OK]` or `[FAIL]` | Degraded unit list with state or `None degraded` |
-   | **Network** | `[OK]` or `[WARN]` | Interface packet drop ratios: `<iface>: <tx_drop> tx_drop / <tx_mb> MB` |
+   | **Network** | `[OK]` or `[WARN]` | Interface packet drop ratios and listening services: `<iface>: <tx_drop> tx_drop / <tx_mb> MB (listeners: <svcs/ports>)` |
    | **Logs** | `[OK]` or `[FAIL]` | Active volume surges and notable singletons |
 
 3. **Bounding Rule (Capacity / Denominator)**:
