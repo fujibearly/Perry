@@ -727,7 +727,7 @@ mod tests {
     use crate::utils::create_abort_signal;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-    const MISSING_API_BASE_ENV: &str = "AICHAT_TEST_MISSING_CLAUDE_API_BASE_2B76B42D";
+    const MISSING_API_BASE_ENV: &str = "PERRY_TEST_MISSING_CLAUDE_API_BASE_2B76B42D";
 
     fn request_client(api_base: Option<String>) -> ClaudeClient {
         ClaudeClient {

@@ -247,8 +247,8 @@ pub fn generic_build_rerank_body(data: &RerankData, model: &Model) -> Value {
 mod tests {
     use super::*;
 
-    const MISSING_API_KEY_ENV: &str = "AICHAT_TEST_MISSING_OPENAI_COMPATIBLE_API_KEY_B07D8216";
-    const MISSING_API_BASE_ENV: &str = "AICHAT_TEST_MISSING_OPENAI_COMPATIBLE_API_BASE_F5813573";
+    const MISSING_API_KEY_ENV: &str = "PERRY_TEST_MISSING_OPENAI_COMPATIBLE_API_KEY_B07D8216";
+    const MISSING_API_BASE_ENV: &str = "PERRY_TEST_MISSING_OPENAI_COMPATIBLE_API_BASE_F5813573";
 
     fn request_client(
         name: &str,

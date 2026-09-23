@@ -1114,27 +1114,27 @@ done
 
     #[test]
     fn test_expand_env_vars() {
-        std::env::set_var("AICHAT_TEST_VAR", "hello");
-        std::env::set_var("AICHAT_TEST_PATH", "/usr/bin");
+        std::env::set_var("PERRY_TEST_VAR", "hello");
+        std::env::set_var("PERRY_TEST_PATH", "/usr/bin");
 
-        assert_eq!(expand_env_vars("$AICHAT_TEST_VAR"), "hello");
-        assert_eq!(expand_env_vars("${AICHAT_TEST_VAR}"), "hello");
+        assert_eq!(expand_env_vars("$PERRY_TEST_VAR"), "hello");
+        assert_eq!(expand_env_vars("${PERRY_TEST_VAR}"), "hello");
         assert_eq!(
-            expand_env_vars("$AICHAT_TEST_PATH/server"),
+            expand_env_vars("$PERRY_TEST_PATH/server"),
             "/usr/bin/server"
         );
         assert_eq!(
-            expand_env_vars("prefix_${AICHAT_TEST_VAR}_suffix"),
+            expand_env_vars("prefix_${PERRY_TEST_VAR}_suffix"),
             "prefix_hello_suffix"
         );
         // Unknown var expands to empty
-        assert_eq!(expand_env_vars("$AICHAT_NONEXISTENT_XYZ"), "");
+        assert_eq!(expand_env_vars("$PERRY_NONEXISTENT_XYZ"), "");
         // No expansion needed
         assert_eq!(expand_env_vars("plain text"), "plain text");
         // Bare $ at end
         assert_eq!(expand_env_vars("cost is $"), "cost is $");
 
-        std::env::remove_var("AICHAT_TEST_VAR");
-        std::env::remove_var("AICHAT_TEST_PATH");
+        std::env::remove_var("PERRY_TEST_VAR");
+        std::env::remove_var("PERRY_TEST_PATH");
     }
 }

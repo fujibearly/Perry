@@ -12,7 +12,7 @@
 To avoid destabilizing hot safety paths and multi-agent coordination during high-velocity development, semantic type improvements in Project Perry follow a 3-tier evolutionary strategy:
 
 1. **Tier 1 (Immediate / Grounded):** Documentation & steering alignment via canonical [`.kiro/docs/glossary.md`](glossary.md), disambiguating 7 domains and 8 historical ambiguities. *(Completed in Commit 1)*
-2. **Tier 2 (Surgical / Non-breaking):** Introduction of the transparent [`ImpactTier`](file:///home/istari/projects/aichat/src/function.rs) newtype, [`permits_impact`](file:///home/istari/projects/aichat/src/safety.rs) domain helper, and hot-path gating migration without breaking wire formats or existing APIs. *(Completed in Commits 2–4)*
+2. **Tier 2 (Surgical / Non-breaking):** Introduction of the transparent [`ImpactTier`](file:///home/istari/projects/perry/src/function.rs) newtype, [`permits_impact`](file:///home/istari/projects/perry/src/safety.rs) domain helper, and hot-path gating migration without breaking wire formats or existing APIs. *(Completed in Commits 2–4)*
 3. **Tier 3 (Deferred / Opportunistic):** Planned refactorings of legacy enum identifiers and broad call sites scheduled alongside relevant backlog feature milestones. *(Tracked herein)*
 
 ---

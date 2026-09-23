@@ -87,7 +87,7 @@ The system maintains a pure, simple `argc` Bash architecture:
 
 Below is the complete execution loop spanning turn budgets, observability hooks, parallel tool dispatch, declarative output routing, and cognitive sub-agent subprocess delegation.
 
-*(The standalone diagram definition is also maintained at [agent-loop-operation.mmd](file:///home/istari/projects/aichat/.kiro/docs/agent-loop-operation.mmd))*
+*(The standalone diagram definition is also maintained at [agent-loop-operation.mmd](file:///home/istari/projects/perry/.kiro/docs/agent-loop-operation.mmd))*
 
 ```mermaid
 flowchart TD

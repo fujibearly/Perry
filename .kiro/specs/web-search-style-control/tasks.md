@@ -39,7 +39,7 @@
 ---
 
 ## Task 4: Add tool guard in `tools/web_search_aichat.sh`
-**Files:** `/home/istari/projects/llm-functions/tools/web_search_aichat.sh`
+**Files:** `/home/istari/projects/innators/tools/web_search_aichat.sh`
 1. Guard the `$argc_links` check with `[[ "${AICHAT_WSLINKS:-false}" == "true" ]]`:
    ```bash
    if [[ -n "$argc_links" ]] && [[ "${AICHAT_WSLINKS:-false}" == "true" ]]; then
@@ -51,12 +51,12 @@
 ---
 
 ## Task 5: Update researcher agent instructions
-**Files:** `/home/istari/projects/llm-functions/agents/researcher/index.yaml`
+**Files:** `/home/istari/projects/innators/agents/researcher/index.yaml`
 1. Replace lines 6-8 in `index.yaml` with `{{__researcher_search_instructions__}}`.
 2. Update constraints to note:
    - In direct search mode (default), synthesize directly from the grounded web_search result without fetching URLs.
    - In link-exploration mode, fetch at most 5 URLs total per task.
-3. Run `argc build@agent researcher` in `llm-functions`.
+3. Run `argc build@agent researcher` in `innators`.
 
 ---
 

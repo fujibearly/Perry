@@ -436,7 +436,7 @@ pub enum BlastRadius {
 }
 
 impl BlastRadius {
-    /// Lowercase string form, used for the `AICHAT_AUTHORITY_CEILING` env var
+    /// Lowercase string form, used for the `PERRY_AUTHORITY_CEILING` (and legacy `AICHAT_AUTHORITY_CEILING`) env var
     /// (and matching the serde `rename_all = "lowercase"` wire form).
     pub fn as_str(&self) -> &'static str {
         match self {

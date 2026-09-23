@@ -383,10 +383,10 @@ main ← feat/tool-safety-6a ← feat/tool-safety-6b ← feat/tool-safety-6c ←
 ## Environment Reminders
 
 - Production aichat: `/usr/bin/aichat` (v0.30.0), config at `~/.config/aichat/`
-- Dev binary: `~/projects/aichat/target/release/aichat`
-- To test: `AICHAT_CONFIG_DIR=/tmp/aichat-test` or use same config (read-only compatible)
-- Live functions (don't touch): `~/clones/llm-functions`
-- Dev functions (safe): `~/projects/llm-functions`
+- Active Perry dev binary: `~/projects/perry/target/release/perry` (or debug build `target/debug/perry`)
+- To test: `AICHAT_CONFIG_DIR=~/.config/perry` (or `/tmp/perry-test`)
+- Active actuator functions: `~/projects/innators` (`AICHAT_FUNCTIONS_DIR=~/projects/innators`)
+- Upstream reference clones: `~/clones/aichat` and `~/clones/llm-functions`
 - pdf2md: installed via `cargo install pdf-inspector`
 
 ---

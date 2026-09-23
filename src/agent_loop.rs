@@ -457,7 +457,7 @@ pub async fn eval_tool_calls_parallel(
 
 /// Whether this process runs under a read-only capability mask (backlog #6a).
 ///
-/// The mask is set on every spawned sub-agent via `AICHAT_CAPABILITY_MASK=readonly`.
+/// The mask is set on every spawned sub-agent via `PERRY_CAPABILITY_MASK=readonly` (and legacy `AICHAT_CAPABILITY_MASK`).
 /// The top-level process has no such env var and is therefore unmasked.
 fn under_readonly_mask() -> bool {
     crate::utils::get_env_var("CAPABILITY_MASK")
@@ -548,7 +548,7 @@ fn capability_denied_result(
 
 /// This process's current autonomous authority ceiling (backlog #6b).
 ///
-/// A spawned sub-agent reads `AICHAT_AUTHORITY_CEILING` (set by its parent). The
+/// A spawned sub-agent reads `PERRY_AUTHORITY_CEILING` (or legacy `AICHAT_AUTHORITY_CEILING`, set by its parent). The
 /// top-level process (no such env var) uses the configured `safety.default_ceiling`.
 /// An unparseable env value fails safe to the minimal ceiling (`Safe`).
 fn current_authority_ceiling(config: &GlobalConfig) -> crate::safety::AuthorityCeiling {
@@ -2862,7 +2862,7 @@ async fn eval_single_tool(
 /// Spawn a sub-agent as a separate aichat process.
 ///
 /// The sub-agent runs with its own PID, session, turn budget, and observability.
-/// Depth is tracked via AICHAT_AGENT_DEPTH env var to prevent infinite nesting.
+/// Depth is tracked via PERRY_AGENT_DEPTH (and legacy AICHAT_AGENT_DEPTH) env var to prevent infinite nesting.
 async fn eval_agent_tool_subprocess(
     config: &GlobalConfig,
     call: &ToolCall,
@@ -3503,16 +3503,14 @@ pub async fn run(input: Input, params: AgentLoopParams<'_>) -> Result<AgentLoopO
 
     // Ensure root agent has a stable, exclusive color (default Cyan) if not set
     if current_agent_depth() == 0 && crate::utils::get_env_var("AGENT_COLOR").is_err() {
-        std::env::set_var("PERRY_AGENT_COLOR", AGENT_PALETTE[0].0);
-        std::env::set_var("AICHAT_AGENT_COLOR", AGENT_PALETTE[0].0);
+        crate::utils::set_dual_env_var("AGENT_COLOR", AGENT_PALETTE[0].0);
     }
 
     // Root process operational autonomy posture initialization (Backlog #19)
     if current_agent_depth() == 0 {
         if let Some(level) = params.config.read().safety.autonomy {
             if let Some(mask) = level.capability_mask() {
-                std::env::set_var("PERRY_CAPABILITY_MASK", mask);
-                std::env::set_var("AICHAT_CAPABILITY_MASK", mask);
+                crate::utils::set_dual_env_var("CAPABILITY_MASK", mask);
             }
             if params.config.read().agent_loop.show_trace || params.config.read().multi_agent.show_trace {
                 eprintln!(
@@ -4704,7 +4702,7 @@ pub fn visible_width(s: &str) -> usize {
     UnicodeWidthStr::width(clean.as_str())
 }
 
-/// Query active terminal width, supporting environment overrides (`AICHAT_TERMINAL_WIDTH`, `COLUMNS`)
+/// Query active terminal width, supporting environment overrides (`PERRY_TERMINAL_WIDTH`, `AICHAT_TERMINAL_WIDTH`, `COLUMNS`)
 /// and crossterm detection, with safe default.
 pub fn get_terminal_width() -> usize {
     if let Ok(val) = crate::utils::get_env_var("TERMINAL_WIDTH") {
@@ -6141,9 +6139,9 @@ mod tests {
     use crate::config::{Config, RoleLike};
     use parking_lot::RwLock;
 
-    /// Serializes tests that mutate the process-global `AICHAT_CAPABILITY_MASK`
-    /// env var, so they don't race each other under the parallel test runner.
-    static MASK_ENV_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+    /// Serializes tests that mutate process-global environment variables
+    /// (PERRY_* / AICHAT_*), so they don't race each other under the parallel test runner.
+    static MASK_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[allow(dead_code)]
     fn default_config() -> GlobalConfig {
@@ -7664,10 +7662,11 @@ agent_loop:
 
     #[test]
     fn capability_gate_permits_everything_when_unmasked() {
-        // With no AICHAT_CAPABILITY_MASK set (top-level process), nothing is denied.
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_CAPABILITY_MASK").ok();
-        std::env::remove_var("AICHAT_CAPABILITY_MASK");
+        // With no CAPABILITY_MASK set (top-level process), nothing is denied.
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_CAPABILITY_MASK").ok();
+        let prev_legacy = std::env::var("AICHAT_CAPABILITY_MASK").ok();
+        crate::utils::remove_dual_env_var("CAPABILITY_MASK");
 
         let config = config_with_modes();
         assert!(capability_denied_result(&config, "fs_cat").is_none());
@@ -7675,7 +7674,10 @@ agent_loop:
         assert!(capability_denied_result(&config, "mystery_tool").is_none());
 
         // Restore whatever was there (normally nothing).
-        if let Some(v) = prev {
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_CAPABILITY_MASK", v);
+        }
+        if let Some(v) = prev_legacy {
             std::env::set_var("AICHAT_CAPABILITY_MASK", v);
         }
     }
@@ -7684,9 +7686,10 @@ agent_loop:
     fn capability_gate_denies_mutating_and_unclassified_when_masked() {
         // Serialize the env-var manipulation via a process-wide guard so this
         // test does not race the unmasked test above under the parallel runner.
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_CAPABILITY_MASK").ok();
-        std::env::set_var("AICHAT_CAPABILITY_MASK", "readonly");
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_CAPABILITY_MASK").ok();
+        let prev_legacy = std::env::var("AICHAT_CAPABILITY_MASK").ok();
+        crate::utils::set_dual_env_var("CAPABILITY_MASK", "readonly");
 
         let config = config_with_modes();
 
@@ -7707,9 +7710,12 @@ agent_loop:
         assert_eq!(unclassified["error"]["reason"], "unclassified");
 
         // Restore prior state.
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_CAPABILITY_MASK", v),
-            None => std::env::remove_var("AICHAT_CAPABILITY_MASK"),
+        crate::utils::remove_dual_env_var("CAPABILITY_MASK");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_CAPABILITY_MASK", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_CAPABILITY_MASK", v);
         }
     }
 
@@ -7753,10 +7759,11 @@ agent_loop:
 
     #[test]
     fn authority_gate_permits_within_ceiling_denies_above() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
         // Default top-level ceiling = Destructive (no env var).
-        std::env::remove_var("AICHAT_AUTHORITY_CEILING");
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
         let config = config_with_tiers();
 
         // Within ceiling: Safe and Disruptive permitted.
@@ -7775,17 +7782,21 @@ agent_loop:
         // _plan always permitted.
         assert!(authority_denied_result(&config, &call("_plan"), None, None, false).is_none());
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
     }
 
     #[test]
     fn authority_gate_unclassified_is_human_reserved_blocked() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
-        std::env::remove_var("AICHAT_AUTHORITY_CEILING");
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
         let config = config_with_tiers();
 
         // Unclassified → Human → exceeds any autonomous ceiling → blocked (pre-#6d).
@@ -7797,19 +7808,23 @@ agent_loop:
             "risk human (unclassified tool) > ceiling destructive"
         );
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
     }
 
     #[test]
     fn authority_gate_proven_reversibility_lowers_requirement() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
         // Lower the ceiling to Disruptive so a plain Destructive action is blocked
         // but a *proven-reversible* Destructive (needs only Disruptive) is allowed.
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "disruptive");
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "disruptive");
         let config = config_with_tiers();
 
         // Plain destructive → needs Destructive > Disruptive ceiling → blocked.
@@ -7820,27 +7835,34 @@ agent_loop:
             "proven-reversible destructive should drop to disruptive and fit the ceiling"
         );
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
     }
 
     #[test]
     fn authority_gate_child_ceiling_from_env_lowers_authority() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
         // Simulate a sub-agent granted only a Safe ceiling.
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "safe");
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "safe");
         let config = config_with_tiers();
 
         // Safe permitted; anything above blocked for this restricted child.
         assert!(authority_denied_result(&config, &call("read_logs"), None, None, false).is_none());
         assert!(authority_denied_result(&config, &call("restart_svc"), None, None, false).is_some());
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
     }
 
@@ -7964,13 +7986,13 @@ agent_loop:
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn risk_evaluator_disabled_without_risk_model_is_noop() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_ROLES_DIR").ok();
+        let _guard = MASK_ENV_LOCK.lock().await;
+        let prev_perry = std::env::var("PERRY_ROLES_DIR").ok();
+        let prev_legacy = std::env::var("AICHAT_ROLES_DIR").ok();
         let empty_dir = crate::utils::temp_file("-test-empty-roles-", "");
         std::fs::create_dir_all(&empty_dir).unwrap();
-        std::env::set_var("AICHAT_ROLES_DIR", &empty_dir);
+        crate::utils::set_dual_env_var("ROLES_DIR", &empty_dir);
 
         // No safety.risk_model configured → the overlay degrades to #6b (proceeds
         // here; the #6b gate already ran separately). A disruptive tool within a
@@ -7984,21 +8006,24 @@ agent_loop:
             "with no risk_model the evaluator must be a no-op (degrade to #6b)"
         );
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_ROLES_DIR", v),
-            None => std::env::remove_var("AICHAT_ROLES_DIR"),
+        crate::utils::remove_dual_env_var("ROLES_DIR");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_ROLES_DIR", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_ROLES_DIR", v);
         }
         let _ = std::fs::remove_dir_all(&empty_dir);
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_prepass_noop_without_6c() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_ROLES_DIR").ok();
+        let _guard = MASK_ENV_LOCK.lock().await;
+        let prev_perry = std::env::var("PERRY_ROLES_DIR").ok();
+        let prev_legacy = std::env::var("AICHAT_ROLES_DIR").ok();
         let empty_dir = crate::utils::temp_file("-test-empty-roles-", "");
         std::fs::create_dir_all(&empty_dir).unwrap();
-        std::env::set_var("AICHAT_ROLES_DIR", &empty_dir);
+        crate::utils::set_dual_env_var("ROLES_DIR", &empty_dir);
 
         let config = config_with_tiers();
         assert!(config.read().safety.risk_model.is_none());
@@ -8023,23 +8048,26 @@ agent_loop:
             "cache must remain untouched when pre-pass degrades"
         );
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_ROLES_DIR", v),
-            None => std::env::remove_var("AICHAT_ROLES_DIR"),
+        crate::utils::remove_dual_env_var("ROLES_DIR");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_ROLES_DIR", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_ROLES_DIR", v);
         }
         let _ = std::fs::remove_dir_all(&empty_dir);
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn risk_evaluator_uses_role_model_when_safety_risk_model_unset() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_ROLES_DIR").ok();
+        let _guard = MASK_ENV_LOCK.lock().await;
+        let prev_perry = std::env::var("PERRY_ROLES_DIR").ok();
+        let prev_legacy = std::env::var("AICHAT_ROLES_DIR").ok();
         let roles_dir = crate::utils::temp_file("-test-roles-", "");
         std::fs::create_dir_all(&roles_dir).unwrap();
         let role_content = "---\nmodel: custom:evaluator-model\n---\nPrompt";
         std::fs::write(roles_dir.join("%assess-risk%.md"), role_content).unwrap();
-        std::env::set_var("AICHAT_ROLES_DIR", &roles_dir);
+        crate::utils::set_dual_env_var("ROLES_DIR", &roles_dir);
 
         let config = config_with_tiers();
         assert!(config.read().safety.risk_model.is_none());
@@ -8054,9 +8082,12 @@ agent_loop:
                 break;
             }
         }
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_ROLES_DIR", v),
-            None => std::env::remove_var("AICHAT_ROLES_DIR"),
+        crate::utils::remove_dual_env_var("ROLES_DIR");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_ROLES_DIR", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_ROLES_DIR", v);
         }
         let _ = std::fs::remove_dir_all(&roles_dir);
 
@@ -8163,8 +8194,9 @@ agent_loop:
 
     #[test]
     fn evaluator_context_end_to_end_resolution() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_FUNCTIONS_DIR").ok();
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_FUNCTIONS_DIR").ok();
+        let prev_legacy = std::env::var("AICHAT_FUNCTIONS_DIR").ok();
         let tmp = crate::utils::temp_file("-test-tools-", "");
         let tools_dir = tmp.join("tools");
         std::fs::create_dir_all(&tools_dir).unwrap();
@@ -8173,7 +8205,7 @@ agent_loop:
             &script_file,
             "#!/usr/bin/env bash\n# @describe Test tool.\n# @option --cmd! Command to run\nmain() { eval \"$argc_cmd\"; }\n",
         ).unwrap();
-        std::env::set_var("AICHAT_FUNCTIONS_DIR", &tmp);
+        crate::utils::set_dual_env_var("FUNCTIONS_DIR", &tmp);
 
         let config = config_with_tiers();
         let tool_name = "my_tool";
@@ -8200,9 +8232,12 @@ agent_loop:
         assert!(parsed["source"].as_str().unwrap().contains("eval"));
         assert!(parsed["script_path"].as_str().unwrap().contains("my_tool.sh"));
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_FUNCTIONS_DIR", v),
-            None => std::env::remove_var("AICHAT_FUNCTIONS_DIR"),
+        crate::utils::remove_dual_env_var("FUNCTIONS_DIR");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_FUNCTIONS_DIR", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_FUNCTIONS_DIR", v);
         }
     }
 
@@ -8260,9 +8295,10 @@ agent_loop:
 
     #[tokio::test]
     async fn test_preflight_reversibility_allows_disruptive_tool_under_reversible_ceiling() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "reversible");
+        let _guard = MASK_ENV_LOCK.lock().await;
+        let prev_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "reversible");
         let config = config_with_tiers();
 
         let (progress, mut rx) = AgentLoopProgress::live();
@@ -8293,19 +8329,23 @@ agent_loop:
         assert!(emitted_preflight, "must emit PreflightReversibilityApplied");
         assert!(emitted_passed, "must emit SafetyGatePassed");
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
     }
 
     #[test]
     fn test_preflight_reversibility_fails_closed_when_stepped_down_still_exceeds_ceiling() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
         // Ceiling is Safe. write_file is Disruptive -> stepped down to Reversible.
         // Reversible still exceeds Safe!
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "safe");
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "safe");
         let config = config_with_tiers();
 
         let c = ToolCall::new("write_file".to_string(), json!({"path": "/tmp/test_preflight.txt"}), None);
@@ -8321,19 +8361,23 @@ agent_loop:
         );
         assert!(!proven_applied, "proven_reversible_applied flag must remain false when remediation does not suffice");
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
     }
 
     #[test]
     fn test_authority_denied_comparison_formats_reversibility_discount() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
         // Ceiling is Reversible. wipe_disk_reversible is Destructive discounted to Disruptive.
         // Disruptive > Reversible -> blocked with reversibility-discounted label!
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "reversible");
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "reversible");
         let config = config_with_tiers();
 
         let c = ToolCall::new("wipe_disk_reversible".to_string(), json!({}), None);
@@ -8347,17 +8391,21 @@ agent_loop:
             "risk disruptive (effective, reversible tool) > ceiling reversible"
         );
 
-        match prev {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
     }
 
     #[test]
     fn test_preflight_reversibility_cannot_bypass_policy_forbid() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev_ceiling = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "destructive");
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "destructive");
 
         let config = config_with_tiers();
         let temp_dir = crate::utils::temp_file("-test-policy-", "");
@@ -8379,9 +8427,12 @@ agent_loop:
         assert_eq!(denied.unwrap()["error"]["type"], "policy_forbidden");
         assert!(!proven_applied);
 
-        match prev_ceiling {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
     }
 
@@ -8493,9 +8544,8 @@ agent_loop:
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn handle_escalation_request_policy_forbid_returns_halt() {
-        let _guard = MASK_ENV_LOCK.lock();
+        let _guard = MASK_ENV_LOCK.lock().await;
         let config = config_with_tiers();
         let temp_dir = crate::utils::temp_file("-test-orch-policy-", "");
         std::fs::create_dir_all(&temp_dir).unwrap();
@@ -8533,15 +8583,16 @@ agent_loop:
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn handle_escalation_request_within_ceiling_approves() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev_ceiling = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
-        let prev_roles = std::env::var("AICHAT_ROLES_DIR").ok();
+        let _guard = MASK_ENV_LOCK.lock().await;
+        let prev_ceiling_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_ceiling_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let prev_roles_perry = std::env::var("PERRY_ROLES_DIR").ok();
+        let prev_roles_legacy = std::env::var("AICHAT_ROLES_DIR").ok();
         let empty_dir = crate::utils::temp_file("-test-orch-empty-roles-", "");
         std::fs::create_dir_all(&empty_dir).unwrap();
-        std::env::set_var("AICHAT_ROLES_DIR", &empty_dir);
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "destructive");
+        crate::utils::set_dual_env_var("ROLES_DIR", &empty_dir);
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "destructive");
 
         let config = config_with_tiers();
         let hello = crate::safety::HelloMsg {
@@ -8564,13 +8615,19 @@ agent_loop:
         let verdict = handle_escalation_request(&config, &hello, esc).await;
         assert_eq!(verdict.decision, crate::safety::VerdictDecision::Continue);
 
-        match prev_ceiling {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_ceiling_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
         }
-        match prev_roles {
-            Some(v) => std::env::set_var("AICHAT_ROLES_DIR", v),
-            None => std::env::remove_var("AICHAT_ROLES_DIR"),
+        if let Some(v) = prev_ceiling_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
+        }
+        crate::utils::remove_dual_env_var("ROLES_DIR");
+        if let Some(v) = prev_roles_perry {
+            std::env::set_var("PERRY_ROLES_DIR", v);
+        }
+        if let Some(v) = prev_roles_legacy {
+            std::env::set_var("AICHAT_ROLES_DIR", v);
         }
         let _ = std::fs::remove_dir_all(&empty_dir);
     }
@@ -8630,15 +8687,16 @@ agent_loop:
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_eval_single_tool_child_process_authority_exceeded_fails_closed_without_escalating() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev_ceiling = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
-        let prev_depth = std::env::var("AICHAT_AGENT_DEPTH").ok();
+        let _guard = MASK_ENV_LOCK.lock().await;
+        let prev_ceiling_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_ceiling_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let prev_depth_perry = std::env::var("PERRY_AGENT_DEPTH").ok();
+        let prev_depth_legacy = std::env::var("AICHAT_AGENT_DEPTH").ok();
 
         // Set up child environment with depth 1 and safe ceiling
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "safe");
-        std::env::set_var("AICHAT_AGENT_DEPTH", "1");
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "safe");
+        crate::utils::set_dual_env_var("AGENT_DEPTH", "1");
 
         let config = config_with_tiers();
         // restart_svc is disruptive, exceeding the safe ceiling
@@ -8647,13 +8705,19 @@ agent_loop:
         let res = eval_single_tool(&config, &call, None, None, None).await.unwrap();
         assert_eq!(res["error"]["type"], "authority_exceeded");
 
-        match prev_ceiling {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_ceiling_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
         }
-        match prev_depth {
-            Some(v) => std::env::set_var("AICHAT_AGENT_DEPTH", v),
-            None => std::env::remove_var("AICHAT_AGENT_DEPTH"),
+        if let Some(v) = prev_ceiling_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
+        }
+        crate::utils::remove_dual_env_var("AGENT_DEPTH");
+        if let Some(v) = prev_depth_perry {
+            std::env::set_var("PERRY_AGENT_DEPTH", v);
+        }
+        if let Some(v) = prev_depth_legacy {
+            std::env::set_var("AICHAT_AGENT_DEPTH", v);
         }
     }
 
@@ -9248,11 +9312,13 @@ agent_loop:
         use crate::function::BlastRadius;
         use crate::safety::{AuthorityCeiling, AutonomyLevel};
 
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev_parent = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
-        let prev_default = std::env::var("AICHAT_SAFETY_DEFAULT_CEILING").ok();
-        std::env::remove_var("AICHAT_AUTHORITY_CEILING");
-        std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING");
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_parent_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_parent_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let prev_default_perry = std::env::var("PERRY_SAFETY_DEFAULT_CEILING").ok();
+        let prev_default_legacy = std::env::var("AICHAT_SAFETY_DEFAULT_CEILING").ok();
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        crate::utils::remove_dual_env_var("SAFETY_DEFAULT_CEILING");
 
         // 1. By default, SafetyConfig defaults to ReadOnly (Safe ceiling)
         let config = GlobalConfig::default();
@@ -9287,29 +9353,47 @@ agent_loop:
             AuthorityCeiling::UpTo(BlastRadius::Reversible)
         );
 
-        // 3. Explicit fine-grained env override overrides autonomy macro baseline
-        std::env::set_var("AICHAT_SAFETY_DEFAULT_CEILING", "disruptive");
+        config.write().safety.autonomy = Some(AutonomyLevel::Disruptive);
         assert_eq!(
             current_authority_ceiling(&config),
             AuthorityCeiling::UpTo(BlastRadius::Disruptive)
         );
-        std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING");
 
-        // 4. Child process ceiling (AICHAT_AUTHORITY_CEILING) takes top precedence
-        std::env::set_var("AICHAT_AUTHORITY_CEILING", "safe");
+        config.write().safety.autonomy = Some(AutonomyLevel::Destructive);
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Destructive)
+        );
+
+        // 3. Explicit fine-grained env override overrides autonomy macro baseline
+        crate::utils::set_dual_env_var("SAFETY_DEFAULT_CEILING", "disruptive");
+        assert_eq!(
+            current_authority_ceiling(&config),
+            AuthorityCeiling::UpTo(BlastRadius::Disruptive)
+        );
+        crate::utils::remove_dual_env_var("SAFETY_DEFAULT_CEILING");
+
+        // 4. Child process ceiling takes top precedence
+        crate::utils::set_dual_env_var("AUTHORITY_CEILING", "safe");
         assert_eq!(
             current_authority_ceiling(&config),
             AuthorityCeiling::UpTo(BlastRadius::Safe)
         );
 
         // Cleanup
-        match prev_parent {
-            Some(v) => std::env::set_var("AICHAT_AUTHORITY_CEILING", v),
-            None => std::env::remove_var("AICHAT_AUTHORITY_CEILING"),
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_parent_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
         }
-        match prev_default {
-            Some(v) => std::env::set_var("AICHAT_SAFETY_DEFAULT_CEILING", v),
-            None => std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING"),
+        if let Some(v) = prev_parent_legacy {
+            std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
+        }
+        crate::utils::remove_dual_env_var("SAFETY_DEFAULT_CEILING");
+        if let Some(v) = prev_default_perry {
+            std::env::set_var("PERRY_SAFETY_DEFAULT_CEILING", v);
+        }
+        if let Some(v) = prev_default_legacy {
+            std::env::set_var("AICHAT_SAFETY_DEFAULT_CEILING", v);
         }
     }
 
@@ -9318,11 +9402,13 @@ agent_loop:
         use crate::function::Functions;
         use crate::safety::AutonomyLevel;
 
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev_ceiling = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
-        let prev_default = std::env::var("AICHAT_SAFETY_DEFAULT_CEILING").ok();
-        std::env::remove_var("AICHAT_AUTHORITY_CEILING");
-        std::env::remove_var("AICHAT_SAFETY_DEFAULT_CEILING");
+        let _guard = MASK_ENV_LOCK.blocking_lock();
+        let prev_ceiling_perry = std::env::var("PERRY_AUTHORITY_CEILING").ok();
+        let prev_ceiling_legacy = std::env::var("AICHAT_AUTHORITY_CEILING").ok();
+        let prev_default_perry = std::env::var("PERRY_SAFETY_DEFAULT_CEILING").ok();
+        let prev_default_legacy = std::env::var("AICHAT_SAFETY_DEFAULT_CEILING").ok();
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        crate::utils::remove_dual_env_var("SAFETY_DEFAULT_CEILING");
 
         let functions = Functions::init_from_declarations(vec![
             serde_json::from_value(json!({
@@ -9364,22 +9450,30 @@ agent_loop:
         assert!(proven_rev, "reversibility backup must be recorded in reversible posture");
 
         // Cleanup
-        if let Some(v) = prev_ceiling {
+        crate::utils::remove_dual_env_var("AUTHORITY_CEILING");
+        if let Some(v) = prev_ceiling_perry {
+            std::env::set_var("PERRY_AUTHORITY_CEILING", v);
+        }
+        if let Some(v) = prev_ceiling_legacy {
             std::env::set_var("AICHAT_AUTHORITY_CEILING", v);
         }
-        if let Some(v) = prev_default {
+        crate::utils::remove_dual_env_var("SAFETY_DEFAULT_CEILING");
+        if let Some(v) = prev_default_perry {
+            std::env::set_var("PERRY_SAFETY_DEFAULT_CEILING", v);
+        }
+        if let Some(v) = prev_default_legacy {
             std::env::set_var("AICHAT_SAFETY_DEFAULT_CEILING", v);
         }
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
     async fn test_autonomy_readonly_blocks_mutating_at_gate_1() {
-        let _guard = MASK_ENV_LOCK.lock();
-        let prev_mask = std::env::var("AICHAT_CAPABILITY_MASK").ok();
+        let _guard = MASK_ENV_LOCK.lock().await;
+        let prev_mask_perry = std::env::var("PERRY_CAPABILITY_MASK").ok();
+        let prev_mask_legacy = std::env::var("AICHAT_CAPABILITY_MASK").ok();
 
-        // When root orchestrator starts with readonly autonomy posture, it sets AICHAT_CAPABILITY_MASK=readonly
-        std::env::set_var("AICHAT_CAPABILITY_MASK", "readonly");
+        // When root orchestrator starts with readonly autonomy posture, it sets PERRY_CAPABILITY_MASK=readonly
+        crate::utils::set_dual_env_var("CAPABILITY_MASK", "readonly");
 
         let config = config_with_tiers();
         // restart_svc is mutating
@@ -9390,9 +9484,12 @@ agent_loop:
         assert_eq!(res["error"]["type"], "capability_denied");
         assert!(res["error"]["message"].as_str().unwrap().contains("read-only"));
 
-        match prev_mask {
-            Some(v) => std::env::set_var("AICHAT_CAPABILITY_MASK", v),
-            None => std::env::remove_var("AICHAT_CAPABILITY_MASK"),
+        crate::utils::remove_dual_env_var("CAPABILITY_MASK");
+        if let Some(v) = prev_mask_perry {
+            std::env::set_var("PERRY_CAPABILITY_MASK", v);
+        }
+        if let Some(v) = prev_mask_legacy {
+            std::env::set_var("AICHAT_CAPABILITY_MASK", v);
         }
     }
 

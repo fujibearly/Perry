@@ -31,22 +31,24 @@ The Autonomy Ladder is an **operational posture preset** implemented as a root-l
 ## 2D Posture Matrix
 
 ```
-                          AUTHORITY CEILING (Gate 2 / Escalation)
+                          AUTHORITY CEILING (Gate 2 / Escalation Axis)
                        Safe          Reversible      Disruptive      Destructive
                   ┌──────────────┬──────────────┬──────────────┬──────────────┐
   readonly (Gate1)│   readonly   │      ──      │      ──      │      ──      │
 CAPABILITY MASK   │ (Audit/Triage)              │              │              │
-                  ├──────────────┼──────────────┼──────────────┼──────────────┤
-  mutating        │   consult    │  reversible  │   Standard   │   Standard   │
-                  │ (Supervised) │ (Bounded AP) │    Legacy    │   Default    │
+(Permission Axis) ├──────────────┼──────────────┼──────────────┼──────────────┤
+  mutating        │   consult    │  reversible  │  disruptive  │ destructive  │
+  (unmasked)      │ (Supervised) │ (Bounded AP) │(Remediation) │ (Full Auto)  │
                   └──────────────┴──────────────┴──────────────┴──────────────┘
 ```
 
 | Level | Root Mask (Gate 1) | Root Ceiling (Gate 2) | Option B Auto-Reversibility | Child Subagent Delegation Cap | Non-TTY / Headless Behavior |
 |:---|:---:|:---:|:---:|:---:|:---|
-| **`readonly`** | `readonly` | `Safe` | Disabled | Forced `readonly`, `safe` | Fails closed on any mutation |
-| **`consult`** | `mutating` | `Safe` | Stepped down to $\ge \text{Reversible}$ (requires human sign-off) | `readonly`, `safe` (triagers only) | Fails closed on any mutation |
-| **`reversible`** | `mutating` | `Reversible` | Enabled (atomic `.bak` journal backup) | `mutating`, `reversible` | Auto-applies reversible fixes; halts on disruptive |
+| **`readonly`** | `readonly` | `Safe` | Disabled | Forced `readonly`, `safe` | Fails closed on any mutation ($0 tokens) |
+| **`consult`** | `None` *(mutating)* | `Safe` | Stepped down to $\ge \text{Reversible}$ (requires human sign-off) | `readonly`, `safe` (triagers only) | Fails closed on any mutation |
+| **`reversible`** | `None` *(mutating)* | `Reversible` | Enabled (atomic `.bak` journal backup) | `mutating`, `reversible` | Auto-applies reversible fixes; halts on disruptive |
+| **`disruptive`** | `None` *(mutating)* | `Disruptive` | Enabled (atomic `.bak` journal backup) | `mutating`, `disruptive` | Auto-applies service restarts; halts on destructive |
+| **`destructive`** | `None` *(mutating)* | `Destructive` | Enabled (atomic `.bak` journal backup) | `mutating`, `destructive` | Auto-applies data deletions; halts on catastrophic |
 
 ---
 
@@ -104,14 +106,18 @@ pub enum AutonomyLevel {
     ReadOnly,
     Consult,
     Reversible,
+    Disruptive,
+    Destructive,
 }
 
 impl AutonomyLevel {
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "readonly" | "read-only" | "observer" | "a0" => Some(AutonomyLevel::ReadOnly),
-            "consult" | "ask" | "copilot" | "a1" => Some(AutonomyLevel::Consult),
-            "reversible" | "revert" | "autopilot" | "a2" => Some(AutonomyLevel::Reversible),
+            "readonly" => Some(AutonomyLevel::ReadOnly),
+            "consult" => Some(AutonomyLevel::Consult),
+            "reversible" => Some(AutonomyLevel::Reversible),
+            "disruptive" => Some(AutonomyLevel::Disruptive),
+            "destructive" => Some(AutonomyLevel::Destructive),
             _ => None,
         }
     }
@@ -121,13 +127,18 @@ impl AutonomyLevel {
             AutonomyLevel::ReadOnly => "readonly",
             AutonomyLevel::Consult => "consult",
             AutonomyLevel::Reversible => "reversible",
+            AutonomyLevel::Disruptive => "disruptive",
+            AutonomyLevel::Destructive => "destructive",
         }
     }
 
     pub fn capability_mask(&self) -> Option<&'static str> {
         match self {
             AutonomyLevel::ReadOnly => Some("readonly"),
-            AutonomyLevel::Consult | AutonomyLevel::Reversible => None,
+            AutonomyLevel::Consult
+            | AutonomyLevel::Reversible
+            | AutonomyLevel::Disruptive
+            | AutonomyLevel::Destructive => None,
         }
     }
 
@@ -135,13 +146,15 @@ impl AutonomyLevel {
         match self {
             AutonomyLevel::ReadOnly | AutonomyLevel::Consult => AuthorityCeiling::UpTo(BlastRadius::Safe),
             AutonomyLevel::Reversible => AuthorityCeiling::UpTo(BlastRadius::Reversible),
+            AutonomyLevel::Disruptive => AuthorityCeiling::UpTo(BlastRadius::Disruptive),
+            AutonomyLevel::Destructive => AuthorityCeiling::UpTo(BlastRadius::Destructive),
         }
     }
 
     pub fn permits_autonomous_reversibility(&self) -> bool {
         match self {
             AutonomyLevel::ReadOnly | AutonomyLevel::Consult => false,
-            AutonomyLevel::Reversible => true,
+            AutonomyLevel::Reversible | AutonomyLevel::Disruptive | AutonomyLevel::Destructive => true,
         }
     }
 }

@@ -114,6 +114,37 @@ pub fn cmd_set_env(cmd: &mut process::Command, key: &str, val: impl AsRef<std::f
     }
 }
 
+pub fn set_dual_env_var(key: &str, val: impl AsRef<std::ffi::OsStr>) {
+    let raw = key
+        .strip_prefix("PERRY_")
+        .or_else(|| key.strip_prefix("perry_"))
+        .or_else(|| key.strip_prefix("AICHAT_"))
+        .or_else(|| key.strip_prefix("aichat_"))
+        .unwrap_or(key);
+    let primary = get_env_name(raw);
+    let legacy = get_legacy_env_name(raw);
+    std::env::set_var(&primary, val.as_ref());
+    if legacy != primary {
+        std::env::set_var(&legacy, val.as_ref());
+    }
+}
+
+#[allow(dead_code)]
+pub fn remove_dual_env_var(key: &str) {
+    let raw = key
+        .strip_prefix("PERRY_")
+        .or_else(|| key.strip_prefix("perry_"))
+        .or_else(|| key.strip_prefix("AICHAT_"))
+        .or_else(|| key.strip_prefix("aichat_"))
+        .unwrap_or(key);
+    let primary = get_env_name(raw);
+    let legacy = get_legacy_env_name(raw);
+    std::env::remove_var(&primary);
+    if legacy != primary {
+        std::env::remove_var(&legacy);
+    }
+}
+
 pub trait EnvMap {
     fn insert_env(&mut self, key: String, val: String);
 }

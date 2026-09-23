@@ -58,7 +58,7 @@ pub struct Cli {
     /// Enable link exploration mode for web searches (passes links: true and scrapes discovered URLs)
     #[clap(long)]
     pub wslinks: bool,
-    /// Operational autonomy posture macro (readonly | consult | reversible | none) [default: readonly]
+    /// Operational autonomy posture (readonly | consult | reversible | disruptive | destructive) [default: readonly]
     #[clap(long, value_name = "POSTURE")]
     pub autonomy: Option<String>,
     /// Limit generated output tokens per response

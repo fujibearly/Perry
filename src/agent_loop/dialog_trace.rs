@@ -181,18 +181,29 @@ mod tests {
 
     #[test]
     fn test_dialog_output_destination_override() {
-        let prev = std::env::var("AICHAT_DIALOG_OUTPUT").ok();
-        unsafe {
-            std::env::set_var("AICHAT_DIALOG_OUTPUT", "stderr");
-            assert_eq!(dialog_output_destination(), DialogOutputDestination::Stderr);
-            std::env::set_var("AICHAT_DIALOG_OUTPUT", "both");
-            assert_eq!(dialog_output_destination(), DialogOutputDestination::Both);
-            std::env::set_var("AICHAT_DIALOG_OUTPUT", "tty");
-            assert_eq!(dialog_output_destination(), DialogOutputDestination::Terminal);
-            match prev {
-                Some(v) => std::env::set_var("AICHAT_DIALOG_OUTPUT", v),
-                None => std::env::remove_var("AICHAT_DIALOG_OUTPUT"),
-            }
+        let prev_perry = std::env::var("PERRY_DIALOG_OUTPUT").ok();
+        let prev_legacy = std::env::var("AICHAT_DIALOG_OUTPUT").ok();
+        crate::utils::remove_dual_env_var("DIALOG_OUTPUT");
+
+        // Primary PERRY_ override
+        std::env::set_var("PERRY_DIALOG_OUTPUT", "stderr");
+        assert_eq!(dialog_output_destination(), DialogOutputDestination::Stderr);
+        std::env::set_var("PERRY_DIALOG_OUTPUT", "both");
+        assert_eq!(dialog_output_destination(), DialogOutputDestination::Both);
+        std::env::set_var("PERRY_DIALOG_OUTPUT", "tty");
+        assert_eq!(dialog_output_destination(), DialogOutputDestination::Terminal);
+
+        // Fallback to legacy AICHAT_ override
+        std::env::remove_var("PERRY_DIALOG_OUTPUT");
+        std::env::set_var("AICHAT_DIALOG_OUTPUT", "stderr");
+        assert_eq!(dialog_output_destination(), DialogOutputDestination::Stderr);
+
+        crate::utils::remove_dual_env_var("DIALOG_OUTPUT");
+        if let Some(v) = prev_perry {
+            std::env::set_var("PERRY_DIALOG_OUTPUT", v);
+        }
+        if let Some(v) = prev_legacy {
+            std::env::set_var("AICHAT_DIALOG_OUTPUT", v);
         }
     }
 

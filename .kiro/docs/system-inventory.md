@@ -90,8 +90,8 @@ All 31 atomic tools located in `llm-functions/tools/` and compiled into `functio
 6. **`fs_write.sh`**: Write content directly to a file (creating or overwriting).
 
 ### B. Web Search & Intelligence Tools (7 Tools)
-7. **`web_search.sh`**: Unified symlink interface pointing to the active search provider backend (`web_search_aichat.sh`).
-8. **`web_search_aichat.sh`**: Google Gemini / VertexAI Grounded Search backend (`gemini-3.5-flash`).
+7. **`web_search.sh`**: Unified symlink interface pointing to the active search provider backend (`web_search_perry.sh`).
+8. **`web_search_perry.sh`**: Google Gemini / VertexAI Grounded Search backend (`gemini-3.5-flash`; backward-compatible symlink `web_search_aichat.sh`).
 9. **`web_search_perplexity.sh`**: Search backend powered by the Perplexity API.
 10. **`web_search_tavily.sh`**: Search backend powered by the Tavily AI search API.
 11. **`search_wikipedia.sh`**: Query and retrieve extracts from Wikipedia articles.

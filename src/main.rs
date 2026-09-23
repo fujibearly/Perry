@@ -57,8 +57,7 @@ async fn main() -> Result<()> {
     if get_env_var("START_TIME_MS").is_err() {
         if let Ok(duration) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
             let ms = duration.as_millis().to_string();
-            std::env::set_var("PERRY_START_TIME_MS", &ms);
-            std::env::set_var("AICHAT_START_TIME_MS", &ms);
+            crate::utils::set_dual_env_var("START_TIME_MS", &ms);
         }
     }
     let cli = Cli::parse();
@@ -181,13 +180,13 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
         config.write().agent_loop.dialog_no_truncate = true;
     }
     let show_dialog = config.read().agent_loop.show_dialog;
-    std::env::set_var(
-        "AICHAT_AGENT_LOOP_SHOW_DIALOG",
+    crate::utils::set_dual_env_var(
+        "AGENT_LOOP_SHOW_DIALOG",
         if show_dialog { "true" } else { "false" },
     );
     let dialog_no_truncate = config.read().agent_loop.dialog_no_truncate;
-    std::env::set_var(
-        "AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE",
+    crate::utils::set_dual_env_var(
+        "AGENT_LOOP_DIALOG_NO_TRUNCATE",
         if dialog_no_truncate { "true" } else { "false" },
     );
 
@@ -205,19 +204,17 @@ async fn run(config: GlobalConfig, cli: Cli, text: Option<String>) -> Result<()>
 
     if cli.debug {
         config.write().agent_loop.debug = true;
-        std::env::set_var("AICHAT_AGENT_LOOP_DEBUG", "true");
+        crate::utils::set_dual_env_var("AGENT_LOOP_DEBUG", "true");
     }
     if cli.wslinks {
-        std::env::set_var("AICHAT_WSLINKS", "true");
+        crate::utils::set_dual_env_var("WSLINKS", "true");
     }
     if let Some(ref autonomy_str) = cli.autonomy {
         if let Some(level) = crate::safety::AutonomyLevel::from_str_loose(autonomy_str) {
             config.write().safety.autonomy = Some(level);
-        } else if matches!(autonomy_str.to_ascii_lowercase().as_str(), "none" | "unrestricted" | "off" | "full") {
-            config.write().safety.autonomy = None;
         } else {
             bail!(
-                "Invalid autonomy level '{autonomy_str}'. Valid postures: readonly, consult, reversible, none (or aliases a0, a1, a2)"
+                "Invalid autonomy posture '{autonomy_str}'. Valid postures: readonly, consult, reversible, disruptive, destructive"
             );
         }
     }
@@ -481,8 +478,7 @@ async fn run_directive(
         agent_loop_config.osc_title = false;
         agent_loop_config.notify = false;
     } else if get_env_var("AGENT_COLOR").is_err() {
-        std::env::set_var("PERRY_AGENT_COLOR", crate::agent_loop::AGENT_PALETTE[0].0);
-        std::env::set_var("AICHAT_AGENT_COLOR", crate::agent_loop::AGENT_PALETTE[0].0);
+        crate::utils::set_dual_env_var("AGENT_COLOR", crate::agent_loop::AGENT_PALETTE[0].0);
     }
 
     // If no trace/observability needed and stdout is not a terminal, run without rendering overhead

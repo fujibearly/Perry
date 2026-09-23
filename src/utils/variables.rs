@@ -45,16 +45,16 @@ mod tests {
     #[test]
     fn test_researcher_search_instructions_interpolation() {
         let mut text_default = "{{__researcher_search_instructions__}}".to_string();
-        std::env::remove_var("AICHAT_WSLINKS");
+        remove_dual_env_var("WSLINKS");
         interpolate_variables(&mut text_default);
         assert!(text_default.contains("with links=false"));
         assert!(text_default.contains("Do NOT fetch individual web pages"));
 
         let mut text_links = "{{__researcher_search_instructions__}}".to_string();
-        std::env::set_var("AICHAT_WSLINKS", "true");
+        set_dual_env_var("WSLINKS", "true");
         interpolate_variables(&mut text_links);
         assert!(text_links.contains("links=true"));
         assert!(text_links.contains("fetch_and_summarize"));
-        std::env::remove_var("AICHAT_WSLINKS");
+        remove_dual_env_var("WSLINKS");
     }
 }

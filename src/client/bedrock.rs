@@ -685,7 +685,7 @@ fn gen_signing_key(key: &str, date_stamp: &str, region: &str, service: &str) -> 
 mod tests {
     use super::*;
 
-    const MISSING_SESSION_TOKEN_ENV: &str = "AICHAT_TEST_MISSING_BEDROCK_SESSION_TOKEN_61C5210F";
+    const MISSING_SESSION_TOKEN_ENV: &str = "PERRY_TEST_MISSING_BEDROCK_SESSION_TOKEN_61C5210F";
     const CONVENTIONAL_SESSION_TOKEN_ENV: &str = "BEDROCK_REMEDIATION_TEST_SESSION_TOKEN";
 
     fn request_client(session_token: Option<String>) -> BedrockClient {

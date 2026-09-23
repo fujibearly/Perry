@@ -177,7 +177,7 @@ suite green (NFR-1) and MUST remain correct with all later increments absent (NF
 ## Notes
 
 - Debug `cargo test` for iteration (release compile is slow in this env; see prior specs).
-- No change to live `~/clones/llm-functions`; use dev clone `~/projects/llm-functions` and
+- No change to upstream reference `~/clones/llm-functions`; use active actuator workspace `~/projects/innators` and
   `AICHAT_FUNCTIONS_DIR` for any functions-side testing.
 - Keep all tests deterministic/hermetic: evaluator via mock verdict, control-files under isolated
   temp paths with cleanup, no network/live providers/tty.

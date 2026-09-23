@@ -137,7 +137,7 @@ struct EmbeddingsResBodyEmbedding {
 mod tests {
     use super::*;
 
-    const MISSING_API_BASE_ENV: &str = "AICHAT_TEST_MISSING_GEMINI_API_BASE_8F65F4CE";
+    const MISSING_API_BASE_ENV: &str = "PERRY_TEST_MISSING_GEMINI_API_BASE_8F65F4CE";
 
     fn request_client(api_base: Option<String>) -> GeminiClient {
         GeminiClient {

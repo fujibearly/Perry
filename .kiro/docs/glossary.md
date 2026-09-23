@@ -89,7 +89,7 @@
   * **Cost Budget:** Maximum USD financial expenditure computed across provider token pricing. If breached, the agent loop aborts immediately without executing further mutations.
 
 ### Dual-Arm Parser
-* **Definition:** A resilient deserialization pattern implemented in `PlanPayload::parse_flexible` ([`src/agent_loop/plan.rs`](file:///home/istari/projects/aichat/src/agent_loop/plan.rs)):
+* **Definition:** A resilient deserialization pattern implemented in `PlanPayload::parse_flexible` ([`src/agent_loop/plan.rs`](file:///home/istari/projects/perry/src/agent_loop/plan.rs)):
   * **Arm 1 (Strict Schema Deserialization):** Attempts to parse structured `{objective, steps: [...]}` JSON conforming strictly to the plan schema.
   * **Arm 2 (Lenient Fallback):** If the model returns prose-wrapped JSON, legacy `{"thought": "..."}` objects, or unformatted strings, Arm 2 catches it via `RawPlanPayload::LegacyCatchAll`, preserving the turn without crashing the agent loop.
 * **Disambiguation Note:** The Dual-Arm Parser in `plan.rs` is distinct from the **Vertex AI AST Kwargs Recovery Parser** in `src/client/vertexai.rs`, which intercepts Python function syntax hallucinated under burst load.
@@ -105,7 +105,7 @@
 * **Definition:** The runtime checkpoint in `eval_single_tool` executed immediately prior to dispatching any mutating tool. It compares the action's intrinsic impact (`ImpactTier`) against the agent's authority (`AuthorityCeiling`), verifies reversibility proofs, consults policy rules, and determines whether execution may proceed autonomously, requires pre-flight remediation, or must escalate.
 
 ### Blast Radius Taxonomy (The 5 Tiers)
-* **Definition:** In [`src/function.rs`](file:///home/istari/projects/aichat/src/function.rs), `BlastRadius` has exactly 5 variants on the **Impact Axis**:
+* **Definition:** In [`src/function.rs`](file:///home/istari/projects/perry/src/function.rs), `BlastRadius` has exactly 5 variants on the **Impact Axis**:
   1. `Safe`: Zero state modification. Read-only queries, diagnostic inspections, idempotent fetches.
   2. `Reversible`: Modifies state, but an inverse operation or pre-mutation backup fully restores initial state without human intervention.
   3. `Disruptive`: Temporary service or process disruption; recoverable via service restarts or standard workflows (e.g., daemon restart, cache flush).
@@ -121,7 +121,7 @@
 
 ### `HumanReserved` (`RequiredAuthority::Human`)
 * **Definition:** An authority state indicating that an action sits strictly above all autonomous agent ceilings and cannot be approved by any autonomous model.
-* **Invariant:** `HumanReserved` is **not** a 6th `BlastRadius` tier. It lives on the authority axis in [`RequiredAuthority`](file:///home/istari/projects/aichat/src/safety.rs):
+* **Invariant:** `HumanReserved` is **not** a 6th `BlastRadius` tier. It lives on the authority axis in [`RequiredAuthority`](file:///home/istari/projects/perry/src/safety.rs):
   $$\text{RequiredAuthority} = \text{Tier}(\text{BlastRadius}) \;\mid\; \text{Human}$$
 * **Triggers:**
   1. Undeclared tools (`StaticTier::Unclassified`).

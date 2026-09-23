@@ -175,7 +175,7 @@ This document captures architectural lessons, debugging insights, and operationa
 - **Consequence:**
   Mental friction when scanning test logs and determining what behavior was requested of the agent versus which safety policies or environment flags were active.
 - **Resolution:**
-  In `show-cmd` ([`scripts/run-demos.nu`](file:///home/istari/projects/aichat/scripts/run-demos.nu)), separate trailing prompt arguments from CLI flags and environment variables. Render the command line (`▶ AICHAT_MODEL=... aichat <flags>`) first, followed by an empty line, the user prompt isolated on its own line in highlighted `light_cyan` with a 4-space indent, followed by an empty line before execution traces begin.
+  In `show-cmd` ([`scripts/run-demos.nu`](file:///home/istari/projects/perry/scripts/run-demos.nu)), separate trailing prompt arguments from CLI flags and environment variables. Render the command line (`▶ AICHAT_MODEL=... aichat <flags>`) first, followed by an empty line, the user prompt isolated on its own line in highlighted `light_cyan` with a 4-space indent, followed by an empty line before execution traces begin.
 - **Actionable Rule for Agents:**
   *Format test and demo harness output with clean visual separation between command-line switches/environment variables and the conversational user prompt.*
 
@@ -188,7 +188,7 @@ This document captures architectural lessons, debugging insights, and operationa
 - **Consequence:**
   Context bloat (such as massive system prompts, bulky tool returns, or runaway multi-turn history) remained invisible until the final turn or session cost summary, obscuring exactly which turn or tool result triggered high token consumption.
 - **Resolution:**
-  In [`src/agent_loop.rs`](file:///home/istari/projects/aichat/src/agent_loop.rs), compute the estimated token count upfront for each turn using `model.total_tokens(&msgs)` (via `estimate_token_length`) and pass `tokens: Option<usize>` into both [`AgentLoopEvent::TurnStart`](file:///home/istari/projects/aichat/src/agent_loop.rs#L65-L70) and [`AgentLoopEvent::DialogBlock`](file:///home/istari/projects/aichat/src/agent_loop.rs#L71-L80). Render `{tok} tok` in `DarkGray` immediately preceding ` @ <model>` in both trace headers (`[%agent% <pid> (<petname>) 286 tok @ <model> [turn X/Y] starting]`) and dialog frames (`┌── 📥 [<pid> %agent% 286 tok @ <model> [turn X/Y] PROMPT SUBMITTED TO LLM]`).
+  In [`src/agent_loop.rs`](file:///home/istari/projects/perry/src/agent_loop.rs), compute the estimated token count upfront for each turn using `model.total_tokens(&msgs)` (via `estimate_token_length`) and pass `tokens: Option<usize>` into both [`AgentLoopEvent::TurnStart`](file:///home/istari/projects/perry/src/agent_loop.rs#L65-L70) and [`AgentLoopEvent::DialogBlock`](file:///home/istari/projects/perry/src/agent_loop.rs#L71-L80). Render `{tok} tok` in `DarkGray` immediately preceding ` @ <model>` in both trace headers (`[%agent% <pid> (<petname>) 286 tok @ <model> [turn X/Y] starting]`) and dialog frames (`┌── 📥 [<pid> %agent% 286 tok @ <model> [turn X/Y] PROMPT SUBMITTED TO LLM]`).
 - **Actionable Rule for Agents:**
   *Compute and display request token estimates at the boundary of every LLM interaction before network dispatch. Upfront token attribution gives instant observability into turn-by-turn context growth.*
 
@@ -321,12 +321,52 @@ This document captures architectural lessons, debugging insights, and operationa
 - **Consequence:**
   Agents calling `web_search` crashed during tool pre-flight before `main()` could run, unless the user manually set `export WEB_SEARCH_MODEL=...` beforehand.
 - **Resolution:**
-  1. Relaxed `argc` declaration in `web_search_aichat.sh` from required (`!`) to optional (`# @env WEB_SEARCH_MODEL`).
+  1. Relaxed `argc` declaration in `web_search_perry.sh` (aliased as `web_search_aichat.sh`) from required (`!`) to optional (`# @env WEB_SEARCH_MODEL`).
   2. Implemented hierarchical resolution in both the shell tool and Perry core engine:
      `WEB_SEARCH_MODEL` (env) $\to$ `web_search_model` (`config.yaml`) $\to$ `model` (primary `config.yaml` model) $\to$ default (`gemini:gemini-2.5-flash`).
   3. Perry's `eval_shell` automatically injects `WEB_SEARCH_MODEL` into tool process environments if unset.
 - **Actionable Rule for Agents:**
   *Never make environment variables mandatory (`!`) in actuator scripts if sensible defaults or configuration file fallbacks can be resolved. Support a hierarchical resolution order: explicit env var $\to$ specific config key $\to$ general config model $\to$ stable default.*
+
+---
+
+### [2026-09-23T11:45:00-04:00] Anti-Pattern: Global Permission Relaxation in Test Harnesses Masks Multi-Gate Governance
+- **Category:** Testing, Safety & Governance Architecture
+- **Problem:**
+  When `--autonomy readonly` was made the engine-level default in Session 31, mutating and delegation demo tests broke in `scripts/run-demos.nu`. An initial proposal suggested injecting `PERRY_AUTONOMY: "none"` globally into `base_env`.
+- **Consequence:**
+  1. *Erosion of Default Posture Verification:* Applying `PERRY_AUTONOMY: "none"` across the entire harness completely disables testing of the default least-privilege CLI posture (`--autonomy readonly`). Over 70% of tests (read-only SRE diagnostics, web research, structured parsing) would no longer verify that out-of-the-box unprivileged execution works cleanly.
+  2. *Violation of Least Privilege in Mutating Tests:* Demos needing only `reversible` authority (e.g. `generate_data` under `# @meta risk reversible`) would run with full unconstrained destructive authority, making the test far more permissive than necessary.
+  3. *Short-Circuiting Multi-Gate Safety Defenses (False Positives/Negatives):* In Perry's governance pipeline, Gate 1 (macro capability mask) operates orthogonally to Gate 2 (dynamic risk evaluation and authority ceilings). Running mutating safety tests under default `readonly` caused Gate 1 to fail closed (`capability_denied`) before Gates 2–5 could execute. For example, Demo 19 (`fs_write` vs `ceiling: safe`) is intended to test that `reversible > safe` fails closed at Gate 2; under `readonly`, it was blocked at Gate 1, creating a false-positive pass for the wrong reason. Conversely, globally disabling autonomy removes Gate 1 entirely instead of scoping permits to the exact gate being evaluated.
+- **Resolution:**
+  Never use global blanket permission relaxations in test harnesses. Instead, apply targeted, per-test flags adhering to the Principle of Least Privilege:
+  - Standard read-only and diagnostic tests run under the default `--autonomy readonly` with zero override flags.
+  - Reversible mutation tests explicitly pass `--autonomy reversible`.
+  - Specific dynamic policy and delegation tests (e.g. testing `arg_contains: "rm -rf"` elevating to `catastrophic` at Gate 2, or testing orchestrator downward sandboxing) pass `--autonomy none` strictly on the specific command under test, while preserving child sandbox boundaries.
+- **Actionable Rule for Agents:**
+  *Never propose global permission relaxations (e.g. setting `PERRY_AUTONOMY: "none"` in a base environment) to fix test failures. Always diagnose the exact gate failure (Gate 1 capability mask vs Gate 2 authority ceiling vs Gate 3 approval floor) and apply minimal, per-test flags adhering to the Principle of Least Privilege.*
+
+---
+
+### [2026-09-23T12:35:00-04:00] Autonomy Ladder Symmetry: Blast-Radius Tiers Over Ambiguous Permission Labels
+- **Category:** Safety Taxonomy & Ergonomics
+- **Problem:**
+  The Autonomy Ladder initially exposed only three macro presets (`readonly`, `consult`, `reversible`), while using `none` or `unrestricted` to clear the macro and fall back to `safety.default_ceiling` (`Destructive`). This introduced two semantic hazards:
+  1. *The "None" Inversion:* `--autonomy none` sounded like "zero autonomy", but in practice granted raw unconstrained autonomy up to `Destructive`.
+  2. *The "Unrestricted" False Promise:* Calling the top tier "unrestricted" implied that anything goes, including catastrophic infrastructure destruction (e.g. `rm -rf /` or dropping root DBs). However, in Perry, `Catastrophic` is **always reserved for humans** (`RequiredAuthority::Human`) and can never be permitted to an autonomous process.
+  3. *The Missing Disruptive Step:* Intermediate operations (e.g. restarting daemons or flushing caches) had no dedicated macro preset, leaving an awkward gap between `reversible` and `destructive`.
+- **Consequence:**
+  Operators could either be surprised by over-permissive behavior (`none`), misled about safety bounds (`unrestricted`), or forced into manual fine-grained environment variable overrides for intermediate operational tasks.
+- **Resolution:**
+  Harmonized the Autonomy Ladder to directly match the 5 canonical Blast-Radius Tiers for complete symmetry and honesty:
+  - `readonly` (A0): Read-only triage and inspection ($0 LLM evaluator cost, Gate 1 hard block).
+  - `consult` (A1): Supervised copilot (Gate 1 unmasked; all mutations evaluated and prompt the operator).
+  - `reversible` (A2): Bounded autopilot (Option B atomic `.bak` journal step-down enabled).
+  - `disruptive` (A3): Active SRE remediation (service restarts, pod rollouts, and cache flushes auto-execute within ceiling).
+  - `destructive` (A4): Maximum autonomous actuation (deletions auto-execute within ceiling; **catastrophic remains strictly human-reserved**).
+  - `off` / `none` / `raw`: Explicit macro opt-out to rely on raw configuration and environment variables.
+- **Actionable Rule for Agents:**
+  *Never use misleading or inverse permission names like 'unrestricted' when hard safety invariants (such as Catastrophic human reservations) remain active. Maintain exact terminology symmetry between operational macros and underlying blast-radius tiers.*
 
 
 

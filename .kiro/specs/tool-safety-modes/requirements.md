@@ -421,6 +421,6 @@ can fall back to it.
 - The reversibility-*providing* machinery of #9 (worktrees) and #10 (staging/backup) — #6 *consumes*
   proven reversibility but those mechanisms are their own backlog items. #6 defines how a proven
   rollback artifact is recognized, not how every tool creates one.
-- Any change to the live `~/clones/llm-functions` directory (dev clone `~/projects/llm-functions` only).
+- Any change to the upstream reference `~/clones/llm-functions` directory (active actuator workspace `~/projects/innators` only).
 - ARGC-based helpers for the control protocol (explicitly dropped; the protocol is Rust-internal).
 - Cross-host / fleet-wide policy (the Protected Policy File is local; fleet policy is a roadmap L4 concern).

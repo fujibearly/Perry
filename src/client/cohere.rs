@@ -375,7 +375,7 @@ mod tests {
     use crate::utils::create_abort_signal;
     use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
 
-    const MISSING_API_BASE_ENV: &str = "AICHAT_TEST_MISSING_COHERE_API_BASE_04BB6F78";
+    const MISSING_API_BASE_ENV: &str = "PERRY_TEST_MISSING_COHERE_API_BASE_04BB6F78";
 
     fn test_handler() -> (SseHandler, UnboundedReceiver<SseEvent>) {
         let (tx, rx) = unbounded_channel();

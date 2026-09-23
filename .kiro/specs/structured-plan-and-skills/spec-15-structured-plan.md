@@ -11,7 +11,7 @@
 
 ## 1. Motivation & Problem Statement
 
-Today, the `_plan` pseudo-tool (Catalog item #11, [`src/agent_loop.rs:2590`](file:///home/istari/projects/aichat/src/agent_loop.rs#L2590)) is a **free-text scratchpad**. The model writes an arbitrary text thought, which the engine logs, returns `"acknowledged"`, and injects into the next turn's dialog history.
+Today, the `_plan` pseudo-tool (Catalog item #11, [`src/agent_loop.rs:2590`](file:///home/istari/projects/perry/src/agent_loop.rs#L2590)) is a **free-text scratchpad**. The model writes an arbitrary text thought, which the engine logs, returns `"acknowledged"`, and injects into the next turn's dialog history.
 
 This design suffers from three structural deficiencies:
 1. **No Execution Coupling:** The engine has no semantic visibility into whether subsequent tool calls align with the stated plan or deviate from it.

@@ -8,7 +8,7 @@ This document provides a comprehensive review of the **Model Context Protocol (M
 
 The Model Context Protocol (MCP) is an open standard introduced by Anthropic to standardize how LLMs connect with external data, tools, and developmental environments.
 
-In this fork, MCP is implemented as a **100% native in-process Rust client** ([`src/mcp.rs`](file:///home/istari/projects/aichat/src/mcp.rs)). It eliminates all third-party bridge dependencies (such as Node.js or Python middleware) and speaks JSON-RPC 2.0 directly over `stdio` to any compliant MCP server.
+In this fork, MCP is implemented as a **100% native in-process Rust client** ([`src/mcp.rs`](file:///home/istari/projects/perry/src/mcp.rs)). It eliminates all third-party bridge dependencies (such as Node.js or Python middleware) and speaks JSON-RPC 2.0 directly over `stdio` to any compliant MCP server.
 
 ```mermaid
 graph TD
@@ -50,7 +50,7 @@ graph TD
 * **Pain Points:** High process startup overhead, fragile dependency on Node.js/npm environments, poor signal handling (Ctrl+C would orphan child servers), and lack of per-agent isolation.
 
 ### Phase 2: The Native In-Process Rust Engine (Commit `3e95825`)
-* **State:** Replaced the entire external stack with an asynchronous, 1,085-line native Rust implementation in [`src/mcp.rs`](file:///home/istari/projects/aichat/src/mcp.rs).
+* **State:** Replaced the entire external stack with an asynchronous, 1,085-line native Rust implementation in [`src/mcp.rs`](file:///home/istari/projects/perry/src/mcp.rs).
 * **Key Enhancements:**
   1. **Zero Runtime Dependencies:** Compiles directly into the `aichat` binary.
   2. **Seamless Dispatch:** MCP tools appear as standard `FunctionDeclaration` entries, completely indistinguishable from native bash scripts to the agent loop.

@@ -5,15 +5,15 @@ Copy-paste examples demonstrating all new capabilities. Each command is self-con
 ## Setup (one time)
 
 ```bash
-# Point aichat at the dev functions directory
-export AICHAT_FUNCTIONS_DIR=~/projects/llm-functions
+# Point aichat/perry at the innators functions directory
+export AICHAT_FUNCTIONS_DIR=~/projects/innators
 
 # Enable web search (used by the researcher agent)
 export WEB_SEARCH_MODEL="gemini:gemini-2.5-pro"
 
 # Use the release binary (< /dev/null prevents stdin hang in non-interactive contexts)
-alias aichat='~/projects/perry/target/release/aichat'
-alias perry='~/projects/perry/target/release/aichat'
+alias aichat='~/projects/perry/target/release/perry'
+alias perry='~/projects/perry/target/release/perry'
 ```
 
 ### Fix bin/ symlinks (if not already done)
@@ -21,7 +21,7 @@ alias perry='~/projects/perry/target/release/aichat'
 The `bin/` directory must have symlinks to `scripts/run-tool.sh` (which converts JSON to CLI args), not directly to tool scripts:
 
 ```bash
-cd ~/projects/llm-functions
+cd ~/projects/innators
 ls -la bin/fs_cat  # Should point to ../scripts/run-tool.sh
 
 # If it points directly to tools/*.sh, fix all symlinks:
@@ -131,7 +131,7 @@ Agent orchestrator (12345) loop trace:
   [12345 calling: researcher]
 Agent researcher (67890) loop trace:
   [67890 [turn 1/20] starting]
-  [67890 calling: web_search_aichat]
+  [67890 calling: web_search]
   ...
   [67890 done]
   [12345 researcher completed (46.1s)]
@@ -139,7 +139,7 @@ Agent researcher (67890) loop trace:
   [12345 done]
 ```
 
-The researcher agent runs as a separate process with its own tools (`web_search_aichat`, `fetch_and_summarize`).
+The researcher agent runs as a separate process with its own tools (`web_search`, `fetch_and_summarize`).
 
 ---
 
@@ -298,7 +298,7 @@ aichat --agent orchestrator \
 What happens:
 1. Orchestrator plans (via `_plan`)
 2. Delegates research to `researcher` agent (subprocess with own PID)
-3. Researcher tries `web_search_aichat`, circuit breaker trips after 3 failures
+3. Researcher tries `web_search`, circuit breaker trips after 3 failures
 4. Researcher pivots to `fetch_and_summarize` (URL fetches with piped summarization)
 5. Results return to orchestrator
 6. Orchestrator synthesizes a final answer
@@ -466,7 +466,7 @@ aichat --show-cost --autonomy consult -r %functions:fs_write% \
 | `AICHAT_DIALOG_RELAY` | Internal child-to-parent stderr relay trigger (`stderr`) |
 | `AICHAT_AGENT_LOOP_MAX_COST` | Cost budget in USD (e.g. `1.0`). Stops loop if exceeded. |
 | `AICHAT_AGENT_DEPTH` | (Set by aichat internally for sub-agents) |
-| `WEB_SEARCH_MODEL` | Model for `web_search_aichat` tool (e.g. `gemini:gemini-2.5-pro`) |
+| `WEB_SEARCH_MODEL` | Model for `web_search_perry` / `web_search` tool (e.g. `gemini:gemini-2.5-pro`) |
 | `SUMMARIZE_MODEL` | Model for URL summarization (default: `gemini:gemini-3.6-flash`) |
 
 ## Config Reference (`agent_loop` section in config.yaml)
@@ -522,17 +522,17 @@ The `bin/` symlinks must point to `scripts/run-tool.sh`, which converts JSON arg
 
 ```bash
 # Check:
-ls -la ~/projects/llm-functions/bin/slow_task
+ls -la ~/projects/innators/bin/slow_task
 # Should show: bin/slow_task -> ../scripts/run-tool.sh
 
 # Fix:
-cd ~/projects/llm-functions
+cd ~/projects/innators
 for tool in bin/*; do rm "$tool"; ln -s ../scripts/run-tool.sh "$tool"; done
 ```
 
 ### Web search fails in researcher agent
 
-Ensure `WEB_SEARCH_MODEL` is set. The `web_search_aichat` tool requires it:
+Ensure `WEB_SEARCH_MODEL` is set (or configured in `config.yaml`). The `web_search_perry` tool uses it:
 
 ```bash
 export WEB_SEARCH_MODEL="gemini:gemini-2.5-pro"

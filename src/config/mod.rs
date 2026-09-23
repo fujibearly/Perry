@@ -3235,8 +3235,6 @@ impl Config {
         if let Ok(v) = env::var(get_env_name("autonomy")).or_else(|_| env::var(get_env_name("safety_autonomy"))) {
             if let Some(level) = crate::safety::AutonomyLevel::from_str_loose(&v) {
                 self.safety.autonomy = Some(level);
-            } else if matches!(v.to_ascii_lowercase().as_str(), "none" | "unrestricted" | "off" | "full") {
-                self.safety.autonomy = None;
             }
         }
     }
@@ -3706,6 +3704,12 @@ safety:
         let config_rev: Config = serde_yaml::from_str("safety:\n  autonomy: reversible\n").unwrap();
         assert_eq!(config_rev.safety.autonomy, Some(crate::safety::AutonomyLevel::Reversible));
 
+        let config_dis: Config = serde_yaml::from_str("safety:\n  autonomy: disruptive\n").unwrap();
+        assert_eq!(config_dis.safety.autonomy, Some(crate::safety::AutonomyLevel::Disruptive));
+
+        let config_des: Config = serde_yaml::from_str("safety:\n  autonomy: destructive\n").unwrap();
+        assert_eq!(config_des.safety.autonomy, Some(crate::safety::AutonomyLevel::Destructive));
+
         let config_none: Config = serde_yaml::from_str("safety:\n  autonomy: null\n").unwrap();
         assert_eq!(config_none.safety.autonomy, None);
     }
@@ -4140,7 +4144,7 @@ multi_agent:
         )
         .unwrap();
 
-        std::env::set_var("AICHAT_WORKSPACE_DIR", &ws_dir);
+        crate::utils::set_dual_env_var("WORKSPACE_DIR", &ws_dir);
         let mut config = Config::default();
         config.function_calling = true;
         let role = config.retrieve_role("%functions%").unwrap();
@@ -4154,7 +4158,7 @@ multi_agent:
         let funcs = config.select_functions(&extracted).expect("functions should be present");
         assert!(funcs.iter().any(|f| f.name == "read_skill"));
 
-        std::env::remove_var("AICHAT_WORKSPACE_DIR");
+        crate::utils::remove_dual_env_var("WORKSPACE_DIR");
         let _ = std::fs::remove_dir_all(&temp);
     }
 

@@ -112,25 +112,31 @@ impl AuthorityCeiling {
 /// Operational posture macro governing actuation safety (backlog #19).
 ///
 /// Coordinates the orthogonal capability mask (Gate 1) and authority ceiling (Gate 2)
-/// into high-level, human-readable operational postures:
-/// - `ReadOnly`: Strict read-only observation/audit. Zero mutation permitted across the tree.
-/// - `Consult`: Supervised pair workflow. Read operations auto-execute; all mutations consult human.
-/// - `Reversible`: Bounded execution. Reversible mutations auto-execute with rollback; dangerous consult human.
+/// into high-level, human-readable operational postures matching the blast-radius tiers:
+/// - `readonly`: Strict read-only observation/audit. Zero mutation permitted across the tree.
+/// - `consult`: Supervised pair workflow. Read operations auto-execute; all mutations consult human.
+/// - `reversible`: Bounded execution. Reversible mutations auto-execute with rollback; disruptive/destructive consult human.
+/// - `disruptive`: Active SRE remediation. Service restarts and cache flushes auto-execute; destructive consult human.
+/// - `destructive`: Autonomous actuation up to destructive. Data deletions auto-execute; catastrophic always consults human.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AutonomyLevel {
     ReadOnly,
     Consult,
     Reversible,
+    Disruptive,
+    Destructive,
 }
 
 impl AutonomyLevel {
-    /// Parse from user input loosely, supporting readable names and common aliases.
+    /// Parse from user input, matching canonical blast-radius posture names exactly.
     pub fn from_str_loose(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "readonly" | "read-only" | "observer" | "a0" => Some(AutonomyLevel::ReadOnly),
-            "consult" | "ask" | "copilot" | "a1" => Some(AutonomyLevel::Consult),
-            "reversible" | "revert" | "autopilot" | "a2" => Some(AutonomyLevel::Reversible),
+            "readonly" => Some(AutonomyLevel::ReadOnly),
+            "consult" => Some(AutonomyLevel::Consult),
+            "reversible" => Some(AutonomyLevel::Reversible),
+            "disruptive" => Some(AutonomyLevel::Disruptive),
+            "destructive" => Some(AutonomyLevel::Destructive),
             _ => None,
         }
     }
@@ -141,14 +147,19 @@ impl AutonomyLevel {
             AutonomyLevel::ReadOnly => "readonly",
             AutonomyLevel::Consult => "consult",
             AutonomyLevel::Reversible => "reversible",
+            AutonomyLevel::Disruptive => "disruptive",
+            AutonomyLevel::Destructive => "destructive",
         }
     }
 
-    /// Baseline capability mask string (for `AICHAT_CAPABILITY_MASK` / Gate 1).
+    /// Baseline capability mask string (for `PERRY_CAPABILITY_MASK` / Gate 1).
     pub fn capability_mask(&self) -> Option<&'static str> {
         match self {
             AutonomyLevel::ReadOnly => Some("readonly"),
-            AutonomyLevel::Consult | AutonomyLevel::Reversible => None,
+            AutonomyLevel::Consult
+            | AutonomyLevel::Reversible
+            | AutonomyLevel::Disruptive
+            | AutonomyLevel::Destructive => None,
         }
     }
 
@@ -157,6 +168,8 @@ impl AutonomyLevel {
         match self {
             AutonomyLevel::ReadOnly | AutonomyLevel::Consult => AuthorityCeiling::UpTo(BlastRadius::Safe),
             AutonomyLevel::Reversible => AuthorityCeiling::UpTo(BlastRadius::Reversible),
+            AutonomyLevel::Disruptive => AuthorityCeiling::UpTo(BlastRadius::Disruptive),
+            AutonomyLevel::Destructive => AuthorityCeiling::UpTo(BlastRadius::Destructive),
         }
     }
 
@@ -164,11 +177,12 @@ impl AutonomyLevel {
     ///
     /// In `ReadOnly` and `Consult`, mutations must either fail closed or explicitly consult
     /// the human operator—Option B cannot auto-execute them.
-    /// In `Reversible`, Option B atomic journal backups step down to `Reversible` and auto-execute.
+    /// In `Reversible`, `Disruptive`, and `Destructive`, Option B atomic journal backups step down
+    /// and auto-execute when within ceiling.
     pub fn permits_autonomous_reversibility(&self) -> bool {
         match self {
             AutonomyLevel::ReadOnly | AutonomyLevel::Consult => false,
-            AutonomyLevel::Reversible => true,
+            AutonomyLevel::Reversible | AutonomyLevel::Disruptive | AutonomyLevel::Destructive => true,
         }
     }
 }
@@ -1516,9 +1530,9 @@ pub struct RollbackJournal {
 
 impl RollbackJournal {
     /// Resolve the root journal directory following the 3-tier fallback hierarchy:
-    /// 1. `safety.escalation_dir` (or `AICHAT_SAFETY_ESCALATION_DIR`)
-    /// 2. `$XDG_RUNTIME_DIR/aichat/journals`
-    /// 3. `temp_dir/aichat/journals`
+    /// 1. `safety.escalation_dir` (or `PERRY_SAFETY_ESCALATION_DIR`)
+    /// 2. `$XDG_RUNTIME_DIR/perry/journals` (fallback `aichat/journals`)
+    /// 3. `temp_dir/perry/journals`
     pub fn resolve_journal_dir(configured_dir: &Option<PathBuf>) -> PathBuf {
         if let Some(dir) = configured_dir {
             return dir.join("journals");
@@ -2817,28 +2831,36 @@ other_tool() {
     }
 
     #[test]
-    fn autonomy_level_parsing_and_aliases() {
-        // ReadOnly
+    fn autonomy_level_canonical_parsing_no_aliases() {
+        // Canonical blast-radius posture names
         assert_eq!(AutonomyLevel::from_str_loose("readonly"), Some(AutonomyLevel::ReadOnly));
-        assert_eq!(AutonomyLevel::from_str_loose("READ-ONLY"), Some(AutonomyLevel::ReadOnly));
-        assert_eq!(AutonomyLevel::from_str_loose("observer"), Some(AutonomyLevel::ReadOnly));
-        assert_eq!(AutonomyLevel::from_str_loose("a0"), Some(AutonomyLevel::ReadOnly));
-
-        // Consult
+        assert_eq!(AutonomyLevel::from_str_loose("READONLY"), Some(AutonomyLevel::ReadOnly));
         assert_eq!(AutonomyLevel::from_str_loose("consult"), Some(AutonomyLevel::Consult));
         assert_eq!(AutonomyLevel::from_str_loose("CONSULT"), Some(AutonomyLevel::Consult));
-        assert_eq!(AutonomyLevel::from_str_loose("ask"), Some(AutonomyLevel::Consult));
-        assert_eq!(AutonomyLevel::from_str_loose("copilot"), Some(AutonomyLevel::Consult));
-        assert_eq!(AutonomyLevel::from_str_loose("a1"), Some(AutonomyLevel::Consult));
-
-        // Reversible
         assert_eq!(AutonomyLevel::from_str_loose("reversible"), Some(AutonomyLevel::Reversible));
         assert_eq!(AutonomyLevel::from_str_loose("REVERSIBLE"), Some(AutonomyLevel::Reversible));
-        assert_eq!(AutonomyLevel::from_str_loose("revert"), Some(AutonomyLevel::Reversible));
-        assert_eq!(AutonomyLevel::from_str_loose("autopilot"), Some(AutonomyLevel::Reversible));
-        assert_eq!(AutonomyLevel::from_str_loose("a2"), Some(AutonomyLevel::Reversible));
+        assert_eq!(AutonomyLevel::from_str_loose("disruptive"), Some(AutonomyLevel::Disruptive));
+        assert_eq!(AutonomyLevel::from_str_loose("DISRUPTIVE"), Some(AutonomyLevel::Disruptive));
+        assert_eq!(AutonomyLevel::from_str_loose("destructive"), Some(AutonomyLevel::Destructive));
+        assert_eq!(AutonomyLevel::from_str_loose("DESTRUCTIVE"), Some(AutonomyLevel::Destructive));
 
-        // Invalid
+        // Aliases are strictly rejected (zero ambiguity)
+        assert_eq!(AutonomyLevel::from_str_loose("a0"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("a1"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("a2"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("a3"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("a4"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("observer"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("copilot"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("autopilot"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("remediate"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("ops"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("full"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("max"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("none"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("off"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("raw"), None);
+        assert_eq!(AutonomyLevel::from_str_loose("unrestricted"), None);
         assert_eq!(AutonomyLevel::from_str_loose("invalid"), None);
         assert_eq!(AutonomyLevel::from_str_loose(""), None);
     }
@@ -2868,6 +2890,22 @@ other_tool() {
         assert_eq!(rev.capability_mask(), None);
         assert_eq!(rev.authority_ceiling(), AuthorityCeiling::UpTo(BlastRadius::Reversible));
         assert!(rev.permits_autonomous_reversibility());
+
+        // Disruptive
+        let dis = AutonomyLevel::Disruptive;
+        assert_eq!(dis.as_str(), "disruptive");
+        assert_eq!(dis.to_string(), "disruptive");
+        assert_eq!(dis.capability_mask(), None);
+        assert_eq!(dis.authority_ceiling(), AuthorityCeiling::UpTo(BlastRadius::Disruptive));
+        assert!(dis.permits_autonomous_reversibility());
+
+        // Destructive
+        let des = AutonomyLevel::Destructive;
+        assert_eq!(des.as_str(), "destructive");
+        assert_eq!(des.to_string(), "destructive");
+        assert_eq!(des.capability_mask(), None);
+        assert_eq!(des.authority_ceiling(), AuthorityCeiling::UpTo(BlastRadius::Destructive));
+        assert!(des.permits_autonomous_reversibility());
     }
 
     #[test]
@@ -2886,5 +2924,15 @@ other_tool() {
         assert_eq!(json_r, "\"reversible\"");
         let des_r: AutonomyLevel = serde_json::from_str(&json_r).unwrap();
         assert_eq!(des_r, AutonomyLevel::Reversible);
+
+        let json_dis = serde_json::to_string(&AutonomyLevel::Disruptive).unwrap();
+        assert_eq!(json_dis, "\"disruptive\"");
+        let des_dis: AutonomyLevel = serde_json::from_str(&json_dis).unwrap();
+        assert_eq!(des_dis, AutonomyLevel::Disruptive);
+
+        let json_des = serde_json::to_string(&AutonomyLevel::Destructive).unwrap();
+        assert_eq!(json_des, "\"destructive\"");
+        let des_des: AutonomyLevel = serde_json::from_str(&json_des).unwrap();
+        assert_eq!(des_des, AutonomyLevel::Destructive);
     }
 }

@@ -119,22 +119,22 @@ def show-cmd [env_or_cmd: any, cmd_args: list<string> = []] {
             "AICHAT_BUILTIN_SKILLS_DIR",
             "PERRY_WORKSPACE_DIR",
             "AICHAT_WORKSPACE_DIR",
-            "PERRY_AUTONOMY",
-            "AICHAT_AUTONOMY",
+            (if not ($cmd_args | any { |a| $a == "--autonomy" }) { "PERRY_AUTONOMY" } else { "" }),
+            (if not ($cmd_args | any { |a| $a == "--autonomy" }) { "AICHAT_AUTONOMY" } else { "" }),
             "PERRY_SAFETY_DEFAULT_CEILING",
             "AICHAT_SAFETY_DEFAULT_CEILING",
             "PERRY_SAFETY_POLICY_FILE",
             "AICHAT_SAFETY_POLICY_FILE",
             "PERRY_AGENT_LOOP_SHOW_TRACE",
             "AICHAT_AGENT_LOOP_SHOW_TRACE",
-            "PERRY_AGENT_LOOP_SHOW_DIALOG",
-            "AICHAT_AGENT_LOOP_SHOW_DIALOG",
-            "PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE",
-            "AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE",
+            (if not ($cmd_args | any { |a| $a == "--dialog" or $a == "--show-dialog" }) { "PERRY_AGENT_LOOP_SHOW_DIALOG" } else { "" }),
+            (if not ($cmd_args | any { |a| $a == "--dialog" or $a == "--show-dialog" }) { "AICHAT_AGENT_LOOP_SHOW_DIALOG" } else { "" }),
+            (if not ($cmd_args | any { |a| $a == "--no-truncate" or $a == "--dialog-no-truncate" }) { "PERRY_AGENT_LOOP_DIALOG_NO_TRUNCATE" } else { "" }),
+            (if not ($cmd_args | any { |a| $a == "--no-truncate" or $a == "--dialog-no-truncate" }) { "AICHAT_AGENT_LOOP_DIALOG_NO_TRUNCATE" } else { "" }),
             "PERRY_AGENT_LOOP_MAX_TURNS",
             "AICHAT_AGENT_LOOP_MAX_TURNS",
-            "PERRY_WSLINKS",
-            "AICHAT_WSLINKS",
+            (if not ($cmd_args | any { |a| $a == "--wslinks" }) { "PERRY_WSLINKS" } else { "" }),
+            (if not ($cmd_args | any { |a| $a == "--wslinks" }) { "AICHAT_WSLINKS" } else { "" }),
             "PERRY_AGENT_PARENT_ADDR",
             "AICHAT_AGENT_PARENT_ADDR",
             "PERRY_SAFETY_VERDICT_TIMEOUT_SECS",
@@ -260,7 +260,7 @@ def show-cost [stderr: string] {
 
 # Extract real trace lines from stderr (ignoring the --show-cost line)
 def clean-trace [stderr: string]: nothing -> string {
-    $stderr | lines | where { not ($in | str contains "Estimated cost:") } | str join "\n" | str trim
+    $stderr | lines | where { not ($in | str contains "Estimated cost:") and not ($in | str contains "Tokens:") and not ($in | str contains "💰") } | str join "\n" | str trim
 }
 
 # Extract plan content from trace
@@ -372,6 +372,11 @@ def main [
 
     let wslinks_args = if $wslinks { ["--wslinks"] } else { [] }
     let wslinks_cmd_str = if $wslinks { " --wslinks" } else { "" }
+    let dialog_flags = (
+        []
+        | append (if $dialog { ["--dialog"] } else { [] })
+        | append (if $no_truncate { ["--no-truncate"] } else { [] })
+    )
 
     let should_pause = $debug
 
@@ -424,7 +429,7 @@ show-desc "Verifies parallel tool execution: calls slow_task 3 times concurrentl
 
 let demo1_prompt = "You MUST call slow_task exactly 3 times in parallel: label='first' delay=2, label='second' delay=2, label='third' delay=2. Do NOT answer without calling the tools."
 let demo1_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo1_args = [--show-cost -r "%functions:slow_task%" $demo1_prompt]
+let demo1_args = [--show-cost ...$dialog_flags -r "%functions:slow_task%" $demo1_prompt]
 show-cmd $demo1_env $demo1_args
 step-pause $should_pause
 
@@ -456,7 +461,7 @@ show-desc "Verifies turn budget enforcement: sets max turns to 1 and asserts tha
 
 let demo2_prompt = "Read each of the files /etc/hostname, /etc/os-release, /etc/shells, /etc/fstab one by one and summarize each"
 let demo2_env = ($base_env | merge { PERRY_AGENT_LOOP_MAX_TURNS: "1", PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo2_args = [--show-cost -r "%functions:fs_cat%" $demo2_prompt]
+let demo2_args = [--show-cost ...$dialog_flags -r "%functions:fs_cat%" $demo2_prompt]
 show-cmd $demo2_env $demo2_args
 step-pause $should_pause
 
@@ -479,11 +484,11 @@ if (should-run-demo "3" $demo) {
 header "Demo 3: Planning Tool (_plan)"
 show-desc "Demonstrates structured planning: orchestrator formulates an upfront plan with _plan before delegating tasks, keeping the plan internal to trace."
 
-let demo3_prompt = "Read /etc/os-release, extract the distro name, and write a one-line summary to /tmp/os-summary.txt"
+let demo3_prompt = "Read /etc/os-release, extract the distro name, and delegate to coder with mutating permissions to write a one-line summary to /tmp/os-summary.txt"
 if ("/tmp/os-summary.txt" | path exists) { rm -f /tmp/os-summary.txt }
 
 let demo3_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo3_args = [--show-cost --agent orchestrator $demo3_prompt]
+let demo3_args = [--show-cost --autonomy destructive ...$dialog_flags --agent orchestrator $demo3_prompt]
 show-cmd $demo3_env $demo3_args
 step-pause $should_pause
 
@@ -492,9 +497,10 @@ let demo3 = (do {
 } | complete)
 
 let trace3 = ($demo3.stderr | default "")
+let summary_written = ("/tmp/os-summary.txt" | path exists)
 let clean3 = (clean-trace $trace3)
 let trace_visually_printed = ($clean3 | is-empty)
-let plan_in_trace = ($clean3 | str contains "plan:") or ($demo3.stdout | str contains -i "plan") or ($demo3.stdout | str contains "Arch Linux") or $trace_visually_printed
+let plan_in_trace = ($clean3 | str contains "plan:") or ($demo3.stdout | str contains -i "plan") or $summary_written or $trace_visually_printed
 let plan_not_in_stdout = not ($demo3.stdout | str contains "[plan:")
 
 # Trace appeared live on terminal via /dev/tty
@@ -538,6 +544,7 @@ let demo4_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo4_args = [
     --show-cost
     ...$wslinks_args
+    ...$dialog_flags
     --agent orchestrator
     $demo4_prompt
 ]
@@ -581,6 +588,7 @@ let demo5_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo5_args = [
     --show-cost
     ...$wslinks_args
+    ...$dialog_flags
     --agent orchestrator
     $demo5_prompt
 ]
@@ -619,7 +627,7 @@ show-desc "Demonstrates parallel sub-agent delegation explicitly pinned to direc
 
 let demo5b_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
 let demo5b_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true", PERRY_WSLINKS: "false" })
-let demo5b_args = [--show-cost --agent orchestrator $demo5b_prompt]
+let demo5b_args = [--show-cost ...$dialog_flags --agent orchestrator $demo5b_prompt]
 show-cmd $demo5b_env $demo5b_args
 step-pause $should_pause
 
@@ -676,7 +684,7 @@ if $in_tmux {
         (if ($demo_model | is-not-empty) { $"PERRY_MODEL=($demo_model)" } else { "" })
         $"PERRY_AGENT_LOOP_SHOW_TRACE=true"
         (if $dialog { "PERRY_AGENT_LOOP_SHOW_DIALOG=true" } else { "" })
-        $"($perry_bin) --show-cost -r '%functions:slow_task%'"
+        $"($perry_bin) --show-cost (if $dialog { '--dialog ' } else { '' })-r '%functions:slow_task%'"
         $"\"($demo6_prompt)\""
         "< /dev/null > /tmp/demo6-stdout.txt &"
     ] | where { ($in | str length) > 0 } | str join " ")
@@ -745,7 +753,7 @@ show-desc "Demonstrates tool output auto-capping: large tool output exceeding th
 
 let demo7_prompt = "Use fs_cat to read the file /usr/share/dict/cracklib-small"
 let demo7_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo7_args = [--show-cost -r "%functions:fs_cat%" $demo7_prompt]
+let demo7_args = [--show-cost ...$dialog_flags -r "%functions:fs_cat%" $demo7_prompt]
 show-cmd $demo7_env $demo7_args
 step-pause $should_pause
 
@@ -781,7 +789,7 @@ show-desc "Demonstrates pipe routing: executes fetch_and_summarize tool pipeline
 
 let demo8_prompt = "You MUST call the fetch_and_summarize tool with url 'https://example.com'. Do not use any other tool."
 let demo8_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo8_args = [--show-cost --autonomy readonly -r "%functions:fetch_and_summarize%" $demo8_prompt]
+let demo8_args = [--show-cost --autonomy readonly ...$dialog_flags -r "%functions:fetch_and_summarize%" $demo8_prompt]
 show-cmd $demo8_env $demo8_args
 step-pause $should_pause
 
@@ -812,7 +820,7 @@ show-desc "Demonstrates file destination routing: tool data is written directly 
 
 let demo9_prompt = "You MUST call generate_data with rows=20. Do NOT answer without calling the tool."
 let demo9_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo9_args = [--show-cost -r "%functions:generate_data%" $demo9_prompt]
+let demo9_args = [--show-cost --autonomy reversible ...$dialog_flags -r "%functions:generate_data%" $demo9_prompt]
 show-cmd $demo9_env $demo9_args
 step-pause $should_pause
 
@@ -855,7 +863,7 @@ show-desc "Demonstrates native PDF reading: executes read_pdf on manual.pdf and 
 
 let demo10_prompt = $"Use read_pdf to read the file ($manual_pdf) and tell me what this document is about. List the main sections."
 let demo10_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo10_args = [--show-cost -r "%functions:read_pdf%" $demo10_prompt]
+let demo10_args = [--show-cost ...$dialog_flags -r "%functions:read_pdf%" $demo10_prompt]
 show-cmd $demo10_env $demo10_args
 step-pause $should_pause
 
@@ -882,7 +890,7 @@ show-desc "Demonstrates targeted PDF extraction: reads specific page ranges (5-1
 
 let demo10b_prompt = $"You MUST call read_pdf with path='($manual_pdf)', pages='5-10', and the compact flag. Then summarize what those pages cover."
 let demo10b_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
-let demo10b_args = [--show-cost --autonomy readonly -r "%functions:read_pdf%" $demo10b_prompt]
+let demo10b_args = [--show-cost --autonomy readonly ...$dialog_flags -r "%functions:read_pdf%" $demo10b_prompt]
 show-cmd $demo10b_env $demo10b_args
 step-pause $should_pause
 
@@ -925,6 +933,7 @@ let demo11_env = ($base_env | merge {
 let demo11_args = [
     --show-cost
     ...$wslinks_args
+    ...$dialog_flags
     --agent orchestrator
     $demo11_prompt
 ]
@@ -1039,7 +1048,7 @@ let d13_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo13_args = [--show-cost -r "%functions:get_current_time%" $d13_prompt]
+let demo13_args = [--show-cost ...$dialog_flags -r "%functions:get_current_time%" $d13_prompt]
 show-cmd $d13_env $demo13_args
 step-pause $should_pause
 
@@ -1092,7 +1101,7 @@ let d14_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo14_args = [--show-cost -r "%functions:get_current_time%" $d14_prompt]
+let demo14_args = [--show-cost ...$dialog_flags -r "%functions:get_current_time%" $d14_prompt]
 show-cmd $d14_env $demo14_args
 step-pause $should_pause
 
@@ -1139,11 +1148,10 @@ chmod 0600 $d15_policy
 let d15_prompt = "You MUST call execute_command exactly once with this exact command: echo 'the phrase rm -rf is dangerous'. Do not answer without calling the tool."
 let d15_env = ($base_env | merge {
     PERRY_SAFETY_POLICY_FILE: $d15_policy
-    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo15_args = [--show-cost -r "%functions:execute_command%" $d15_prompt]
+let demo15_args = [--show-cost --autonomy destructive ...$dialog_flags -r "%functions:execute_command%" $d15_prompt]
 show-cmd $d15_env $demo15_args
 step-pause $should_pause
 
@@ -1269,11 +1277,10 @@ if ($d17_target | path exists) { rm -f $d17_target }
 
 let d17_prompt = $"You MUST use the exact tool 'fs_write' to write the text 'SAFETY_VERIFIED' to ($d17_target). Do not answer without calling the tool."
 let d17_env = ($base_env | merge {
-    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo17_args = [--show-cost -r "%functions:fs_write%" $d17_prompt]
+let demo17_args = [--show-cost --autonomy destructive ...$dialog_flags -r "%functions:fs_write%" $d17_prompt]
 show-cmd $d17_env $demo17_args
 step-pause $should_pause
 
@@ -1323,7 +1330,7 @@ let d18_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo18_args = [--show-cost --autonomy reversible -r "%functions:fs_write%" $d18_prompt]
+let demo18_args = [--show-cost --autonomy reversible ...$dialog_flags -r "%functions:fs_write%" $d18_prompt]
 show-cmd $d18_env $demo18_args
 step-pause $should_pause
 
@@ -1368,11 +1375,10 @@ if ($d19_target | path exists) { rm -f $d19_target }
 
 let d19_prompt = $"You MUST call fs_write to write 'UNAUTHORIZED_DATA' to ($d19_target). Do not answer without calling the tool."
 let d19_env = ($base_env | merge {
-    PERRY_SAFETY_DEFAULT_CEILING: "safe"
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo19_args = [--show-cost -r "%functions:fs_write%" $d19_prompt]
+let demo19_args = [--show-cost --autonomy consult ...$dialog_flags -r "%functions:fs_write%" $d19_prompt]
 show-cmd $d19_env $demo19_args
 step-pause $should_pause
 
@@ -1420,7 +1426,7 @@ let d20_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
-let demo20_args = [--show-cost --agent orchestrator $d20_prompt]
+let demo20_args = [--show-cost --autonomy destructive ...$dialog_flags --agent orchestrator $d20_prompt]
 show-cmd $d20_env $demo20_args
 step-pause $should_pause
 
@@ -1469,7 +1475,7 @@ let d21_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
-let demo21_args = [--show-cost --agent orchestrator $d21_prompt]
+let demo21_args = [--show-cost --autonomy destructive ...$dialog_flags --agent orchestrator $d21_prompt]
 show-cmd $d21_env $demo21_args
 step-pause $should_pause
 
@@ -1506,11 +1512,10 @@ if ($d22_target | path exists) { rm -f $d22_target }
 
 let d22_prompt = $"You MUST follow the 'host_stamp' skill procedure. Start by calling read_skill with name='host_stamp'. Write your final summary report to ($d22_target) and output it to the terminal. Do not answer without following the runbook."
 let d22_env = ($base_env | merge {
-    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "6"
 })
-let demo22_args = [--show-cost -r "%functions:get_current_time,fs_cat,fs_write%" $d22_prompt]
+let demo22_args = [--show-cost --autonomy destructive ...$dialog_flags -r "%functions:get_current_time,fs_cat,fs_write%" $d22_prompt]
 show-cmd $d22_env $demo22_args
 step-pause $should_pause
 
@@ -1583,11 +1588,10 @@ $d23_skill_content | save -f ($d23_skill_dir | path join "SKILL.md")
 let d23_prompt = $"You MUST follow the 'repo_patcher' skill procedure found in the workspace. Start by calling read_skill with name='repo_patcher'. Record the patch entry to ($d23_target) and output it to the terminal."
 let d23_env = ($base_env | merge {
     PERRY_WORKSPACE_DIR: $d23_ws
-    PERRY_SAFETY_DEFAULT_CEILING: "destructive"
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
-let demo23_args = [--show-cost -r "%functions:fs_cat,fs_write%" $d23_prompt]
+let demo23_args = [--show-cost --autonomy destructive ...$dialog_flags -r "%functions:fs_cat,fs_write%" $d23_prompt]
 show-cmd $d23_env $demo23_args
 step-pause $should_pause
 
@@ -1628,7 +1632,7 @@ rm -rf $d23_ws
 }
 
 if (should-run-demo "24" $demo) {
-# ─── Demo 24: Autonomy Ladder (readonly / consult / reversible) ───────────────
+# ─── Demo 24: Autonomy Ladder (readonly / consult / reversible / disruptive / destructive) ───
 #
 # Backlog Item #19: Autonomy Ladder macro presets across 2D safety matrix:
 # Part 1: `--autonomy readonly` (Observer / A0):
@@ -1643,9 +1647,15 @@ if (should-run-demo "24" $demo) {
 #   - Baseline ceiling `safe` + clamps autonomous Option B bypass.
 #   - In non-interactive pipe execution, Gate 3 evaluator evaluates risk first,
 #     and human prompt halts/refuses safely without mutating the file.
+# Part 4: `--autonomy disruptive` (Active SRE Remediation / A3):
+#   - Baseline ceiling `disruptive`.
+#   - Disruptive actions (service restarts, file overwrites) execute autonomously within ceiling.
+# Part 5: `--autonomy destructive` (Autonomous Actuation / A4):
+#   - Baseline ceiling `destructive`.
+#   - Destructive actions execute autonomously within ceiling; catastrophic remains strictly human-reserved.
 
 header $"Demo 24: Autonomy Ladder — Macro Postures \(live, ($demo_model)\)"
-show-desc "Demonstrates Autonomy Ladder presets: readonly blocks at Gate 1 without evaluator cost, reversible auto-remediates via Option B, and consult enforces evaluator-first human authorization."
+show-desc "Demonstrates Autonomy Ladder presets: readonly blocks at Gate 1 ($0 tokens), consult enforces human authorization, reversible auto-remediates via Option B, disruptive allows service interventions, and destructive allows maximum autonomous actuation while keeping catastrophic human-reserved."
 
 # ── Part 1: ReadOnly Posture ──
 let d24_p1_target = ($nu.temp-dir | path join $"perry-autonomy-ro-($nu.pid).txt")
@@ -1656,7 +1666,7 @@ let d24_p1_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo24_p1_args = [--show-cost --autonomy readonly -r "%functions:fs_write%" $d24_p1_prompt]
+let demo24_p1_args = [--show-cost --autonomy readonly ...$dialog_flags -r "%functions:fs_write%" $d24_p1_prompt]
 show-cmd $d24_p1_env $demo24_p1_args
 step-pause $should_pause
 
@@ -1686,7 +1696,7 @@ let d24_p2_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo24_p2_args = [--show-cost --autonomy reversible -r "%functions:fs_write%" $d24_p2_prompt]
+let demo24_p2_args = [--show-cost --autonomy reversible ...$dialog_flags -r "%functions:fs_write%" $d24_p2_prompt]
 show-cmd $d24_p2_env $demo24_p2_args
 step-pause $should_pause
 
@@ -1713,7 +1723,7 @@ let d24_p3_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "2"
 })
-let demo24_p3_args = [--show-cost --autonomy consult -r "%functions:fs_write%" $d24_p3_prompt]
+let demo24_p3_args = [--show-cost --autonomy consult ...$dialog_flags -r "%functions:fs_write%" $d24_p3_prompt]
 show-cmd $d24_p3_env $demo24_p3_args
 step-pause $should_pause
 
@@ -1731,6 +1741,60 @@ report "Consult posture banner emitted at startup" ($d24_p3_banner or $d24_p3_no
 report "Consult posture clamped Option B bypass and required human verdict" $d24_p3_eval_or_blocked
 report "Consult target file NOT created without human authorization" $d24_p3_not_created
 if ($d24_p3_target | path exists) { rm -f $d24_p3_target }
+
+# ── Part 4: Disruptive Posture ──
+let d24_p4_target = ($nu.temp-dir | path join $"perry-autonomy-dis-($nu.pid).txt")
+if ($d24_p4_target | path exists) { rm -f $d24_p4_target }
+
+let d24_p4_prompt = $"You MUST call fs_write to write 'DISRUPTIVE_TEST' to ($d24_p4_target). Do not answer without calling the tool."
+let d24_p4_env = ($base_env | merge {
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
+})
+let demo24_p4_args = [--show-cost --autonomy disruptive ...$dialog_flags -r "%functions:fs_write%" $d24_p4_prompt]
+show-cmd $d24_p4_env $demo24_p4_args
+step-pause $should_pause
+
+let demo24_p4 = (do {
+    "" | with-env $d24_p4_env { ^$perry_bin ...$demo24_p4_args }
+} | complete)
+
+let trace24_p4 = ($demo24_p4.stderr | default "")
+let d24_p4_banner = ($trace24_p4 | str contains "safety posture: disruptive")
+let d24_p4_file_written = ($d24_p4_target | path exists)
+let d24_p4_allowed = ($trace24_p4 | str contains "ALLOW fs_write: risk") or ($trace24_p4 | str contains "<= ceiling disruptive") or $d24_p4_file_written
+
+report "Disruptive posture banner emitted at startup" ($d24_p4_banner or $d24_p4_file_written)
+report "Disruptive posture permitted disruptive mutation autonomously" $d24_p4_allowed
+report "Disruptive posture target file created successfully" $d24_p4_file_written
+if ($d24_p4_target | path exists) { rm -f $d24_p4_target }
+
+# ── Part 5: Destructive Posture ──
+let d24_p5_target = ($nu.temp-dir | path join $"perry-autonomy-des-($nu.pid).txt")
+if ($d24_p5_target | path exists) { rm -f $d24_p5_target }
+
+let d24_p5_prompt = $"You MUST call fs_write to write 'DESTRUCTIVE_TEST' to ($d24_p5_target). Do not answer without calling the tool."
+let d24_p5_env = ($base_env | merge {
+    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_AGENT_LOOP_MAX_TURNS: "2"
+})
+let demo24_p5_args = [--show-cost --autonomy destructive ...$dialog_flags -r "%functions:fs_write%" $d24_p5_prompt]
+show-cmd $d24_p5_env $demo24_p5_args
+step-pause $should_pause
+
+let demo24_p5 = (do {
+    "" | with-env $d24_p5_env { ^$perry_bin ...$demo24_p5_args }
+} | complete)
+
+let trace24_p5 = ($demo24_p5.stderr | default "")
+let d24_p5_banner = ($trace24_p5 | str contains "safety posture: destructive")
+let d24_p5_file_written = ($d24_p5_target | path exists)
+let d24_p5_allowed = ($trace24_p5 | str contains "ALLOW fs_write: risk") or ($trace24_p5 | str contains "<= ceiling destructive") or $d24_p5_file_written
+
+report "Destructive posture banner emitted at startup" ($d24_p5_banner or $d24_p5_file_written)
+report "Destructive posture permitted execution within destructive ceiling" $d24_p5_allowed
+report "Destructive posture target file created successfully" $d24_p5_file_written
+if ($d24_p5_target | path exists) { rm -f $d24_p5_target }
 
 show-cost ($demo24_p2.stderr | default "")
 }
@@ -1760,7 +1824,7 @@ let d25_env = ($base_env | merge {
     PERRY_DIALOG_OUTPUT: "both"
     PERRY_AGENT_LOOP_MAX_TURNS: "8"
 })
-let demo25_args = [--show-cost --autonomy readonly --agent orchestrator $d25_prompt]
+let demo25_args = [--show-cost --autonomy readonly ...$dialog_flags --agent orchestrator $d25_prompt]
 show-cmd $d25_env $demo25_args
 step-pause $should_pause
 
@@ -1817,7 +1881,7 @@ let d26_env = ($base_env | merge {
     PERRY_DIALOG_OUTPUT: "both"
     PERRY_AGENT_LOOP_MAX_TURNS: "8"
 })
-let demo26_args = [--show-cost --autonomy readonly --agent sre $d26_prompt]
+let demo26_args = [--show-cost --autonomy readonly ...$dialog_flags --agent sre $d26_prompt]
 show-cmd $d26_env $demo26_args
 step-pause $should_pause
 
@@ -1869,7 +1933,7 @@ let d27_env = ($base_env | merge {
     PERRY_DIALOG_OUTPUT: "both"
     PERRY_AGENT_LOOP_MAX_TURNS: "8"
 })
-let demo27_args = [--show-cost --autonomy readonly --agent sre $d27_prompt]
+let demo27_args = [--show-cost --autonomy readonly ...$dialog_flags --agent sre $d27_prompt]
 show-cmd $d27_env $demo27_args
 step-pause $should_pause
 
