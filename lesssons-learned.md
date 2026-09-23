@@ -368,5 +368,19 @@ This document captures architectural lessons, debugging insights, and operationa
 - **Actionable Rule for Agents:**
   *Never use misleading or inverse permission names like 'unrestricted' when hard safety invariants (such as Catastrophic human reservations) remain active. Maintain exact terminology symmetry between operational macros and underlying blast-radius tiers.*
 
+---
 
-
+### [2026-09-23T16:45:00-04:00] Actuator Observability Decoupling & Scoped Agent Tooling
+- **Category:** Tooling & Agent Decomposition
+- **Problem:**
+  1. Actuators declared `# @meta require-tools perry|aichat` assuming `argc` supported alternative binary dependencies. Instead, `argc` treated the pipe as a literal binary name (`perry|aichat`), failing preflight for `web_search_perry.sh` and `summarize_text.sh`.
+  2. In `host_env.sh`, sub-actions (`os()`, `hardware()`, etc.) piped `summary | jq ...`. When `--dialog` was enabled, `summary` called `_emit_raw` to echo human-readable bash commands to `stdout`, injecting non-JSON text into the pipe and crashing `jq` with `parse error: Invalid numeric literal`.
+  3. The `sre` agent lacked basic read-only file reading tools (`fs_cat`, `fs_ls`), causing orchestrator delegation to route configuration reads (e.g. `/etc/os-release`) through `host_env --action os`.
+- **Consequence:**
+  Actuator preflight failed for all web search queries, and `--dialog` runs crashed downstream JSON parsing and tripped the circuit breaker.
+- **Resolution:**
+  1. Removed `perry|aichat` from `@meta require-tools`, handling CLI presence checks and runner fallbacks natively within bash `main()`.
+  2. Extracted JSON assembly in `host_env.sh` into `_get_summary_json()` which emits pure JSON without calling `_emit_raw`, cleanly separating stdout observability trace streams from data pipes.
+  3. Equipped the `sre` agent with safe, read-only `fs_cat.sh` and `fs_ls.sh` actuators and updated system prompts to explicitly support configuration reviews.
+- **Actionable Rule for Agents:**
+  *Never pipe functions that write human-readable diagnostics (`_emit_raw`) to structured data parsers (`jq`). Decouple data gathering from trace rendering. Do not use logical operators in `argc` `@meta require-tools` headers.*
