@@ -392,4 +392,16 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** All 567 unit and integration tests passing (`cargo test -- --test-threads=1`); release binary rebuilt; live dry-run SRE agent and standalone web-search tools verified passing.
       * **State:** on branch `main` in `/projects/perry` and `/projects/innators`; clean and pushed to GitHub.
 
+  32. **Session 32: Core Vision & Anti-Patterns Registry, Native PERRY_* Migration, Async Test Lock Fix, and Web Search Perry Actuator Migration**
+    * **Period:** `2026-09-23`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-23-session32.md`](.kiro/docs/session-summary-2026-09-23-session32.md)
+    * **Focus Areas:**
+      * **Foundational Architecture & Anti-Patterns Register:** Authored [`VISION.md`](VISION.md) (and symlinked `.kiro/docs/vision.md`) defining high-assurance SRE positioning, deterministic floor, authority ceilings, and supervisory escalation. Compiled [`.kiro/docs/donts.md`](.kiro/docs/donts.md) cataloging 35 architectural and operational anti-patterns across Sessions 1–31. Removed dangerous `--autonomy off` alias.
+      * **Canonical Environment Variable Migration (`PERRY_*`):** Migrated engine, CLI flags, configuration lookups, and test harnesses from legacy `AICHAT_*` to canonical `PERRY_*`. Added transparent dual-export helpers (`set_dual_env_var`, `remove_dual_env_var`) in `src/utils/mod.rs` for backward compatibility with child tool processes.
+      * **Async Test Deadlock Resolution:** Converted `MASK_ENV_LOCK` in `src/agent_loop.rs` from synchronous `parking_lot::Mutex<()>` to `tokio::sync::Mutex<()>`, permanently resolving test runner thread starvation during multi-threaded async test execution.
+      * **Companion Actuator Tool Migration (`web_search_perry.sh`):** Renamed `tools/web_search_aichat.sh` $\to$ `tools/web_search_perry.sh` with backward-compatible symlink `tools/web_search_aichat.sh -> web_search_perry.sh` and updated `tools/web_search.sh`. Added `argc link-to-perry` and pipe-delimited alternative dependency checking in `scripts/check-deps.sh`.
+      * **Verification & Testing:** All 559 unit and integration tests passing (`cargo test`); verification harness (`nu scripts/run-demos.nu`) 100% green across all 25 demos.
+      * **State:** on branch `main` in `/projects/perry` and `/projects/innators`; clean and pushed to GitHub.
+
+
 
