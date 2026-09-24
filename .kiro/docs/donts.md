@@ -401,7 +401,7 @@
 * **The Failure Mode:** Dumping generated diagnostic scripts with `.sh` extensions and executable permissions into `/tmp` creates a severe local execution hazard for operators or cron jobs.
 * **The Prohibition:** Never write unverified diagnostic shell scripts as executable artifacts.
 * **The Enforced Rule:** In `%distill-telemetry%`, always defang dumped scripts:
-  * Force extension to `.txt` (e.g. `/tmp/triage-script-<pid>.txt`).
+  * Force extension to `.log` (e.g. `/tmp/triage-script-<pid>.log`).
   * Explicitly apply `chmod 600`.
   * Return clickable `file://` hyperlinks for inspection rather than direct execution pointers.
 * **Verification / Code Reference:** `assets/roles/%distill-telemetry%.md` and Session 31 Summary.
@@ -426,6 +426,15 @@
 * **The Prohibition:** Never use functional closure loops inside tight Nushell data processing loops.
 * **The Enforced Rule:** Replace functional loops with procedural keywords (`for`, `match`), use structural pattern matching instead of optional member paths (`?.`), combine sequential record modifications into single `merge` calls, and guard string splits with cheap `str contains` checks.
 * **Verification / Code Reference:** [`scripts/run-demos.nu`](file:///home/istari/projects/perry/scripts/run-demos.nu) and `AGENTS.md`.
+
+---
+
+### 38. NEVER Allow Subagent Denial Telemetry to Dictate or Nudge Supervisor Permission Escalation
+* **Origin:** Session 33 (2026-09-24) / Inversion of Authority & Supervisory Control.
+* **The Failure Mode:** When child subagents fail closed at Gate 2 (`permission_blocked`), error strings that prescribe the exact supervisor re-delegation command (`"re-delegate to 'X' with permissions: { mask, ceiling } (if authorized...)"`) invert supervisory authority, act as a confused deputy nudge, and induce LLM paralysis/indecision in orchestrator models.
+* **The Prohibition:** Never allow child subagent error messages, tool denial telemetry, or execution environments to prescribe permission escalation syntax or nudge supervisors.
+* **The Enforced Rule:** All Gate 2 child rejections must return objective, factual diagnostic telemetry (`status: "permission_blocked"`, `tool`, `required_ceiling`, `provisioned_ceiling`, `rollback_executed`). The decision to re-delegate, modify boundaries, or escalate to human authority belongs strictly to the supervisor or operator, never the denied child.
+* **Verification / Code Reference:** [`src/agent_loop.rs`](file:///home/istari/projects/perry/src/agent_loop.rs) (`execute_single_tool_call`), `innators/agents/orchestrator/AGENT.md`, and [`lesssons-learned.md`](file:///home/istari/projects/perry/lesssons-learned.md).
 
 ---
 

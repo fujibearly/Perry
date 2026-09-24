@@ -403,5 +403,13 @@ This repository maintains continuous, chronological session handoff summaries do
       * **Verification & Testing:** All 559 unit and integration tests passing (`cargo test`); verification harness (`nu scripts/run-demos.nu`) 100% green across all 25 demos.
       * **State:** on branch `main` in `/projects/perry` and `/projects/innators`; clean and pushed to GitHub.
 
-
-
+  33. **Session 33: Full Test Suite Audit, Inversion-of-Authority Elimination, Telemetry Defanging Standardization (.log), and Dialog Assertion Decoupling**
+    * **Period:** `2026-09-24`
+    * **Handoff Document:** [`.kiro/docs/session-summary-2026-09-24-session33.md`](.kiro/docs/session-summary-2026-09-24-session33.md)
+    * **Focus Areas:**
+      * **Full Trace Observability & Suite Audit:** Executed and audited full 888 KB trace of all 27 demos under `--dialog`, confirming parallel execution, turn budgets, structured planning (`_plan`), crash isolation, and 5-pillar telemetry sweeps. Stripped prompt priming, success bias, and paper-tiger fallbacks across the demo harness.
+      * **Inversion-of-Authority Elimination:** Dismantled prescriptive upward coaching strings (*"re-delegate to coder with { mask: ..., ceiling: ... }"*) in `src/agent_loop.rs`. Subordinates now return factual diagnostic telemetry (`status: "permission_blocked"`, `attempted_tool`, `reason`, `required_permission`, `rollback_executed`), leaving authority escalation decisions strictly to the parent Orchestrator. Updated Orchestrator agent instructions in `innators/agents/orchestrator/AGENT.md`.
+      * **Telemetry Defanging Standardization (`.log`):** Updated `sanitize_artifact_script_paths` in `src/agent_loop.rs` to defang diagnostic script artifacts (`.sh`, `.bash`, etc.) with `.log` extensions and `0600` permissions. Updated `host_logs.sh` query output in `innators`, Rule 35 in `.kiro/docs/donts.md`, and `box_panel_scorecard/SKILL.md`.
+      * **Observability Harness Assertion Decoupling:** Decoupled Demos 25, 26, and 27 artifact assertions in `scripts/run-demos.nu` to inspect `$demo.stdout` directly rather than `$combined` to prevent submitted prompt text in `--dialog` from polluting `file://` checks.
+      * **Verification & Testing:** Unit tests passing; release binary rebuilt; all demos passing.
+      * **State:** on branch `main` in `/projects/perry` and `/projects/innators`.

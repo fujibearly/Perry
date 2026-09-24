@@ -2050,7 +2050,7 @@ async fn run_telemetry_distiller(
 }
 
 /// User Safety Requirement: Catch script artifacts (.sh, .bash, .py, etc.)
-/// and surface them as safe .txt files with non-executable permissions to prevent
+/// and surface them as safe .log files with non-executable permissions to prevent
 /// accidental execution when following file:// URLs.
 pub fn sanitize_artifact_script_paths(val: &mut serde_json::Value) {
     match val {
@@ -2072,7 +2072,7 @@ pub fn sanitize_artifact_script_paths(val: &mut serde_json::Value) {
                 if s.ends_with(ext) {
                     let path_str = s.strip_prefix("file://").unwrap_or(s.as_str());
                     let path = std::path::Path::new(path_str);
-                    let target_str = format!("{path_str}.txt");
+                    let target_str = format!("{path_str}.log");
                     let target_path = std::path::Path::new(&target_str);
                     if path.exists() && !target_path.exists() {
                         let _ = std::fs::copy(path, &target_path);
@@ -2085,7 +2085,7 @@ pub fn sanitize_artifact_script_paths(val: &mut serde_json::Value) {
                             );
                         }
                     }
-                    *s = format!("{s}.txt");
+                    *s = format!("{s}.log");
                     break;
                 }
             }
@@ -3066,19 +3066,14 @@ async fn eval_agent_tool_subprocess(
                 let guidance = if reason == "authority_exceeded" {
                     format!(
                         "Sub-agent '{}' was blocked because tool '{}' requires authority ceiling '{}', \
-                         which exceeds its provisioned ceiling. Pre-mutation entries were unwound. \
-                         If this action is authorized and within your ceiling, re-delegate to '{}' with \
-                         permissions: {{ mask: \"mutating\", ceiling: \"{}\" }} \
-                         (or flat args permissions_mask=\"mutating\", permissions_ceiling=\"{}\") or execute directly.",
-                        agent_name, attempted_tool, suggested_ceiling, agent_name, suggested_ceiling, suggested_ceiling
+                         which exceeds its provisioned ceiling. Pre-mutation entries were unwound.",
+                        agent_name, attempted_tool, suggested_ceiling
                     )
                 } else {
                     format!(
                         "Sub-agent '{}' was blocked by its read-only permission mask when attempting '{}' (reason: {}). \
-                         Pre-mutation entries were unwound. If this action is authorized and within your ceiling, \
-                         re-delegate to '{}' with permissions: {{ mask: \"mutating\", ceiling: \"{}\" }} \
-                         (or flat args permissions_mask=\"mutating\", permissions_ceiling=\"{}\").",
-                        agent_name, attempted_tool, reason, agent_name, suggested_ceiling, suggested_ceiling
+                         Pre-mutation entries were unwound.",
+                        agent_name, attempted_tool, reason
                     )
                 };
                 return Ok((
@@ -6597,13 +6592,13 @@ agent_loop:
         sanitize_artifact_script_paths(&mut payload);
 
         let sanitized_script = payload["artifacts"]["script"].as_str().unwrap();
-        assert!(sanitized_script.ends_with(".sh.txt"));
-        let safe_txt_path = temp_dir.join("investigate.sh.txt");
-        assert!(safe_txt_path.exists());
+        assert!(sanitized_script.ends_with(".sh.log"));
+        let safe_log_path = temp_dir.join("investigate.sh.log");
+        assert!(safe_log_path.exists());
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::metadata(&safe_txt_path).unwrap().permissions();
+            let perms = std::fs::metadata(&safe_log_path).unwrap().permissions();
             assert_eq!(perms.mode() & 0o777, 0o600);
         }
 

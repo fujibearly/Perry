@@ -384,3 +384,24 @@ This document captures architectural lessons, debugging insights, and operationa
   3. Equipped the `sre` agent with safe, read-only `fs_cat.sh` and `fs_ls.sh` actuators and updated system prompts to explicitly support configuration reviews.
 - **Actionable Rule for Agents:**
   *Never pipe functions that write human-readable diagnostics (`_emit_raw`) to structured data parsers (`jq`). Decouple data gathering from trace rendering. Do not use logical operators in `argc` `@meta require-tools` headers.*
+
+---
+
+### [2026-09-24T17:15:00-04:00] Inversion of Authority: Subagents Must Report Diagnostic Telemetry, Never Instruct the Supervisor on Permissions
+- **Category:** Safety Architecture, Supervisory Control & Delegation
+- **Problem:**
+  When a provisioned subagent was blocked at Gate 2 because an actuator required an authority ceiling exceeding the subagent's ceiling (e.g., `fs_write` requiring `reversible` when spawned with `safe`), the harness error string previously coached the caller with prescriptive guidance:
+  `"To permit this mutation, re-delegate to '{agent}' with permissions: { mask: ..., ceiling: ... } (if authorized and within your ceiling)."`
+- **Consequence:**
+  1. *Confused Deputy & Inversion of Authority:* In multi-tier agent hierarchies (e.g. `orchestrator` $\to$ `coder`), an unprivileged subagent's execution environment effectively instructed its supervisor to escalate privileges. This inverts the principle of supervisory control—privilege escalation requests should originate from operational necessity evaluated by the supervisor or a human, not suggested upward by the constrained child process.
+  2. *LLM Paralyzing Indecision:* When the LLM orchestrator saw `"If this action is authorized and within your ceiling"`, it interpreted this conditional hedge as doubt or a warning that it should not re-delegate, frequently abandoning execution instead of completing valid operational tasks (observed in Demo 21).
+- **Resolution:**
+  Replaced prescriptive coaching strings with objective, factual diagnostic telemetry:
+  `"Sub-agent '{agent}' was blocked because tool '{tool}' requires authority ceiling '{ceiling}', which exceeds its provisioned ceiling. Pre-mutation entries were unwound."`
+  Updated the Orchestrator's system instructions in `innators/agents/orchestrator/AGENT.md` to autonomously evaluate `permission_blocked` failures:
+  - The orchestrator inspects the blocked tool, its required ceiling, and whether the mutation is strictly necessary and within its own ceiling.
+  - If necessary and authorized, the orchestrator re-delegates with the necessary ceiling.
+  - If beyond its own authority or policy, it escalates to the human operator.
+- **Actionable Rule for Agents:**
+  *Never allow child subagent error messages or tool denial telemetry to prescribe permission escalation syntax or nudge supervisors. Downward authority must remain strictly top-down: report objective denial facts (`EPERM` diagnostics) and leave authority assessment and delegation decisions entirely to the supervisor.*
+

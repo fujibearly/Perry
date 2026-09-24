@@ -1842,7 +1842,7 @@ let d25_read_scorecard = $d25_orch_read_skill or ($trace25 | str contains "box_p
 let d25_no_eval = not ($trace25 | str contains "assess-risk: evaluating")
 let d25_no_block = not ($trace25 | str contains "BLOCKED")
 let d25_has_summary = ($demo25.stdout | is-not-empty) and (($demo25.stdout | str length) > 100)
-let d25_has_artifacts = (($demo25.stdout | str contains "](") or ($combined25 | str contains "](")) and not (($demo25.stdout | str contains "file://") or ($combined25 | str contains "file://"))
+let d25_has_artifacts = (($demo25.stdout | str contains "](") or ($demo25.stdout | str contains "/tmp/perry-host_logs-")) and not ($demo25.stdout | str contains "file://")
 
 report "ReadOnly posture banner emitted at startup" $d25_banner
 report "Upfront strategy formulated (_plan)" $d25_plan
@@ -1896,7 +1896,7 @@ let d26_invoked_logs_or_res = ($trace26 | str contains "calling: host_logs") or 
 let d26_no_eval = not ($trace26 | str contains "assess-risk: evaluating")
 let d26_no_block = not ($trace26 | str contains "BLOCKED")
 let d26_rca_produced = ($demo26.stdout | is-not-empty) and (($demo26.stdout | str length) > 50)
-let d26_has_artifacts = (($demo26.stdout | str contains "](") or ($combined26 | str contains "](")) and not (($demo26.stdout | str contains "file://") or ($combined26 | str contains "file://"))
+let d26_has_artifacts = (($demo26.stdout | str contains "](") or ($demo26.stdout | str contains "/tmp/perry-host_logs-")) and not ($demo26.stdout | str contains "file://")
 
 report "ReadOnly posture banner emitted at startup" $d26_banner
 report "Service health triage initiated (host_service)" $d26_invoked_service
@@ -1948,7 +1948,7 @@ let d27_distill_tapped = ($trace27 | str contains "distill-telemetry:") or ($cle
 let d27_no_eval = not ($trace27 | str contains "assess-risk: evaluating")
 let d27_no_block = not ($trace27 | str contains "BLOCKED")
 let d27_has_summary = ($demo27.stdout | is-not-empty) and (($demo27.stdout | str length) > 50)
-let d27_has_artifacts = (($demo27.stdout | str contains "](") or ($demo27.stdout | str contains "/tmp/perry-host_logs-") or ($combined27 | str contains "](")) and not (($demo27.stdout | str contains "file://") or ($combined27 | str contains "file://"))
+let d27_has_artifacts = (($demo27.stdout | str contains "](") or ($demo27.stdout | str contains "/tmp/perry-host_logs-")) and not ($demo27.stdout | str contains "file://")
 
 report "ReadOnly posture banner emitted at startup" $d27_banner
 report "Pillar 5 (host_logs) invoked with historical timeframe" $d27_called_logs
