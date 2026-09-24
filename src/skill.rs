@@ -451,6 +451,21 @@ pub fn eval_read_skill(config: &GlobalConfig, call: &crate::function::ToolCall) 
     }
 }
 
+/// Loads Tier-2 functions declared for a specific skill under `agents/<agent>/skills/<skill>/functions.json`.
+pub fn load_skill_functions(agent_name: &str, skill_name: &str) -> Option<Vec<crate::function::FunctionDeclaration>> {
+    let skill_functions_path = Config::agent_functions_dir(agent_name)
+        .join("skills")
+        .join(skill_name)
+        .join("functions.json");
+    if skill_functions_path.is_file() {
+        crate::function::Functions::init(&skill_functions_path)
+            .ok()
+            .map(|f| f.declarations().to_vec())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,5 +683,32 @@ Run `docker compose up -d` to create preview.
         tracker.complete_step(2);
         assert!(!tracker.is_untrusted());
         assert!(tracker.active_tainted_skills().is_empty());
+    }
+
+    #[test]
+    fn test_load_skill_functions() {
+        let temp_dir = std::env::temp_dir().join(format!("test-skill-fn-{}", uuid::Uuid::new_v4()));
+        let skill_dir = temp_dir.join("agents").join("test_agent").join("skills").join("test_skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let funcs_json = skill_dir.join("functions.json");
+        std::fs::write(&funcs_json, r#"[{"name": "test_tool", "description": "A test tool", "parameters": {"type": "object"}}]"#).unwrap();
+
+        let orig = std::env::var("PERRY_FUNCTIONS_DIR").ok();
+        std::env::set_var("PERRY_FUNCTIONS_DIR", &temp_dir);
+
+        let funcs = load_skill_functions("test_agent", "test_skill");
+        assert!(funcs.is_some());
+        let decls = funcs.unwrap();
+        assert_eq!(decls.len(), 1);
+        assert_eq!(decls[0].name, "test_tool");
+
+        let missing = load_skill_functions("test_agent", "nonexistent");
+        assert!(missing.is_none());
+
+        match orig {
+            Some(v) => std::env::set_var("PERRY_FUNCTIONS_DIR", v),
+            None => std::env::remove_var("PERRY_FUNCTIONS_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

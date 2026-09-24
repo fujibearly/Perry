@@ -250,6 +250,14 @@ impl Functions {
     pub fn is_empty(&self) -> bool {
         self.declarations.is_empty()
     }
+
+    pub fn add_declarations(&mut self, new_declarations: Vec<FunctionDeclaration>) {
+        for decl in new_declarations {
+            if !self.declarations.iter().any(|d| d.name == decl.name) {
+                self.declarations.push(decl);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

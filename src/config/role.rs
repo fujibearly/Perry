@@ -26,7 +26,7 @@ fn is_front_matter_fence(line: &str) -> bool {
     line.trim_end_matches([' ', '\t']) == "---"
 }
 
-fn split_front_matter(content: &str) -> Option<(&str, &str)> {
+pub(crate) fn split_front_matter(content: &str) -> Option<(&str, &str)> {
     let mut lines = content.split_inclusive('\n');
     let opening = lines.next()?;
     if !is_front_matter_fence(opening) {

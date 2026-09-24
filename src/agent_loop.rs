@@ -2755,14 +2755,22 @@ async fn eval_single_tool(
     // Route 0: Builtin skill reading and activation (#17 Spec B)
     if call.name == "read_skill" {
         let res = crate::skill::eval_read_skill(config, call);
-        if let Some(tracker) = skill_tracker {
-            if let Some(name) = res.get("name").and_then(|n| n.as_str()) {
+        if let Some(name) = res.get("name").and_then(|n| n.as_str()) {
+            if let Some(tracker) = skill_tracker {
                 let prov = match res.get("provenance").and_then(|p| p.as_str()) {
                     Some("workspace") => crate::skill::SkillProvenance::WorkspaceTainted,
                     Some("builtin") => crate::skill::SkillProvenance::Builtin,
                     _ => crate::skill::SkillProvenance::Global,
                 };
                 tracker.lock().load(name, prov);
+            }
+            let agent_name = config.read().agent.as_ref().map(|a| a.name().to_string());
+            if let Some(agent_name) = agent_name {
+                if let Some(tier2_funcs) = crate::skill::load_skill_functions(&agent_name, name) {
+                    if let Some(agent) = config.write().agent.as_mut() {
+                        agent.add_functions(tier2_funcs);
+                    }
+                }
             }
         }
         return Ok(res);

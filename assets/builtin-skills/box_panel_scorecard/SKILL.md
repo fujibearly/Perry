@@ -93,7 +93,7 @@ Directly below the fenced box panel:
 1. **Cross-Pillar Anomalies**:
    - List each degraded finding from the JSON `anomalies` array with root cause, impacted service or interface, and cross-pillar explanation.
 2. **Local Artifact Hyperlinks**:
-   - Surface all files in the JSON `artifacts` object as clickable markdown links with absolute `file://` URLs (e.g., `[Log Dump](file:///tmp/perry-host_logs-dump-....log)` and `[Log Query](file:///tmp/perry-host_logs-query-....txt)`).
+   - Surface all files in the JSON `artifacts` object as clickable markdown links with clean absolute paths without the `file://` prefix (e.g., `[Log Dump](/tmp/perry-host_logs-dump-....log)` and `[Log Query](/tmp/perry-host_logs-query-....txt)`).
    - **Artifact Safety Rule**: When surfacing local artifacts, scripts (such as `.sh`, `.bash`, `.py`, `.nu`) must NEVER be linked directly with executable extensions. Surface them as `.txt` files (e.g. `query.txt` or `query.sh.txt`) to prevent accidental shell execution when following URLs.
 3. **Zero Conversational Prose**:
    - Do NOT include conversational filler ("Here is the report you requested...", "In summary...", "I hope this helps"). Present the header, box table, anomaly callouts, and artifact links directly.

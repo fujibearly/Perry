@@ -36,7 +36,7 @@ impl Agent {
         abort_signal: AbortSignal,
     ) -> Result<Self> {
         let functions_dir = Config::agent_functions_dir(name);
-        let definition_file_path = functions_dir.join("index.yaml");
+        let definition_file_path = functions_dir.join("AGENT.md");
         if !definition_file_path.exists() {
             bail!("Unknown agent `{name}`");
         }
@@ -49,6 +49,26 @@ impl Agent {
             AgentConfig::new(&config.read())
         };
         let mut definition = AgentDefinition::load(&definition_file_path)?;
+
+        if agent_config.skills.is_none() {
+            if !definition.skills.is_empty() {
+                agent_config.skills = Some(SkillSetting::List(definition.skills.clone()));
+            } else {
+                let skills_txt = functions_dir.join("skills.txt");
+                if skills_txt.is_file() {
+                    if let Ok(content) = std::fs::read_to_string(&skills_txt) {
+                        let lines: Vec<String> = content
+                            .lines()
+                            .map(|l| l.trim().to_string())
+                            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                            .collect();
+                        if !lines.is_empty() {
+                            agent_config.skills = Some(SkillSetting::List(lines));
+                        }
+                    }
+                }
+            }
+        }
         #[allow(unused_mut)]
         let mut functions = if functions_file_path.exists() {
             Functions::init(&functions_file_path)?
@@ -250,6 +270,10 @@ impl Agent {
 
     pub fn functions(&self) -> &Functions {
         &self.functions
+    }
+
+    pub fn add_functions(&mut self, new_functions: Vec<crate::function::FunctionDeclaration>) {
+        self.functions.add_declarations(new_functions);
     }
 
     pub fn rag(&self) -> Option<Arc<Rag>> {
@@ -579,15 +603,26 @@ pub struct AgentDefinition {
     pub conversation_starters: Vec<String>,
     #[serde(default)]
     pub documents: Vec<String>,
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub skills: Vec<String>,
 }
 
 impl AgentDefinition {
     pub fn load(path: &Path) -> Result<Self> {
         let contents = read_to_string(path)
-            .with_context(|| format!("Failed to read agent index file at '{}'", path.display()))?;
-        let definition: Self = serde_yaml::from_str(&contents)
-            .with_context(|| format!("Failed to load agent index at '{}'", path.display()))?;
-        Ok(definition)
+            .with_context(|| format!("Failed to read agent definition file at '{}'", path.display()))?;
+        if let Some((metadata, prompt)) = crate::config::role::split_front_matter(&contents) {
+            let mut definition: Self = serde_yaml::from_str(metadata)
+                .with_context(|| format!("Failed to load agent metadata at '{}'", path.display()))?;
+            definition.instructions = prompt.trim().to_string();
+            Ok(definition)
+        } else {
+            let mut definition = Self::default();
+            definition.instructions = contents.trim().to_string();
+            Ok(definition)
+        }
     }
 
     fn banner(&self) -> String {
@@ -670,7 +705,7 @@ pub fn list_agents() -> Vec<String> {
 }
 
 pub fn complete_agent_variables(agent_name: &str) -> Vec<(String, Option<String>)> {
-    let index_path = Config::agent_functions_dir(agent_name).join("index.yaml");
+    let index_path = Config::agent_functions_dir(agent_name).join("AGENT.md");
     if !index_path.exists() {
         return vec![];
     }
@@ -728,5 +763,34 @@ mod tests {
         };
 
         validate_multi_agent_session_prelude(&config, &agent_config).unwrap();
+    }
+
+    #[test]
+    fn test_agent_definition_load_frontmatter() {
+        let temp_dir = std::env::temp_dir().join(format!("test-agent-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let agent_file = temp_dir.join("AGENT.md");
+        let content = r#"---
+name: sre
+description: Site Reliability Engineering specialist
+tools:
+  - fs_cat
+  - fs_ls
+skills:
+  - sys_triage
+---
+You are an expert SRE agent.
+Perform diagnostics and investigations.
+"#;
+        std::fs::write(&agent_file, content).unwrap();
+
+        let def = AgentDefinition::load(&agent_file).unwrap();
+        assert_eq!(def.name, "sre");
+        assert_eq!(def.description, "Site Reliability Engineering specialist");
+        assert_eq!(def.tools, vec!["fs_cat".to_string(), "fs_ls".to_string()]);
+        assert_eq!(def.skills, vec!["sys_triage".to_string()]);
+        assert!(def.instructions.contains("You are an expert SRE agent."));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

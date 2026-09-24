@@ -1847,7 +1847,7 @@ let d25_read_scorecard = ($trace25 | str contains "box_panel_scorecard") or ($cl
 let d25_no_eval = not ($trace25 | str contains "assess-risk: evaluating")
 let d25_no_block = not ($trace25 | str contains "BLOCKED")
 let d25_has_summary = ($demo25.stdout | is-not-empty) and (($demo25.stdout | str length) > 100)
-let d25_has_artifacts = ($demo25.stdout | str contains "file://") or ($combined25 | str contains "file://")
+let d25_has_artifacts = (($demo25.stdout | str contains "](") or ($combined25 | str contains "](")) and not (($demo25.stdout | str contains "file://") or ($combined25 | str contains "file://"))
 
 report "ReadOnly posture banner emitted at startup" $d25_banner
 report "Upfront strategy formulated (_plan)" $d25_plan
@@ -1857,7 +1857,7 @@ report "Presentation skill loaded (box_panel_scorecard)" $d25_read_scorecard
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d25_no_eval
 report "Autonomous execution succeeded without blocks" $d25_no_block
 report "Orchestrator synthesized terminal scorecard" $d25_has_summary
-report "Local telemetry artifacts hyperlinked (file://)" $d25_has_artifacts
+report "Local telemetry artifacts hyperlinked (markdown path)" $d25_has_artifacts
 
 show-output $demo25.stdout
 show-cost ($demo25.stderr | default "")
@@ -1875,7 +1875,7 @@ if (should-run-demo "26" $demo) {
 header $"Demo 26: Reactive Incident Drilldown & Root Cause Analysis \(live, ($demo_model)\)"
 show-desc "Executes a targeted, reactive incident drilldown under --agent sre: investigates degraded services, inspects diagnostic error logs and resource constraints, and synthesizes a human-readable Root Cause Analysis (RCA) report under --autonomy readonly (A0)."
 
-let d26_prompt = "Incident alert: a system or user service is degraded or failing on this host. Investigate the failure using host_service action='units', inspect the service's error logs using host_logs action='recent_errors', check host baseline and memory/CPU pressure, and synthesize a diagnostic Root Cause Analysis (RCA) report in markdown citing concrete evidence (PIDs, exit status, file paths) and remediation steps. Surface any generated artifacts as clickable markdown links with file:// URLs."
+let d26_prompt = "Incident alert: a system or user service is degraded or failing on this host. Investigate the failure using host_service action='units', inspect the service's error logs using host_logs action='recent_errors', check host baseline and memory/CPU pressure, and synthesize a diagnostic Root Cause Analysis (RCA) report in markdown citing concrete evidence (PIDs, exit status, file paths) and remediation steps. Surface any generated artifacts as clickable markdown links with absolute file paths (without file:// prefix)."
 let d26_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1899,7 +1899,7 @@ let d26_invoked_logs_or_res = ($trace26 | str contains "calling: host_logs") or 
 let d26_no_eval = not ($trace26 | str contains "assess-risk: evaluating")
 let d26_no_block = not ($trace26 | str contains "BLOCKED")
 let d26_rca_produced = ($demo26.stdout | is-not-empty) and (($demo26.stdout | str length) > 50)
-let d26_has_artifacts = ($demo26.stdout | str contains "file://") or ($combined26 | str contains "file://")
+let d26_has_artifacts = (($demo26.stdout | str contains "](") or ($combined26 | str contains "](")) and not (($demo26.stdout | str contains "file://") or ($combined26 | str contains "file://"))
 
 report "ReadOnly posture banner emitted at startup" $d26_banner
 report "Service health triage initiated (host_service)" $d26_invoked_service
@@ -1907,7 +1907,7 @@ report "Correlated with diagnostic logs and resource telemetry" $d26_invoked_log
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d26_no_eval
 report "Autonomous execution succeeded without blocks" $d26_no_block
 report "Diagnostic Root Cause Analysis synthesized (RCA)" $d26_rca_produced
-report "Local telemetry artifacts hyperlinked (file://)" $d26_has_artifacts
+report "Local telemetry artifacts hyperlinked (markdown path)" $d26_has_artifacts
 
 show-output $demo26.stdout
 show-cost ($demo26.stderr | default "")
@@ -1927,7 +1927,7 @@ if (should-run-demo "27" $demo) {
 header $"Demo 27: Arbitrary Timeframe Telemetry & Decoupled Distillation \(live, ($demo_model)\)"
 show-desc "Performs an asynchronous 24-hour log anomaly analysis under --agent sre with dual-arm anomaly spotting (critical singletons vs volume surges) and transparent decoupled LLM distillation (%distill-telemetry%) under --autonomy readonly (A0)."
 
-let d27_prompt = "Perform an asynchronous 24-hour log telemetry analysis using host_logs with action='recent_errors' and since='24h'. Spot and distinguish critical singleton anomalies (kernel faults, OOM kills, segfaults) from high-frequency volume surges (daemon restart loops). Anchor your findings with host_env action='summary', and synthesize a concise incident report citing concrete evidence (timestamps, PIDs, error signatures) with clickable markdown artifact hyperlinks."
+let d27_prompt = "Perform an asynchronous 24-hour log telemetry analysis using host_logs with action='recent_errors' and since='24h'. Spot and distinguish critical singleton anomalies (kernel faults, OOM kills, segfaults) from high-frequency volume surges (daemon restart loops). Anchor your findings with host_env action='summary', and synthesize a concise incident report in markdown citing concrete evidence (timestamps, PIDs, error signatures). Surface generated artifacts as clickable markdown links [name](/path) without the file:// prefix."
 let d27_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1951,7 +1951,7 @@ let d27_distill_tapped = ($trace27 | str contains "distill-telemetry:") or ($cle
 let d27_no_eval = not ($trace27 | str contains "assess-risk: evaluating")
 let d27_no_block = not ($trace27 | str contains "BLOCKED")
 let d27_has_summary = ($demo27.stdout | is-not-empty) and (($demo27.stdout | str length) > 50)
-let d27_has_artifacts = ($demo27.stdout | str contains "file://") or ($combined27 | str contains "file://")
+let d27_has_artifacts = (($demo27.stdout | str contains "](") or ($demo27.stdout | str contains "/tmp/perry-host_logs-") or ($combined27 | str contains "](")) and not (($demo27.stdout | str contains "file://") or ($combined27 | str contains "file://"))
 
 report "ReadOnly posture banner emitted at startup" $d27_banner
 report "Pillar 5 (host_logs) invoked with historical timeframe" $d27_called_logs
@@ -1959,7 +1959,7 @@ report "Decoupled distillation tap executed (%distill-telemetry%)" $d27_distill_
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d27_no_eval
 report "Autonomous execution succeeded without blocks" $d27_no_block
 report "SRE agent synthesized ground-truth anomaly report" $d27_has_summary
-report "Local telemetry artifacts hyperlinked (file://)" $d27_has_artifacts
+report "Local telemetry artifacts hyperlinked (markdown path)" $d27_has_artifacts
 
 show-output $demo27.stdout
 show-cost ($demo27.stderr | default "")
