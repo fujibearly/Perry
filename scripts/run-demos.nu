@@ -1589,6 +1589,7 @@ let d23_prompt = $"You MUST follow the 'repo_patcher' skill procedure found in t
 let d23_env = ($base_env | merge {
     PERRY_WORKSPACE_DIR: $d23_ws
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
+    PERRY_DIALOG_OUTPUT: "both"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
 })
 let demo23_args = [--show-cost --autonomy destructive ...$dialog_flags -r "%functions:fs_cat,fs_write%" $d23_prompt]
