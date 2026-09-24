@@ -258,9 +258,9 @@ def show-cost [stderr: string] {
     }
 }
 
-# Extract real trace lines from stderr (ignoring the --show-cost line)
+# Extract real trace lines from stderr (ignoring the --show-cost line) and stripping ANSI codes
 def clean-trace [stderr: string]: nothing -> string {
-    $stderr | lines | where { not ($in | str contains "Estimated cost:") and not ($in | str contains "Tokens:") and not ($in | str contains "💰") } | str join "\n" | str trim
+    $stderr | ansi strip | lines | where { not ($in | str contains "Estimated cost:") and not ($in | str contains "Tokens:") and not ($in | str contains "💰") } | str join "\n" | str trim
 }
 
 # Extract plan content from trace
@@ -363,6 +363,8 @@ def main [
         PATH: ($env.PATH | prepend ($project_dir | path join "target/debug") | prepend ($project_dir | path join "target/release"))
         PERRY_FUNCTIONS_DIR: $functions_dir
         PERRY_BUILTIN_SKILLS_DIR: ($project_dir | path join "assets/builtin-skills")
+        PERRY_DIALOG_OUTPUT: "both"
+        PERRY_TERMINAL_WIDTH: "200"
         WEB_SEARCH_MODEL: $DEFAULT_WEB_SEARCH_MODEL
     } | merge (if ($demo_model | is-not-empty) { { PERRY_MODEL: $demo_model, PERRY_SAFETY_RISK_MODEL: $demo_model } } else { {} })
       | merge (if $dialog { { PERRY_AGENT_LOOP_SHOW_DIALOG: "true" } } else { {} })
@@ -441,14 +443,19 @@ let trace1 = ($demo1.stderr | default "")
 let clean1 = (clean-trace $trace1)
 # Trace visible live on terminal via /dev/tty
 
-let calls_count = ($clean1 | split row "\n" | where { $in | str contains "calling: slow_task" } | length)
-let completed_count = ($clean1 | split row "\n" | where { $in | str contains "slow_task completed" } | length)
-# Fallback: if trace went to /dev/tty, verify via output content
-let trace_visually_printed = ($clean1 | is-empty)
-let parallel_ok = (($calls_count >= 3) and ($completed_count >= 3)) or (($demo1.stdout | str contains "first") and ($demo1.stdout | str contains "second") and ($demo1.stdout | str contains "third")) or $trace_visually_printed
+mut calls_count = 0
+mut completed_count = 0
+for line in ($clean1 | lines) {
+    if ($line | str contains "calling: slow_task") {
+        $calls_count = $calls_count + 1
+    }
+    if ($line | str contains "slow_task completed") {
+        $completed_count = $completed_count + 1
+    }
+}
+let parallel_ok = ($calls_count >= 3) and ($completed_count >= 3)
 
-let detail_msg = if $trace_visually_printed { "Trace routed to terminal (visual verification)" } else { $"calls=($calls_count) completed=($completed_count)" }
-report "3 parallel slow_task calls" $parallel_ok $detail_msg
+report "3 parallel slow_task calls" $parallel_ok $"calls=($calls_count) completed=($completed_count)"
 show-output $demo1.stdout
 show-cost ($demo1.stderr | default "")
 }
@@ -499,12 +506,8 @@ let demo3 = (do {
 let trace3 = ($demo3.stderr | default "")
 let summary_written = ("/tmp/os-summary.txt" | path exists)
 let clean3 = (clean-trace $trace3)
-let trace_visually_printed = ($clean3 | is-empty)
-let plan_in_trace = ($clean3 | str contains "plan:") or ($demo3.stdout | str contains -i "plan") or $summary_written or $trace_visually_printed
+let plan_in_trace = ($clean3 | str contains "plan:") or ($clean3 | str contains "calling: _plan") or ($trace3 | str contains "plan:") or ($trace3 | str contains "calling: _plan")
 let plan_not_in_stdout = not ($demo3.stdout | str contains "[plan:")
-
-# Trace appeared live on terminal via /dev/tty
-print $"  (ansi white_dimmed)Trace appeared live on terminal above.(ansi reset)"
 
 # Show the plan artifact specifically
 let plan_line = (extract-plan $clean3)
@@ -514,8 +517,7 @@ if ($plan_line | str length) > 0 {
     print $"  (ansi magenta_bold)⚙ Plan artifact:(ansi reset) visible in live trace above"
 }
 
-let plan_detail = if $trace_visually_printed { "Trace routed to terminal (visual verification)" } else { "" }
-report "Plan appears in trace" $plan_in_trace $plan_detail
+report "Plan appears in trace" $plan_in_trace
 report "Plan invisible in final output" $plan_not_in_stdout
 show-output $demo3.stdout
 show-cost ($demo3.stderr | default "")
@@ -539,7 +541,7 @@ let demo4_desc = if $wslinks {
 }
 show-desc $demo4_desc
 
-let demo4_prompt = "You MUST delegate this to the researcher agent (do NOT answer yourself): Search the web for 'what is Model Context Protocol MCP by Anthropic' and return a summary with sources."
+let demo4_prompt = "Research 'what is Model Context Protocol MCP by Anthropic' using the researcher specialist subagent and return a summary with sources."
 let demo4_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo4_args = [
     --show-cost
@@ -556,11 +558,17 @@ let demo4 = (do {
 } | complete)
 
 let trace4 = ($demo4.stderr | default "")
-let researcher_called = ($trace4 | str contains "calling: researcher") or ($demo4.stdout | str contains -i "researcher") or ($demo4.stdout | str contains "MCP") or (($demo4.stdout | str length) > 200)
-let researcher_done = ($trace4 | str contains "researcher completed") or (($demo4.stdout | str length) > 200)
-let timing4 = ($trace4 | split row "\n" | where { $in | str contains "researcher completed" } | first | default "")
+let clean4 = (clean-trace $trace4)
+let researcher_called = ($trace4 | str contains "calling: researcher") or ($clean4 | str contains "calling: researcher")
+let researcher_done = ($trace4 | str contains "researcher completed") or ($clean4 | str contains "researcher completed")
+mut timing4 = ""
+for line in ($clean4 | lines) {
+    if ($line | str contains "researcher completed") {
+        $timing4 = $line
+        break
+    }
+}
 
-# Trace visible live on terminal via /dev/tty
 report "Researcher agent called" $researcher_called
 report "Researcher completed" $researcher_done ($timing4 | str trim)
 show-output $demo4.stdout
@@ -583,7 +591,7 @@ let demo5_desc = if $wslinks {
 }
 show-desc $demo5_desc
 
-let demo5_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
+let demo5_prompt = "Concurrently research two topics using the researcher specialist subagent: 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
 let demo5_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true" })
 let demo5_args = [
     --show-cost
@@ -601,20 +609,22 @@ let demo5 = (do {
 
 let trace5 = ($demo5.stderr | default "")
 let clean5 = (clean-trace $trace5)
-let researcher_calls_5 = ($clean5 | split row "\n" | where { $in | str contains "calling: researcher" } | length)
-let researcher_completions_5 = ($clean5 | split row "\n" | where { $in | str contains "researcher completed" } | length)
-let root_in_stderr = ($clean5 | str contains "calling: researcher")
-# Fallback: if trace is empty or went to /dev/tty, check output
-let calls_5_ok = ($researcher_calls_5 >= 2) or (($demo5.stdout | str length) > 200) or (not $root_in_stderr)
-let completions_5_ok = ($researcher_completions_5 >= 2) or (($demo5.stdout | str length) > 200) or (not $root_in_stderr)
+mut researcher_calls_5 = 0
+mut researcher_completions_5 = 0
+for line in ($clean5 | lines) {
+    if ($line | str contains "calling: researcher") {
+        $researcher_calls_5 = $researcher_calls_5 + 1
+    }
+    if ($line | str contains "researcher completed") {
+        $researcher_completions_5 = $researcher_completions_5 + 1
+    }
+}
+let calls_5_ok = ($researcher_calls_5 >= 2)
+let completions_5_ok = ($researcher_completions_5 >= 2)
 
-let detail_calls_5 = if $root_in_stderr { $"calls=($researcher_calls_5)" } else { "Trace routed to terminal (visual verification)" }
-let detail_comp_5 = if $root_in_stderr { $"completions=($researcher_completions_5)" } else { "Trace routed to terminal (visual verification)" }
-
-# Trace visible live on terminal via /dev/tty
 let report_label_5 = if $wslinks { "Two researcher calls (--wslinks)" } else { "Two researcher calls (direct grounded)" }
-report $report_label_5 $calls_5_ok $detail_calls_5
-report "Both completed" $completions_5_ok $detail_comp_5
+report $report_label_5 $calls_5_ok $"calls=($researcher_calls_5)"
+report "Both completed" $completions_5_ok $"completions=($researcher_completions_5)"
 show-output $demo5.stdout --max-lines 20
 show-cost ($demo5.stderr | default "")
 }
@@ -625,7 +635,7 @@ if (should-run-demo "5b" $demo) {
 header "Demo 5b: Parallel Delegation (Direct Grounded Search)"
 show-desc "Demonstrates parallel sub-agent delegation explicitly pinned to direct grounded web search (PERRY_WSLINKS=false): orchestrator invokes two researcher agents concurrently, using direct grounded search results without secondary page scraping."
 
-let demo5b_prompt = "You MUST delegate TWO separate research tasks (call the researcher agent twice in parallel): 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
+let demo5b_prompt = "Concurrently research two topics using the researcher specialist subagent: 1) 'Rust async runtimes 2025 comparison' 2) 'Python asyncio vs trio comparison'. Then synthesize both results."
 let demo5b_env = ($base_env | merge { PERRY_AGENT_LOOP_SHOW_TRACE: "true", PERRY_WSLINKS: "false" })
 let demo5b_args = [--show-cost ...$dialog_flags --agent orchestrator $demo5b_prompt]
 show-cmd $demo5b_env $demo5b_args
@@ -637,18 +647,21 @@ let demo5b = (do {
 
 let trace5b = ($demo5b.stderr | default "")
 let clean5b = (clean-trace $trace5b)
-let researcher_calls_5b = ($clean5b | split row "\n" | where { $in | str contains "calling: researcher" } | length)
-let researcher_completions_5b = ($clean5b | split row "\n" | where { $in | str contains "researcher completed" } | length)
-let root_in_stderr_5b = ($clean5b | str contains "calling: researcher")
-let calls_5b_ok = ($researcher_calls_5b >= 2) or (($demo5b.stdout | str length) > 200) or (not $root_in_stderr_5b)
-let completions_5b_ok = ($researcher_completions_5b >= 2) or (($demo5b.stdout | str length) > 200) or (not $root_in_stderr_5b)
+mut researcher_calls_5b = 0
+mut researcher_completions_5b = 0
+for line in ($clean5b | lines) {
+    if ($line | str contains "calling: researcher") {
+        $researcher_calls_5b = $researcher_calls_5b + 1
+    }
+    if ($line | str contains "researcher completed") {
+        $researcher_completions_5b = $researcher_completions_5b + 1
+    }
+}
+let calls_5b_ok = ($researcher_calls_5b >= 2)
+let completions_5b_ok = ($researcher_completions_5b >= 2)
 
-let detail_calls_5b = if $root_in_stderr_5b { $"calls=($researcher_calls_5b)" } else { "Trace routed to terminal (visual verification)" }
-let detail_comp_5b = if $root_in_stderr_5b { $"completions=($researcher_completions_5b)" } else { "Trace routed to terminal (visual verification)" }
-
-# Trace visible live on terminal via /dev/tty
-report "Two researcher calls (direct grounded)" $calls_5b_ok $detail_calls_5b
-report "Both completed" $completions_5b_ok $detail_comp_5b
+report "Two researcher calls (direct grounded)" $calls_5b_ok $"calls=($researcher_calls_5b)"
+report "Both completed" $completions_5b_ok $"completions=($researcher_completions_5b)"
 show-output $demo5b.stdout --max-lines 20
 show-cost ($demo5b.stderr | default "")
 }
@@ -799,10 +812,10 @@ let demo8 = (do {
 
 let trace8 = ($demo8.stderr | default "")
 let combined8 = $"($demo8.stdout)($trace8)"
-let pipe_called = ($trace8 | str contains "fetch_and_summarize completed") or ($demo8.stdout | str length) > 50
+let pipe_called = ($trace8 | str contains "fetch_and_summarize completed") or ($trace8 | str contains "calling: fetch_and_summarize")
 let got_digest = ($demo8.stdout | str length) > 0
 let no_raw_html = not ($demo8.stdout | str contains "<!DOCTYPE html>") and not ($demo8.stdout | str contains "</html>")
-let d8_posture = ($trace8 | str contains "safety posture: readonly") or $pipe_called
+let d8_posture = ($trace8 | str contains "safety posture: readonly")
 
 # Trace visible live on terminal via /dev/tty
 report "ReadOnly autonomy posture established" $d8_posture
@@ -831,7 +844,7 @@ let demo9 = (do {
 let trace9 = ($demo9.stderr | default "")
 # Trace visible live on terminal via /dev/tty
 
-let gen_called = ($trace9 | str contains "generate_data completed") or ($demo9.stdout | str contains "generate_data")
+let gen_called = ($trace9 | str contains "generate_data completed") or ($trace9 | str contains "calling: generate_data")
 let output_has_path = ($demo9.stdout | str contains "/tmp/generate_data-")
 let output_has_size = ($demo9.stdout | str contains "bytes") or ($demo9.stdout | str contains "size")
 
@@ -872,10 +885,9 @@ let demo10 = (do {
 } | complete)
 
 let trace10 = ($demo10.stderr | default "")
-let pdf_called = ($trace10 | str contains "read_pdf completed") or ($demo10.stdout | str contains "SDR") or ($demo10.stdout | str contains "manual")
-let has_content = ($demo10.stdout | str contains "SDR") or ($demo10.stdout | str contains "section") or ($demo10.stdout | str contains "manual")
+let pdf_called = ($trace10 | str contains "read_pdf completed") or ($trace10 | str contains "calling: read_pdf")
+let has_content = ($demo10.stdout | is-not-empty) and (($demo10.stdout | str length) > 100)
 
-# Trace visible live on terminal via /dev/tty
 report "read_pdf tool called" $pdf_called
 report "PDF content understood" $has_content
 show-output $demo10.stdout
@@ -899,10 +911,9 @@ let demo10b = (do {
 } | complete)
 
 let trace10b = ($demo10b.stderr | default "")
-let pdf_pages_called = ($trace10b | str contains "read_pdf completed") or ($demo10b.stdout | str contains "pages") or ($demo10b.stdout | str contains "SDR")
-let d10b_posture = ($trace10b | str contains "safety posture: readonly") or $pdf_pages_called
+let pdf_pages_called = ($trace10b | str contains "read_pdf completed") or ($trace10b | str contains "calling: read_pdf")
+let d10b_posture = ($trace10b | str contains "safety posture: readonly")
 
-# Trace visible live on terminal via /dev/tty
 report "ReadOnly autonomy posture established" $d10b_posture
 report "read_pdf with pages+compact" $pdf_pages_called
 show-output $demo10b.stdout
@@ -925,7 +936,7 @@ let demo11_desc = if $wslinks {
 }
 show-desc $demo11_desc
 
-let demo11_prompt = "You MUST plan first using the exact tool named '_plan' (with leading underscore, do NOT call 'plan'). Then delegate to the researcher agent: search the web for 'Model Context Protocol MCP Anthropic 2025' and return findings. In your final answer, state the findings and mention the researcher agent. Do NOT answer from memory — you MUST delegate."
+let demo11_prompt = "Formulate an upfront plan to research 'Model Context Protocol MCP Anthropic 2025' using the researcher specialist subagent, execute the research, and synthesize the findings in your final response."
 let demo11_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "15"
@@ -946,14 +957,9 @@ let demo11 = (do {
 
 let trace11 = ($demo11.stderr | default "")
 let clean11 = (clean-trace $trace11)
-# With /dev/tty trace, stderr may be empty or contain only forwarded [child ...] events — verify via output content
-let clean11_no_child = ($clean11 | lines | where { not ($in | str contains "[child ") } | str join "\n" | str trim)
-let trace_visually_printed = ($clean11_no_child | is-empty) and (($demo11.stdout | str length) > 50)
-let has_plan_11 = ($clean11 | str contains "plan:") or ($demo11.stdout | str contains -i "plan") or $trace_visually_printed
-let has_delegate_11 = ($clean11 | str contains "calling: researcher") or ($demo11.stdout | str contains "researcher") or $trace_visually_printed
-let has_done_11 = ($clean11 | str contains "done") or (($demo11.stdout | str length) > 50)
-
-# Trace visible live on terminal via /dev/tty
+let has_plan_11 = ($clean11 | str contains "plan:") or ($trace11 | str contains "calling: _plan") or ($clean11 | str contains "calling: _plan")
+let has_delegate_11 = ($clean11 | str contains "calling: researcher") or ($trace11 | str contains "calling: researcher")
+let has_done_11 = ($clean11 | str contains "done") or ($trace11 | str contains "done")
 
 # Show plan artifact
 let plan_line_11 = (extract-plan $clean11)
@@ -961,9 +967,8 @@ if ($plan_line_11 | str length) > 0 {
     print $"  (ansi magenta_bold)⚙ Plan artifact:(ansi reset) ($plan_line_11)"
 }
 
-let detail_msg = if ($clean11 | is-empty) { "Trace routed to terminal (visual verification)" } else { "" }
-report "Plan used" $has_plan_11 $detail_msg
-report "Delegation to researcher" $has_delegate_11 $detail_msg
+report "Plan used" $has_plan_11
+report "Delegation to researcher" $has_delegate_11
 report "Completed successfully" $has_done_11
 show-output $demo11.stdout
 show-cost ($demo11.stderr | default "")
@@ -1298,10 +1303,10 @@ let d17_verdict = ($clean17 | str contains "assess-risk: verdict for fs_write") 
 let d17_journaled = ($clean17 | str contains "rollback journal: recorded fs_write") or ($trace17 | str contains "rollback journal: recorded fs_write")
 let d17_completed = ($clean17 | str contains "fs_write completed") or ($trace17 | str contains "fs_write completed")
 
-report "Safety gate passed (tier <= ceiling)" ($d17_gate_passed or $d17_file_written)
-report "%assess-risk% evaluator evaluated action" ($d17_assessed or $d17_file_written)
-report "%assess-risk% verdict parsed and accepted" ($d17_verdict or $d17_file_written)
-report "Durable rollback journal recorded pre-mutation entry" ($d17_journaled or $d17_file_written)
+report "Safety gate passed (tier <= ceiling)" $d17_gate_passed
+report "%assess-risk% evaluator evaluated action" $d17_assessed
+report "%assess-risk% verdict parsed and accepted" $d17_verdict
+report "Durable rollback journal recorded pre-mutation entry" $d17_journaled
 report "Target file successfully created and verified" $d17_file_written
 show-output $demo17.stdout
 show-cost ($demo17.stderr | default "")
@@ -1342,15 +1347,15 @@ let trace18 = ($demo18.stderr | default "")
 let clean18 = (clean-trace $trace18)
 
 let d18_file_written = ($d18_target | path exists)
-let d18_posture = ($trace18 | str contains "safety posture: reversible") or $d18_file_written
+let d18_posture = ($trace18 | str contains "safety posture: reversible")
 let d18_remediated = ($clean18 | str contains "preflight remediation: fs_write") or ($trace18 | str contains "preflight remediation: fs_write")
 let d18_gate_passed = ($clean18 | str contains "safety gate passed: fs_write") or ($trace18 | str contains "safety gate passed: fs_write") or ($clean18 | str contains "ALLOW fs_write:") or ($trace18 | str contains "ALLOW fs_write:")
 let d18_completed = ($clean18 | str contains "fs_write completed") or ($trace18 | str contains "fs_write completed")
 
 report "Reversible autonomy posture established" $d18_posture
-report "Pre-flight remediation applied upfront" ($d18_remediated or $d18_file_written)
-report "Safety gate passed after stepped down authority" ($d18_gate_passed or $d18_file_written)
-report "Tool executed successfully under reversible ceiling" ($d18_completed or $d18_file_written)
+report "Pre-flight remediation applied upfront" $d18_remediated
+report "Safety gate passed after stepped down authority" $d18_gate_passed
+report "Tool executed successfully under reversible ceiling" $d18_completed
 report "Target file created and verified" $d18_file_written
 show-output $demo18.stdout
 show-cost ($demo18.stderr | default "")
@@ -1421,7 +1426,7 @@ show-desc "Demonstrates hard authority ceiling sandboxing: sub-agent attempts di
 let d20_target = ($nu.temp-dir | path join $"perry-orch-esc-($nu.pid).txt")
 if ($d20_target | path exists) { rm -f $d20_target }
 
-let d20_prompt = $"Delegate to coder with permissions_mask 'mutating' and permissions_ceiling 'reversible': write the exact text HARD_CEILING_OK to ($d20_target) using fs_write. When coder reports permission_blocked due to authority_exceeded, re-delegate with permissions_ceiling 'disruptive' to complete the task."
+let d20_prompt = $"Delegate to coder with permissions_ceiling 'reversible' and permissions_mask 'mutating': write the exact text HARD_CEILING_OK to ($d20_target) using fs_write. If coder encounters authority limits, adapt and resolve the delegation to complete the file write."
 let d20_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
@@ -1439,12 +1444,18 @@ let combined20 = $"($demo20.stdout)($trace20)"
 
 let d20_file_created = ($d20_target | path exists)
 let d20_delegated = ($trace20 | str contains "calling: coder") or ($combined20 | str contains "coder")
-let d20_blocked = ($trace20 | str contains "authority_exceeded") or ($combined20 | str contains "authority_exceeded") or ($combined20 | str contains "permission_blocked")
-let d20_redelegate = ($trace20 | str contains "calling: coder") or ($d20_file_created)
+let d20_blocked = ($trace20 | str contains "authority_exceeded") or ($combined20 | str contains "authority_exceeded") or ($combined20 | str contains "permission_blocked") or ($trace20 | str contains "BLOCK")
+mut d20_coder_calls = 0
+for line in ($trace20 | lines) {
+    if ($line | str contains "calling: coder") {
+        $d20_coder_calls = $d20_coder_calls + 1
+    }
+}
+let d20_redelegate = ($d20_coder_calls >= 2)
 
 report "Orchestrator delegated task to coder with mutating permissions" $d20_delegated
-report "Coder hard-blocked by authority ceiling (authority_exceeded) with zero downward permits" ($d20_blocked or $d20_file_created)
-report "Parent orchestrator re-delegated with disruptive ceiling" ($d20_redelegate and $d20_file_created)
+report "Coder hard-blocked by authority ceiling (authority_exceeded) with zero downward permits" $d20_blocked
+report "Parent orchestrator re-delegated with elevated ceiling" ($d20_redelegate or ($d20_file_created and $d20_blocked))
 report "File created through re-delegation within authority boundaries" $d20_file_created
 show-output $demo20.stdout
 show-cost ($demo20.stderr | default "")
@@ -1470,7 +1481,7 @@ show-desc "Demonstrates sub-agent capability boundary enforcement: when a child 
 let d21_target = ($nu.temp-dir | path join $"perry-orch-redelegate-($nu.pid).txt")
 if ($d21_target | path exists) { rm -f $d21_target }
 
-let d21_prompt = $"Delegate to coder: write the exact text PERMISSION_UNWOUND_OK to ($d21_target) using fs_write. Do NOT specify permissions upfront. When coder reports permission_blocked, re-delegate with permissions_mask 'mutating' and permissions_ceiling 'disruptive'."
+let d21_prompt = $"Delegate to coder: write the exact text PERMISSION_UNWOUND_OK to ($d21_target) using fs_write without upfront permissions. If coder is blocked by default read-only restrictions, adapt and re-delegate with appropriate permissions to complete the file write."
 let d21_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_AGENT_LOOP_MAX_TURNS: "5"
@@ -1488,12 +1499,18 @@ let combined21 = $"($demo21.stdout)($trace21)"
 
 let d21_file_created = ($d21_target | path exists)
 let d21_first_call = ($trace21 | str contains "calling: coder") or ($combined21 | str contains "coder")
-let d21_blocked = ($trace21 | str contains "read-only mask") or ($trace21 | str contains "capability_denied") or ($trace21 | str contains "BLOCK") or ($trace21 | str contains "permission_blocked") or ($combined21 | str contains "permission_blocked") or ($combined21 | str contains "permission blocks") or ($combined21 | str contains "read-only") or $d21_file_created
-let d21_redelegate = ($trace21 | str contains "calling: coder") or ($combined21 | str contains "coder") or $d21_file_created
+let d21_blocked = ($trace21 | str contains "read-only mask") or ($trace21 | str contains "capability_denied") or ($trace21 | str contains "BLOCK") or ($trace21 | str contains "permission_blocked") or ($combined21 | str contains "permission_blocked") or ($combined21 | str contains "permission blocks") or ($combined21 | str contains "read-only")
+mut d21_coder_calls = 0
+for line in ($trace21 | lines) {
+    if ($line | str contains "calling: coder") {
+        $d21_coder_calls = $d21_coder_calls + 1
+    }
+}
+let d21_redelegate = ($d21_coder_calls >= 2)
 
 report "Orchestrator delegated task to coder" $d21_first_call
-report "Coder blocked by capability mask and reported permission_blocked" ($d21_blocked or $d21_file_created)
-report "Orchestrator re-delegated with provisioned mutating permissions" ($d21_redelegate or $d21_file_created)
+report "Coder blocked by capability mask and reported permission_blocked" $d21_blocked
+report "Orchestrator re-delegated with provisioned mutating permissions" ($d21_redelegate or ($d21_file_created and $d21_blocked))
 report "File created through bounded re-delegation" $d21_file_created
 show-output $demo21.stdout
 show-cost ($demo21.stderr | default "")
@@ -1544,7 +1561,7 @@ allowed_tools: [fs_cat, fs_write]
 "
 $d23_skill_content | save -f ($d23_skill_dir | path join "SKILL.md")
 
-let d23_prompt = $"You MUST follow the 'repo_patcher' skill procedure found in the workspace. Start by calling read_skill with name='repo_patcher'. Record the patch entry to ($d23_target) and output it to the terminal."
+let d23_prompt = $"Follow the workspace procedure for recording patch manifests. Record the patch entry to ($d23_target) and output it to the terminal."
 let d23_env = ($base_env | merge {
     PERRY_WORKSPACE_DIR: $d23_ws
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
@@ -1567,11 +1584,10 @@ let demo23 = (try {
 let trace23 = ($demo23.stderr | default "")
 let clean23 = (clean-trace $trace23)
 let combined23 = $"($demo23.stdout)($trace23)"
-let trace_visually_printed = ($clean23 | is-empty)
 
-let d23_read_called = ($trace23 | str contains "calling: read_skill") or ($clean23 | str contains "calling: read_skill") or ($combined23 | str contains "read_skill completed") or $trace_visually_printed
-let d23_taint_logged = ($trace23 | str contains "untrusted_runbook: true") or ($clean23 | str contains "untrusted_runbook: true") or ($combined23 | str contains "untrusted_runbook: true") or $trace_visually_printed
-let d23_assessed = ($clean23 | str contains "assess-risk: evaluating fs_write") or ($trace23 | str contains "assess-risk: evaluating fs_write") or $trace_visually_printed
+let d23_read_called = ($trace23 | str contains "calling: read_skill") or ($clean23 | str contains "calling: read_skill") or ($combined23 | str contains "read_skill completed")
+let d23_taint_logged = ($trace23 | str contains "untrusted_runbook: true") or ($clean23 | str contains "untrusted_runbook: true") or ($combined23 | str contains "untrusted_runbook: true")
+let d23_assessed = ($clean23 | str contains "assess-risk: evaluating fs_write") or ($trace23 | str contains "assess-risk: evaluating fs_write")
 let d23_file_written = ($d23_target | path exists)
 let d23_file_content_ok = if $d23_file_written {
     let content = (open $d23_target | default "")
@@ -1579,9 +1595,9 @@ let d23_file_content_ok = if $d23_file_written {
 } else { false }
 let d23_terminal_content_ok = ($demo23.stdout | str contains "WORKSPACE_PATCH_ENTRY:") or ($combined23 | str contains "WORKSPACE_PATCH_ENTRY:")
 
-report "Workspace skill discovered and read_skill called" ($d23_read_called or $d23_file_written)
+report "Workspace skill discovered and read_skill called" $d23_read_called
 report "Provenance taint tracked (untrusted_runbook in evaluator)" $d23_taint_logged
-report "%assess-risk% evaluated mutating action with heightened scrutiny" ($d23_assessed or $d23_file_written)
+report "%assess-risk% evaluated mutating action with heightened scrutiny" $d23_assessed
 report "Patch manifest artifact written to file with verified format" ($d23_file_written and $d23_file_content_ok)
 report "Patch manifest artifact output to terminal" $d23_terminal_content_ok
 show-output $demo23.stdout
@@ -1641,9 +1657,9 @@ let d24_p1_banner = ($trace24_p1 | str contains "safety posture: readonly")
 let d24_p1_blocked = ($trace24_p1 | str contains "read-only mask") or ($trace24_p1 | str contains "capability_denied") or ($combined24_p1 | str contains "read-only") or ($combined24_p1 | str contains "read only")
 let d24_p1_no_eval = not ($trace24_p1 | str contains "assess-risk: evaluating")
 
-report "ReadOnly posture banner emitted at startup" ($d24_p1_banner or $d24_p1_not_created)
-report "ReadOnly posture blocked mutating tool at Gate 1 (capability_denied)" ($d24_p1_blocked or $d24_p1_not_created)
-report "ReadOnly posture bypassed evaluator (0 evaluator tokens spent)" ($d24_p1_no_eval or $d24_p1_not_created)
+report "ReadOnly posture banner emitted at startup" $d24_p1_banner
+report "ReadOnly posture blocked mutating tool at Gate 1 (capability_denied)" $d24_p1_blocked
+report "ReadOnly posture bypassed evaluator (0 evaluator tokens spent)" $d24_p1_no_eval
 report "ReadOnly target file was NOT created (fail-closed)" $d24_p1_not_created
 if ($d24_p1_target | path exists) { rm -f $d24_p1_target }
 
@@ -1667,10 +1683,10 @@ let demo24_p2 = (do {
 let trace24_p2 = ($demo24_p2.stderr | default "")
 let d24_p2_banner = ($trace24_p2 | str contains "safety posture: reversible")
 let d24_p2_file_written = ($d24_p2_target | path exists)
-let d24_p2_remediated = ($trace24_p2 | str contains "preflight remediation: fs_write") or $d24_p2_file_written
+let d24_p2_remediated = ($trace24_p2 | str contains "preflight remediation: fs_write")
 
-report "Reversible posture banner emitted at startup" ($d24_p2_banner or $d24_p2_file_written)
-report "Reversible posture permitted Option B preflight remediation" ($d24_p2_remediated or $d24_p2_file_written)
+report "Reversible posture banner emitted at startup" $d24_p2_banner
+report "Reversible posture permitted Option B preflight remediation" $d24_p2_remediated
 report "Reversible posture target file created successfully" $d24_p2_file_written
 if ($d24_p2_target | path exists) { rm -f $d24_p2_target }
 
@@ -1695,9 +1711,9 @@ let trace24_p3 = ($demo24_p3.stderr | default "")
 let combined24_p3 = $"($demo24_p3.stdout)($trace24_p3)"
 let d24_p3_banner = ($trace24_p3 | str contains "safety posture: consult")
 let d24_p3_not_created = not ($d24_p3_target | path exists)
-let d24_p3_eval_or_blocked = ($trace24_p3 | str contains "assess-risk") or ($trace24_p3 | str contains "authority_exceeded") or ($combined24_p3 | str contains "authority_exceeded") or ($trace24_p3 | str contains "BLOCK") or $d24_p3_not_created
+let d24_p3_eval_or_blocked = ($trace24_p3 | str contains "assess-risk") or ($trace24_p3 | str contains "authority_exceeded") or ($combined24_p3 | str contains "authority_exceeded") or ($trace24_p3 | str contains "BLOCK")
 
-report "Consult posture banner emitted at startup" ($d24_p3_banner or $d24_p3_not_created)
+report "Consult posture banner emitted at startup" $d24_p3_banner
 report "Consult posture clamped Option B bypass and required human verdict" $d24_p3_eval_or_blocked
 report "Consult target file NOT created without human authorization" $d24_p3_not_created
 if ($d24_p3_target | path exists) { rm -f $d24_p3_target }
@@ -1722,9 +1738,9 @@ let demo24_p4 = (do {
 let trace24_p4 = ($demo24_p4.stderr | default "")
 let d24_p4_banner = ($trace24_p4 | str contains "safety posture: disruptive")
 let d24_p4_file_written = ($d24_p4_target | path exists)
-let d24_p4_allowed = ($trace24_p4 | str contains "ALLOW fs_write: risk") or ($trace24_p4 | str contains "<= ceiling disruptive") or $d24_p4_file_written
+let d24_p4_allowed = ($trace24_p4 | str contains "ALLOW fs_write: risk") or ($trace24_p4 | str contains "<= ceiling disruptive")
 
-report "Disruptive posture banner emitted at startup" ($d24_p4_banner or $d24_p4_file_written)
+report "Disruptive posture banner emitted at startup" $d24_p4_banner
 report "Disruptive posture permitted disruptive mutation autonomously" $d24_p4_allowed
 report "Disruptive posture target file created successfully" $d24_p4_file_written
 if ($d24_p4_target | path exists) { rm -f $d24_p4_target }
@@ -1749,9 +1765,9 @@ let demo24_p5 = (do {
 let trace24_p5 = ($demo24_p5.stderr | default "")
 let d24_p5_banner = ($trace24_p5 | str contains "safety posture: destructive")
 let d24_p5_file_written = ($d24_p5_target | path exists)
-let d24_p5_allowed = ($trace24_p5 | str contains "ALLOW fs_write: risk") or ($trace24_p5 | str contains "<= ceiling destructive") or $d24_p5_file_written
+let d24_p5_allowed = ($trace24_p5 | str contains "ALLOW fs_write: risk") or ($trace24_p5 | str contains "<= ceiling destructive")
 
-report "Destructive posture banner emitted at startup" ($d24_p5_banner or $d24_p5_file_written)
+report "Destructive posture banner emitted at startup" $d24_p5_banner
 report "Destructive posture permitted execution within destructive ceiling" $d24_p5_allowed
 report "Destructive posture target file created successfully" $d24_p5_file_written
 if ($d24_p5_target | path exists) { rm -f $d24_p5_target }
@@ -1856,7 +1872,7 @@ if (should-run-demo "26" $demo) {
 header $"Demo 26: Reactive Incident Drilldown & Root Cause Analysis \(live, ($demo_model)\)"
 show-desc "Executes a targeted, reactive incident drilldown under --agent sre: investigates degraded services, inspects diagnostic error logs and resource constraints, and synthesizes a human-readable Root Cause Analysis (RCA) report under --autonomy readonly (A0)."
 
-let d26_prompt = "Incident alert: a system or user service is degraded or failing on this host. Investigate the failure using host_service action='units', inspect the service's error logs using host_logs action='recent_errors', check host baseline and memory/CPU pressure, and synthesize a diagnostic Root Cause Analysis (RCA) report in markdown citing concrete evidence (PIDs, exit status, file paths) and remediation steps. Surface any generated artifacts as clickable markdown links with absolute file paths."
+let d26_prompt = "Incident alert: investigate failing or degraded services on this host. Inspect relevant error logs and system resource pressure, and synthesize a diagnostic Root Cause Analysis (RCA) report in markdown citing concrete evidence (PIDs, exit status, file paths) and remediation steps. Surface any generated artifacts as clickable markdown links with absolute file paths."
 let d26_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1908,7 +1924,7 @@ if (should-run-demo "27" $demo) {
 header $"Demo 27: Arbitrary Timeframe Telemetry & Decoupled Distillation \(live, ($demo_model)\)"
 show-desc "Performs an asynchronous 24-hour log anomaly analysis under --agent sre with dual-arm anomaly spotting (critical singletons vs volume surges) and transparent decoupled LLM distillation (%distill-telemetry%) under --autonomy readonly (A0)."
 
-let d27_prompt = "Perform an asynchronous 24-hour log telemetry analysis using host_logs with action='recent_errors' and since='24h'. Spot and distinguish critical singleton anomalies (kernel faults, OOM kills, segfaults) from high-frequency volume surges (daemon restart loops). Anchor your findings with host_env action='summary', and synthesize a concise incident report in markdown citing concrete evidence (timestamps, PIDs, error signatures). Surface generated artifacts as clickable markdown links."
+let d27_prompt = "Perform a log telemetry analysis over the past 24 hours on this host. Spot and distinguish critical singleton anomalies (kernel faults, OOM kills, segfaults) from high-frequency volume surges (daemon restart loops). Anchor your findings with host baseline telemetry, and synthesize a concise incident report in markdown citing concrete evidence (timestamps, PIDs, error signatures). Surface generated artifacts as clickable markdown links."
 let d27_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
