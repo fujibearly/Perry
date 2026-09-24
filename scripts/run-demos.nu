@@ -15,7 +15,7 @@
 # NOTE: Demos 1-11 exercise the live agent loop and require API access
 # (they invoke real LLM providers). Demo 12 (sub-agent crash isolation) and
 # Demo 16 (multi-process escalation and rollback journal) are deterministic
-# and offline — no provider needed. Demos 13-15, 17-21 (#6b-#6d safety lifecycle), 22-23 (skills), and 24 (autonomy ladder) are live
+# and offline — no provider needed. Demos 13-15, 17-21 (#6b-#6d safety lifecycle), 23 (skills taint), 24 (autonomy ladder), and 25-27 (telemetry & two-tier tooling) are live
 # but tightly scoped:
 #   13 — Protected Policy File `forbid`      → policy_forbidden
 #   14 — authority ceiling exceeded          → authority_exceeded
@@ -26,7 +26,7 @@
 #   19 — Authority Ceiling Fail-Closed       → safe ceiling blocks (even with reversibility)
 #   20 — Orchestrator Sub-Agent Authority Escalation → mutating sub-agent authority_exceeded -> mTLS Should Gate -> Continue
 #   21 — Sub-Agent Capability Block & Re-Delegation  → readonly sub-agent capability_denied -> unwind -> permission_blocked -> orchestrator re-delegates mutating
-#   22 — Progressive Disclosure Runbook (host_stamp) → in-thread read_skill execution
+#   22 — [DEPRECATED] Progressive Disclosure Runbook → superceded by Demo 25
 #   23 — Workspace Skill Discovery & Provenance Taint → untrusted_runbook in %assess-risk%
 #   24 — Autonomy Ladder presets             → readonly (Gate 1 block), reversible (Option B), consult (funnel)
 #
@@ -1502,55 +1502,14 @@ if ($d21_target | path exists) { rm -f $d21_target }
 }
 
 if (should-run-demo "22" $demo) {
-# ─── Demo 22: Progressive Disclosure Runbook (host_stamp — Builtin, Trusted) ───
+# ─── Demo 22: [DEPRECATED] Progressive Disclosure Runbook (host_stamp) ─────────
 
-header $"Demo 22: Progressive Disclosure Runbook \(host_stamp — Builtin, Trusted\) \(live, ($demo_model)\)"
-show-desc "Demonstrates SKILL.md progressive disclosure: prompt contains minimal catalog (~25 tokens), model calls read_skill in-thread to load procedural instructions on demand, and executes tools."
-
-let d22_target = ($nu.temp-dir | path join $"perry-host-stamp-($nu.pid).txt")
-if ($d22_target | path exists) { rm -f $d22_target }
-
-let d22_prompt = $"You MUST follow the 'host_stamp' skill procedure. Start by calling read_skill with name='host_stamp'. Write your final summary report to ($d22_target) and output it to the terminal. Do not answer without following the runbook."
-let d22_env = ($base_env | merge {
-    PERRY_AGENT_LOOP_SHOW_TRACE: "true"
-    PERRY_AGENT_LOOP_MAX_TURNS: "6"
-})
-let demo22_args = [--show-cost --autonomy destructive ...$dialog_flags -r "%functions:get_current_time,fs_cat,fs_write%" $d22_prompt]
-show-cmd $d22_env $demo22_args
-step-pause $should_pause
-
-let demo22 = (try {
-    do {
-        "" | with-env $d22_env { ^$perry_bin ...$demo22_args }
-    } | complete
-} catch { |err|
-    if ($d22_target | path exists) { rm -f $d22_target }
-    error make { msg: $"Demo 22 failed with error: ($err)" }
-})
-
-let trace22 = ($demo22.stderr | default "")
-let clean22 = (clean-trace $trace22)
-let combined22 = $"($demo22.stdout)($trace22)"
-
-let d22_read_called = ($trace22 | str contains "calling: read_skill") or ($clean22 | str contains "calling: read_skill") or ($combined22 | str contains "read_skill completed") or ($trace22 | str contains "read_skill completed")
-let d22_time_called = ($trace22 | str contains "get_current_time") or ($clean22 | str contains "get_current_time")
-let d22_cat_called = ($trace22 | str contains "fs_cat") or ($clean22 | str contains "fs_cat")
-let d22_write_called = ($trace22 | str contains "fs_write") or ($clean22 | str contains "fs_write")
-let d22_file_written = ($d22_target | path exists)
-let d22_file_content_ok = if $d22_file_written {
-    let content = (open $d22_target | default "")
-    ($content | str contains "HOST_STAMP_VERIFIED:") or ($content | str contains "TRIAGE_VERIFIED:")
-} else { false }
-let d22_terminal_content_ok = ($demo22.stdout | str contains "HOST_STAMP_VERIFIED:") or ($demo22.stdout | str contains "TRIAGE_VERIFIED:") or ($combined22 | str contains "HOST_STAMP_VERIFIED:") or ($combined22 | str contains "TRIAGE_VERIFIED:")
-
-report "read_skill tool called and executed in-thread" ($d22_read_called or $d22_file_written)
-report "Runbook sequence executed (time + cat + write)" (($d22_time_called and $d22_cat_called and $d22_write_called) or $d22_file_written)
-report "Host stamp summary report written to file with verified format" ($d22_file_written and $d22_file_content_ok)
-report "Host stamp summary report output to terminal" $d22_terminal_content_ok
-show-output $demo22.stdout
-show-cost ($demo22.stderr | default "")
-
-if ($d22_target | path exists) { rm -f $d22_target }
+header "Demo 22: [DEPRECATED] Progressive Disclosure Runbook (host_stamp)"
+print "  ℹ [DEPRECATED] Demo 22 is deprecated."
+print "    Autonomous progressive disclosure from minimal catalogues and dynamic Two-Tier"
+print "    JIT tool activation (Tier-1 primitives -> read_skill -> Tier-2 specialized tools)"
+print "    are comprehensively tested and asserted in Demo 25."
+print ""
 }
 
 if (should-run-demo "23" $demo) {
@@ -1819,7 +1778,7 @@ if (should-run-demo "25" $demo) {
 header $"Demo 25: Orchestrated 5-Pillar Host Telemetry Sweep \(live, ($demo_model)\)"
 show-desc "Demonstrates progressive disclosure: orchestrator delegates 5-pillar sweep to sre specialist (which executes sys_triage and returns structured JSON), then orchestrator loads box_panel_scorecard presentation skill to render a 5-column terminal dashboard."
 
-let d25_prompt = "Triage host health using the SRE specialist subagent, read the 'box_panel_scorecard' presentation skill, and render the compiled telemetry into a 5-column terminal scorecard in your final response."
+let d25_prompt = "Triage host health using the SRE specialist subagent, read the 'box_panel_scorecard' presentation skill, and render the compiled telemetry into a 5-column terminal scorecard in your final response. Surface any generated telemetry artifacts as clickable markdown links with absolute file paths."
 let d25_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1839,12 +1798,31 @@ let combined25 = $"($demo25.stdout)($trace25)"
 
 let d25_banner = ($trace25 | str contains "safety posture: readonly") or ($clean25 | str contains "safety posture: readonly")
 let d25_plan = ($trace25 | str contains "plan:") or ($clean25 | str contains "plan:") or ($trace25 | str contains "calling: _plan") or ($demo25.stdout | str contains -i "plan")
-let d25_sre_calls = if ($trace25 | str contains "calling: sre") {
-    ($trace25 | split row "\n" | where { $in | str contains "calling: sre" } | length)
-} else { 0 }
+
+mut d25_sre_calls = 0
+mut d25_sre_read_skill = false
+mut d25_tier2_tools_called = false
+mut d25_orch_read_skill = false
+
+for line in ($trace25 | lines) {
+    if ($line | str contains "calling: sre") {
+        $d25_sre_calls = $d25_sre_calls + 1
+    }
+    if ($line | str contains "[sre") or ($line | str contains "[child sre]") {
+        if ($line | str contains "read_skill") {
+            $d25_sre_read_skill = true
+        }
+        if ($line | str contains "host_") {
+            $d25_tier2_tools_called = true
+        }
+    } else if ($line | str contains "[orchestrator") and ($line | str contains "read_skill") {
+        $d25_orch_read_skill = true
+    }
+}
+
 let d25_sre_delegated = ($d25_sre_calls > 0) or ($trace25 | str contains "calling: sre") or ($combined25 | str contains "sre")
 let d25_sre_completed = ($trace25 | str contains "sre completed") or ($d25_sre_delegated)
-let d25_read_scorecard = ($trace25 | str contains "box_panel_scorecard") or ($clean25 | str contains "box_panel_scorecard") or ($trace25 | str contains "read_skill") or ($clean25 | str contains "read_skill")
+let d25_read_scorecard = $d25_orch_read_skill or ($trace25 | str contains "box_panel_scorecard") or ($clean25 | str contains "box_panel_scorecard") or ($trace25 | str contains "read_skill") or ($clean25 | str contains "read_skill")
 let d25_no_eval = not ($trace25 | str contains "assess-risk: evaluating")
 let d25_no_block = not ($trace25 | str contains "BLOCKED")
 let d25_has_summary = ($demo25.stdout | is-not-empty) and (($demo25.stdout | str length) > 100)
@@ -1853,6 +1831,8 @@ let d25_has_artifacts = (($demo25.stdout | str contains "](") or ($combined25 | 
 report "ReadOnly posture banner emitted at startup" $d25_banner
 report "Upfront strategy formulated (_plan)" $d25_plan
 report "Delegated to SRE specialist subagent (calling: sre)" $d25_sre_delegated
+report "SRE autonomously discovered and read skill (sys_triage)" $d25_sre_read_skill
+report "Two-tier JIT activation executed Tier-2 tools (host_*)" $d25_tier2_tools_called
 report "Holistic SRE triage sweep completed" $d25_sre_completed $"calls=($d25_sre_calls)"
 report "Presentation skill loaded (box_panel_scorecard)" $d25_read_scorecard
 report "Zero risk evaluator overhead ($0 safety tokens spent)" $d25_no_eval

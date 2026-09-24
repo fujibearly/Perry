@@ -354,8 +354,8 @@ Rather than polluting the system prompt with entire playbooks and procedure guid
 4. **Provenance Taint Tracking**: Runbooks loaded from the workspace are marked `WorkspaceTainted`. Loading an untrusted workspace runbook activates `untrusted_runbook: true` on the active plan step, feeding heightened scrutiny into `%assess-risk%` before mutating operations execute.
 
 ```bash
-# Exercise builtin trusted triage skill (Demo 22):
-nu scripts/run-demos.nu --demo 22
+# Exercise progressive disclosure & two-tier JIT tool activation (Demo 25):
+nu scripts/run-demos.nu --demo 25
 
 # Exercise workspace skill discovery and provenance taint tracking (Demo 23):
 nu scripts/run-demos.nu --demo 23
