@@ -1875,7 +1875,7 @@ if (should-run-demo "26" $demo) {
 header $"Demo 26: Reactive Incident Drilldown & Root Cause Analysis \(live, ($demo_model)\)"
 show-desc "Executes a targeted, reactive incident drilldown under --agent sre: investigates degraded services, inspects diagnostic error logs and resource constraints, and synthesizes a human-readable Root Cause Analysis (RCA) report under --autonomy readonly (A0)."
 
-let d26_prompt = "Incident alert: a system or user service is degraded or failing on this host. Investigate the failure using host_service action='units', inspect the service's error logs using host_logs action='recent_errors', check host baseline and memory/CPU pressure, and synthesize a diagnostic Root Cause Analysis (RCA) report in markdown citing concrete evidence (PIDs, exit status, file paths) and remediation steps. Surface any generated artifacts as clickable markdown links with absolute file paths (without file:// prefix)."
+let d26_prompt = "Incident alert: a system or user service is degraded or failing on this host. Investigate the failure using host_service action='units', inspect the service's error logs using host_logs action='recent_errors', check host baseline and memory/CPU pressure, and synthesize a diagnostic Root Cause Analysis (RCA) report in markdown citing concrete evidence (PIDs, exit status, file paths) and remediation steps. Surface any generated artifacts as clickable markdown links with absolute file paths."
 let d26_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
@@ -1927,7 +1927,7 @@ if (should-run-demo "27" $demo) {
 header $"Demo 27: Arbitrary Timeframe Telemetry & Decoupled Distillation \(live, ($demo_model)\)"
 show-desc "Performs an asynchronous 24-hour log anomaly analysis under --agent sre with dual-arm anomaly spotting (critical singletons vs volume surges) and transparent decoupled LLM distillation (%distill-telemetry%) under --autonomy readonly (A0)."
 
-let d27_prompt = "Perform an asynchronous 24-hour log telemetry analysis using host_logs with action='recent_errors' and since='24h'. Spot and distinguish critical singleton anomalies (kernel faults, OOM kills, segfaults) from high-frequency volume surges (daemon restart loops). Anchor your findings with host_env action='summary', and synthesize a concise incident report in markdown citing concrete evidence (timestamps, PIDs, error signatures). Surface generated artifacts as clickable markdown links [name](/path) without the file:// prefix."
+let d27_prompt = "Perform an asynchronous 24-hour log telemetry analysis using host_logs with action='recent_errors' and since='24h'. Spot and distinguish critical singleton anomalies (kernel faults, OOM kills, segfaults) from high-frequency volume surges (daemon restart loops). Anchor your findings with host_env action='summary', and synthesize a concise incident report in markdown citing concrete evidence (timestamps, PIDs, error signatures). Surface generated artifacts as clickable markdown links."
 let d27_env = ($base_env | merge {
     PERRY_AGENT_LOOP_SHOW_TRACE: "true"
     PERRY_DIALOG_OUTPUT: "both"
